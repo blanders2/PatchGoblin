@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="patchgoblin-token" content="{{ csrf }}">
+  <title>PatchGoblin · Project queue</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="/" aria-label="PatchGoblin home"><span class="brand-icon">{p}</span>PatchGoblin</a>
+  <div class="side-heading"><span>PROJECTS</span><button id="add-project-icon" class="icon-button" aria-label="Add project">+</button></div>
+  <nav id="projects" aria-label="Projects"></nav>
+  <button id="add-project" class="add-project">+ Connect a project</button>
+  <div class="sidebar-bottom"><span class="tiny-label">YOUR WORKSPACE</span><p>Local files. Remote hosts.<br>One orderly queue.</p><span class="local-badge">↳ Running on localhost</span></div>
+</aside>
+<main>
+  <header class="topbar"><div><span class="eyebrow">WORKSPACE /</span> <span id="breadcrumb">Projects</span></div><button id="pause" class="subtle">Pause queue</button></header>
+  <div id="notice" role="status" aria-live="polite" hidden></div>
+  <section id="welcome" class="welcome" hidden><div class="welcome-mark">{p}</div><span class="eyebrow">A HOME FOR YOUR NEXT CHANGE</span><h1>Give the goblin a project.</h1><p>Capture a task, shape a plan, and queue the work.<br>Your tasks stay in a JSON file alongside your project.</p><button id="welcome-add" class="primary">+ Connect your first project</button><div class="welcome-flow"><span>01 &nbsp; Capture</span><span>02 &nbsp; Plan</span><span>03 &nbsp; Build</span></div></section>
+  <section id="workspace" hidden>
+    <div class="project-header"><div><div class="eyebrow" id="host-label">LOCAL PROJECT</div><h1 id="project-name"></h1><p id="project-path" class="mono"></p></div><div class="header-actions"><button id="settings" class="subtle">Settings</button><button id="new-task" class="primary">+ New task</button></div></div>
+    <div class="project-tools"><span id="branch" class="chip"></span><span id="provider" class="chip"></span><span id="provider-health"></span><button id="checkpoint" class="text-button">Create Git checkpoint</button></div>
+    <div class="queue-strip"><div><span class="queue-icon">≡</span><strong id="queue-status">Queue ready</strong><span id="queue-description">Tasks run one at a time.</span></div><span id="task-count"></span></div>
+    <div id="board" class="board" aria-label="Task board"></div>
+    <footer><span>.patchgoblin/tasks.json</span><span id="sync-status">Loading project…</span></footer>
+  </section>
+</main>
+<dialog id="project-dialog"><form id="project-form"><div class="dialog-heading"><h2 id="project-dialog-title">Connect a project</h2><button type="button" class="icon-button close" aria-label="Close">×</button></div><p class="muted" id="project-help">Use an existing directory or create a new one. Git is initialized when needed.</p><label>Project name<input name="name" required maxlength="100" placeholder="My next great thing"></label><div id="connection-fields"><label>Project location<select name="kind"><option value="local">This computer</option><option value="ssh">Remote host over SSH</option></select></label><div id="ssh-fields" hidden><div class="form-row"><label>SSH host<input name="host" placeholder="user@host or SSH alias"></label><label class="port">Port<input name="port" type="number" value="22" min="1" max="65535"></label></div><label>Remote Python executable<input name="python" value="python3"></label><p class="muted">Use a Linux or macOS host with Python 3.10+, Git, and key-based SSH access. Add its verified host key to known_hosts first.</p></div><label>Absolute project directory<input name="path" required placeholder="G:\Projects\my-project"></label></div><div class="form-row"><label>AI provider<select name="provider"><option value="codex">Codex CLI</option><option value="claude">Claude Code CLI</option><option value="openai">OpenAI API</option></select></label><label>Model ID<input name="model" placeholder="Provider default"></label></div><p class="muted" id="provider-help">The CLI must be installed and signed in on the project host.</p><label class="checkbox"><input name="allow_commands" type="checkbox"><span>Allow Claude / API agents to run commands when building</span></label><p class="muted small">Commands run with your host account's permissions. Codex uses its own workspace sandbox. API credentials come from OPENAI_API_KEY on the project host.</p><p class="form-error" role="alert"></p><div class="dialog-actions"><button type="button" class="subtle close">Cancel</button><button type="submit" class="primary">Save project</button></div></form></dialog>
+<dialog id="task-dialog" class="task-dialog"><form id="task-form"><div class="dialog-heading"><h2 id="task-dialog-title">New task</h2><button type="button" class="icon-button close" aria-label="Close">×</button></div><label>Task title<input name="title" required maxlength="200" placeholder="What should change?"></label><label>Description<textarea name="description" rows="5" placeholder="Describe the outcome, constraints, and what success looks like."></textarea></label><label id="plan-field" hidden>Plan<textarea name="plan" rows="9" placeholder="Write a plan, or ask AI to draft one."></textarea></label><p class="form-error" role="alert"></p><div class="dialog-actions"><button type="button" class="subtle close">Cancel</button><button type="submit" class="primary">Save task</button></div></form></dialog>
+<dialog id="detail-dialog" class="detail-dialog"><div class="dialog-heading"><span id="detail-status" class="eyebrow"></span><button class="icon-button close" aria-label="Close">×</button></div><h2 id="detail-title"></h2><p id="detail-error" class="form-error" role="alert"></p><div id="detail-actions" class="detail-actions"></div><section class="discussion"><h3>Work on the plan</h3><p id="discussion-status" class="muted"></p><div id="conversation" class="conversation" aria-live="polite"></div><form id="discuss-form"><label for="discussion-message">Feedback or question</label><textarea id="discussion-message" rows="3" required maxlength="20000" placeholder="What needs fixing? Discuss the approach before running it again."></textarea><p class="form-error" role="alert"></p><div class="dialog-actions"><button type="submit" class="primary">Send to AI planner</button></div></form></section><div id="detail-content"></div></dialog>
+<dialog id="checkpoint-dialog"><div class="dialog-heading"><h2>Create a Git checkpoint</h2><button class="icon-button close" aria-label="Close">×</button></div><p>Commit all current project changes, including new files that Git does not ignore. Review the file list before continuing.</p><pre id="git-changes"></pre><p class="form-error" role="alert"></p><div class="dialog-actions"><button class="subtle close">Cancel</button><button id="confirm-checkpoint" class="primary">Commit changes</button></div></dialog>
+</body>
+</html>
