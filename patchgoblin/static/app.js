@@ -513,6 +513,11 @@ function closeDrawer() {
   return true;
 }
 
+// A press counts as "outside" a panel unless it lands in it, in an open dialog, or on the toast.
+function isOutside(panel, target) {
+  return target.isConnected && !panel.contains(target) && !target.closest("dialog[open], #toast");
+}
+
 function actionButton(label, fn, cls = "", title = undefined) {
   return el("button", { type: "button", class: cls, onclick: fn, title }, label);
 }
@@ -1228,6 +1233,23 @@ function init() {
     if (id === "drawer") closeDrawer();
     else if (id === "chat") closeChat();
     else $("#" + id).close();
+  });
+  // Outside presses close the drawer/chat. pointerdown, not click: a card's click re-renders the board.
+  document.addEventListener("pointerdown", e => {
+    if (e.button !== 0 || !(e.target instanceof Element) || document.querySelector("dialog[open]")) return;
+    const drawer = $("#drawer"), chatPanel = $("#chat");
+    if (!drawer.hidden && isOutside(drawer, e.target)
+        && !e.target.closest(".card[data-tid], #chat-btn") && !closeDrawer()) {
+      // Cancelled the discard confirm: swallow the click that follows so the press does nothing else.
+      e.preventDefault();
+      e.stopPropagation();
+      const swallow = ev => { ev.preventDefault(); ev.stopPropagation(); };
+      document.addEventListener("click", swallow, { capture: true, once: true });
+      document.addEventListener("pointerdown", () => document.removeEventListener("click", swallow, true),
+        { capture: true, once: true });
+      return;
+    }
+    if (!chatPanel.hidden && isOutside(chatPanel, e.target) && !e.target.closest("#chat-btn")) closeChat();
   });
   document.addEventListener("keydown", e => {
     if (e.key === "Escape" && $("#drawer").hidden && $("#chat").hidden && state.selected.size
