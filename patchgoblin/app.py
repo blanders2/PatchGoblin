@@ -10,6 +10,7 @@ from flask import Flask, abort, jsonify, render_template, request
 from . import gitops
 from .engine import Engine
 from .hosts import HostError, host_for, open_terminal
+from .providers import plan_questions
 from .store import (MODELS, PROVIDERS, STATUSES, Registry, Settings, TaskStore, empty_doc, find_task,
                     log_event, new_task, now, set_status, tasks_path)
 
@@ -59,7 +60,18 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
 
     def task_view(pid: str, task: dict) -> dict:
         job = engine.job(pid, task["id"])
-        return {**task, "active": job is not None}
+        return {**task, "active": job is not None, "questions": plan_questions(task.get("plan", ""))}
+
+    def plan_answers(value) -> list[dict] | None:
+        if value is None:
+            return None
+        if not isinstance(value, list) or not all(
+                isinstance(a, dict) and isinstance(a.get("question", ""), str)
+                and isinstance(a.get("answer", ""), str) for a in value):
+            raise ValueError("answers must be a list of {question, answer} strings.")
+        answers = [{"question": a.get("question", ""), "answer": a.get("answer", "")}
+                   for a in value if a.get("answer", "").strip()]
+        return answers or None
 
     # ---- pages --------------------------------------------------------------
     @app.get("/")
@@ -269,7 +281,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         data = body()
         action = data.get("action")
         if action == "plan":
-            engine.start_planning(project, tid, data.get("feedback") or "")
+            engine.start_planning(project, tid, data.get("feedback") or "", plan_answers(data.get("answers")))
         elif action == "cancel":
             if not engine.cancel(pid, tid):
                 raise ValueError("No AI job is running for this task.")

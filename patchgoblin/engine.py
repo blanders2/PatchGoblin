@@ -140,7 +140,8 @@ class Engine:
         threading.Thread(target=work, name="pg-startup", daemon=True).start()
 
     # ---- planning --------------------------------------------------------
-    def start_planning(self, project: dict, tid: int, feedback: str = "") -> None:
+    def start_planning(self, project: dict, tid: int, feedback: str = "",
+                       answers: list[dict] | None = None) -> None:
         pid = project["id"]
         job = Job("plan")
         try:
@@ -157,20 +158,23 @@ class Engine:
                 self.jobs[(pid, tid)] = job
                 task["prev_status"] = task["status"]
                 task["error"] = ""
-                set_status(task, "planning", "AI planning started" + (" with feedback" if feedback else ""))
+                extras = [name for name, given in (("answers", answers), ("feedback", feedback.strip()))
+                          if given]
+                set_status(task, "planning",
+                           "AI planning started" + (" with " + "/".join(extras) if extras else ""))
                 snapshot = dict(task)
         except BaseException:
             if self.jobs.get((pid, tid)) is job:
                 del self.jobs[(pid, tid)]
             raise
-        threading.Thread(target=self._plan, args=(project, snapshot, feedback, job),
+        threading.Thread(target=self._plan, args=(project, snapshot, feedback, answers, job),
                          name=f"pg-plan-{pid}-{tid}", daemon=True).start()
 
-    def _plan(self, project, task, feedback, job) -> None:
+    def _plan(self, project, task, feedback, answers, job) -> None:
         pid, tid = project["id"], task["id"]
         try:
             try:
-                outcome = self._ai(project, task, "plan", plan_prompt(task, feedback), job)
+                outcome = self._ai(project, task, "plan", plan_prompt(task, feedback, answers), job)
             except Cancelled:
                 outcome = Outcome(False, error="Planning cancelled.")
             with self.store.edit(project) as doc:

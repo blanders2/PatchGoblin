@@ -79,6 +79,7 @@
   <div class="drawer-head">
     <span class="muted" id="d-id"></span>
     <span class="badge" id="d-status"></span>
+    <span class="drawer-head-actions" id="d-danger-actions"></span>
     <button class="ghost close" data-close="drawer" aria-label="Close">✕</button>
   </div>
   <div class="drawer-body">
@@ -90,13 +91,24 @@
         {% for p in providers %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
       </select>
     </label>
-    <label>Plan<textarea id="d-plan" rows="12" class="mono" placeholder="Write a plan, or ask the AI to draft one."></textarea></label>
+    <section id="d-questions" class="questions" hidden aria-labelledby="d-questions-title">
+      <h4 id="d-questions-title">The AI has questions for you</h4>
+      <p class="muted small">Answer the ones you can, then let the AI revise the plan. Blank answers are skipped.</p>
+      <ol id="d-question-list" class="question-list"></ol>
+      <div class="actions"><button type="button" class="primary" id="d-answer-btn">Answer &amp; refine plan</button></div>
+    </section>
+    <label>Plan<textarea id="d-plan" rows="10" class="mono" placeholder="Write a plan, or ask the AI to draft one."></textarea></label>
+    <div class="actions edit-actions" id="d-edit-actions" hidden>
+      <span class="dirty-hint">Unsaved changes</span>
+      <button type="button" id="d-save-btn" title="Save your edits (Ctrl+S)">Save changes</button>
+      <button type="button" class="ghost" id="d-discard-btn">Discard</button>
+    </div>
     <div id="d-error" class="error" hidden></div>
     <div id="d-feedback-wrap">
-      <label>Feedback for AI planning <span class="muted">(optional)</span>
+      <label>Other feedback for the AI <span class="muted">(optional)</span>
         <textarea id="d-feedback" rows="2" placeholder="e.g. Use the existing API client instead of adding a new one."></textarea></label>
     </div>
-    <div class="actions" id="d-actions"></div>
+    <div class="actions flow-actions" id="d-flow-actions"></div>
     <div id="d-commit" class="muted" hidden></div>
     <details id="d-live-wrap" open hidden>
       <summary>Live output <span class="muted" id="d-elapsed"></span></summary>

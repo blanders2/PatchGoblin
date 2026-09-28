@@ -172,6 +172,28 @@ class WorkflowTests(AppTestCase):
         # A failed task can be re-queued or sent back to planned.
         self.assertEqual(self.action(pid, tid, "mark_planned").get_json()["status"], "planned")
 
+    def test_plan_questions_and_answers(self):
+        pid = self.add_project()["id"]
+        tid = self.post_task(pid, "ASK me things")["id"]
+        self.assertEqual(self.action(pid, tid, "plan").status_code, 200)
+        task = self.wait_for(pid, tid, {"planned"})
+        self.assertEqual(task["questions"], ["Which colour should the output be?", "Should it log?"])
+
+        bad = self.action(pid, tid, "plan", answers="blue")
+        self.assertEqual(bad.status_code, 400)
+        bad = self.action(pid, tid, "plan", answers=[{"question": "q", "answer": 3}])
+        self.assertEqual(bad.status_code, 400)
+
+        answers = [{"question": task["questions"][0], "answer": "blue"},
+                   {"question": task["questions"][1], "answer": "  "}]
+        res = self.action(pid, tid, "plan", answers=answers)
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertIn("with answers", res.get_json()["history"][-1]["event"])
+        task = self.wait_for(pid, tid, {"planned"})
+        self.assertIn("A: blue", task["plan"])
+        self.assertNotIn("Should it log", task["plan"])
+        self.assertEqual(task["questions"], [])
+
     def test_queue_and_dequeue(self):
         pid = self.add_project()["id"]
         engine = self.app.config["ENGINE"]
@@ -235,6 +257,32 @@ class ChatTests(AppTestCase):
         self.assertNotIn("old old", prompt)
         self.assertLess(prompt.index("an answer"), prompt.index("latest question"))
         self.assertIn("DO NOT create, modify or delete", prompt)
+
+
+class PlanPromptTests(unittest.TestCase):
+    def test_plan_questions_parsing(self):
+        from patchgoblin.providers import plan_questions
+        plan = ("Summary.\n\n## Steps\n1. Do a thing\n\n## Questions for you\n"
+                "1. Should we keep the old API\n   for existing callers?\n2) Which DB?\n- Bullet one\n\n"
+                "Trailing prose.\n## Other\n1. not a question")
+        self.assertEqual(plan_questions(plan), [
+            "Should we keep the old API for existing callers?", "Which DB?", "Bullet one"])
+        self.assertEqual(plan_questions("### Open questions or risks\n- Is X ok?"), ["Is X ok?"])
+        self.assertEqual(plan_questions("## Questions for you\nNone."), [])
+        self.assertEqual(plan_questions("## Questions for you\n1. None"), [])
+        self.assertEqual(plan_questions("1. Step\n2. Step"), [])
+        self.assertEqual(plan_questions(""), [])
+
+    def test_plan_prompt_with_answers(self):
+        from patchgoblin.providers import plan_prompt
+        task = {"id": 1, "title": "T", "description": "", "plan": "old plan"}
+        prompt = plan_prompt(task, "use tabs", [{"question": "Colour?", "answer": "blue"},
+                                                {"question": "Log?", "answer": " "}])
+        self.assertIn("## Answers to your questions\nQ: Colour?\nA: blue", prompt)
+        self.assertNotIn("Log?", prompt)
+        self.assertIn("use tabs", prompt)
+        self.assertIn("## Questions for you", prompt)
+        self.assertNotIn("## Answers", plan_prompt(task))
 
 
 class HostTests(unittest.TestCase):

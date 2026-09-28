@@ -22,6 +22,7 @@ const state = {
   tasks: [],
   openTid: null,
   formStamp: null, // server values of the editable fields when the drawer form was filled
+  questionStamp: null, // questions shown in the drawer, so polling doesn't wipe typed answers
   dirty: false,
 };
 
@@ -238,6 +239,10 @@ function onTabKeydown(e) {
   selectTab(next, true);
 }
 
+// Statuses in which the plan can still be refined, so its questions still matter.
+const PLANNABLE = new Set(["unplanned", "planned", "failed"]);
+const hasOpenQuestions = t => PLANNABLE.has(t.status) && (t.questions || []).length > 0;
+
 function renderCard(t) {
   const p = currentProject();
   return el("div", {
@@ -252,6 +257,8 @@ function renderCard(t) {
   el("div", { class: "card-title" }, t.title),
   el("div", { class: "card-meta" },
     t.provider && t.provider !== p.provider ? el("span", { class: "chip" }, t.provider) : null,
+    hasOpenQuestions(t) ? el("span", { class: "chip question", title: t.questions.join("\n") },
+      `? ${t.questions.length} question${t.questions.length === 1 ? "" : "s"}`) : null,
     t.error && t.status !== "failed" ? el("span", { class: "chip warn", title: t.error }, "last attempt failed") : null,
     t.commit ? el("span", { class: "chip mono" }, t.commit.slice(0, 7)) : null,
     el("span", { class: "muted" }, relTime(t.updated_at))));
@@ -279,6 +286,7 @@ function openDrawer(tid) {
   closeChat();
   state.openTid = tid;
   state.dirty = false;
+  state.questionStamp = null;
   $("#d-feedback").value = "";
   $("#drawer").hidden = false;
   renderDrawer(true);
@@ -294,8 +302,36 @@ function closeDrawer() {
   return true;
 }
 
-function actionButton(label, fn, cls = "") {
-  return el("button", { class: cls, onclick: fn }, label);
+function actionButton(label, fn, cls = "", title = undefined) {
+  return el("button", { type: "button", class: cls, onclick: fn, title }, label);
+}
+
+// Save/Discard only exist while there are unsaved edits, next to the fields they save.
+function renderEditActions() {
+  const t = openTask();
+  const locked = !t || BUSY.has(t.status);
+  $("#d-edit-actions").hidden = !state.dirty || locked;
+}
+
+function renderQuestions(t, canPlan) {
+  const questions = t.questions || [];
+  $("#d-questions").hidden = !canPlan || !questions.length;
+  const stamp = JSON.stringify([t.id, questions]);
+  if (stamp === state.questionStamp) return;
+  state.questionStamp = stamp;
+  $("#d-question-list").replaceChildren(...questions.map((q, i) => el("li", {},
+    el("label", { for: `d-q-${i}`, class: "question-text" }, q),
+    el("textarea", { id: `d-q-${i}`, rows: "1", "data-q": String(i), placeholder: "Your answer…" }))));
+}
+
+async function answerQuestions() {
+  const t = openTask();
+  if (!t) return;
+  const answers = $$("#d-question-list textarea").map(box => ({
+    question: t.questions[Number(box.dataset.q)] || "", answer: box.value.trim(),
+  })).filter(a => a.answer);
+  if (!answers.length) { toast("Type an answer to at least one question first.", true); return; }
+  await doAction("plan", { answers });
 }
 
 function renderDrawer(fillForm) {
@@ -321,24 +357,31 @@ function renderDrawer(fillForm) {
 
   showError($("#d-error"), t.error);
 
-  const canPlan = ["unplanned", "planned", "failed"].includes(t.status);
+  const canPlan = PLANNABLE.has(t.status);
   $("#d-feedback-wrap").hidden = !canPlan;
+  renderQuestions(t, canPlan);
+  renderEditActions();
   const hasPlan = (t.plan || "").trim().length > 0;
+  // With open questions, answering them is the main way forward; plain refining is secondary.
+  const asking = hasOpenQuestions(t);
   const planLabel = hasPlan ? "Refine plan with AI" : "Plan with AI";
+  const planTip = "The AI drafts a new plan (read-only), using any feedback below. Unsaved edits are saved first.";
+  const queueTip = "The AI will implement this plan and commit the result. Unsaved edits are saved first.";
+  const skipTip = "Accept the plan as written without asking the AI";
 
   const A = [];
-  const act = (action, extra) => () => doAction(action, extra);
+  const act = action => () => doAction(action);
   switch (t.status) {
     case "unplanned":
-      A.push(actionButton(planLabel, act("plan"), "primary"));
-      A.push(actionButton("Mark planned", act("mark_planned")));
+      A.push(actionButton(planLabel, act("plan"), asking ? "ghost" : "primary", planTip));
+      A.push(actionButton("Mark planned (skip AI)", act("mark_planned"), "ghost", skipTip));
       break;
     case "planning":
       A.push(actionButton("Cancel planning", act("cancel"), "danger"));
       break;
     case "planned":
-      A.push(actionButton("Queue for AI", act("queue"), "primary"));
-      A.push(actionButton(planLabel, act("plan")));
+      A.push(actionButton("Queue to run", act("queue"), asking ? "" : "primary", queueTip));
+      A.push(actionButton(planLabel, act("plan"), "ghost", planTip));
       A.push(actionButton("Back to unplanned", act("unplan"), "ghost"));
       break;
     case "queued":
@@ -351,16 +394,14 @@ function renderDrawer(fillForm) {
       A.push(actionButton("Reopen", act("reopen")));
       break;
     case "failed":
-      A.push(actionButton("Queue again", act("queue"), "primary"));
-      A.push(actionButton(planLabel, act("plan")));
-      A.push(actionButton("Mark planned", act("mark_planned"), "ghost"));
+      A.push(actionButton("Queue to run again", act("queue"), asking ? "" : "primary", queueTip));
+      A.push(actionButton(planLabel, act("plan"), "ghost", planTip));
+      A.push(actionButton("Mark planned (skip AI)", act("mark_planned"), "ghost", skipTip));
       break;
   }
-  if (!locked) {
-    A.push(actionButton("Save", saveTask, "ghost"));
-    A.push(actionButton("Delete", deleteTask, "ghost danger"));
-  }
-  $("#d-actions").replaceChildren(...A);
+  $("#d-flow-actions").replaceChildren(...A);
+  $("#d-danger-actions").replaceChildren(...(locked ? []
+    : [actionButton("Delete task", deleteTask, "ghost danger small", "Delete this task permanently")]));
 
   const commit = $("#d-commit");
   commit.hidden = !t.commit;
@@ -403,16 +444,23 @@ async function saveTask(quiet) {
   }
 }
 
-async function doAction(action) {
+async function doAction(action, extra = {}) {
   const t = openTask();
   if (!t) return;
+  if (action === "queue" && hasOpenQuestions(t)) {
+    const n = t.questions.length;
+    if (!confirm(`The plan still has ${n} unanswered question${n === 1 ? "" : "s"}. Queue anyway?`)) return;
+  }
   if (state.dirty && action !== "cancel" && !(await saveTask(true))) return;
-  const body = { action };
+  const body = { action, ...extra };
   if (action === "plan") body.feedback = $("#d-feedback").value;
   try {
     const updated = await api("POST", `/api/projects/${state.pid}/tasks/${t.id}/action`, body);
     Object.assign(t, updated);
-    if (action === "plan") $("#d-feedback").value = "";
+    if (action === "plan") {
+      $("#d-feedback").value = "";
+      for (const box of $$("#d-question-list textarea")) box.value = "";
+    }
     state.formStamp = null;
     renderBoard();
     renderDrawer(false);
@@ -764,8 +812,15 @@ function init() {
     } catch (e) { toast(e.message, true); }
   };
   for (const id of ["#d-title", "#d-desc", "#d-provider", "#d-plan"]) {
-    $(id).addEventListener("input", () => { state.dirty = true; });
+    $(id).addEventListener("input", () => { state.dirty = true; renderEditActions(); });
   }
+  $("#d-save-btn").onclick = saveTask;
+  $("#d-discard-btn").onclick = () => {
+    if (!confirm("Discard your unsaved changes to this task?")) return;
+    state.dirty = false;
+    renderDrawer(true);
+  };
+  $("#d-answer-btn").onclick = answerQuestions;
   document.addEventListener("click", e => {
     const target = e.target.closest("[data-close]");
     if (!target) return;

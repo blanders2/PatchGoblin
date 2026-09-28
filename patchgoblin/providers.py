@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import posixpath
+import re
 import shlex
 import urllib.error
 import urllib.request
@@ -25,7 +26,9 @@ Reply with ONLY the implementation plan, in Markdown:
 - a one-paragraph summary of the approach
 - numbered, concrete steps naming the files/functions to change
 - how to verify the change (tests or checks to run)
-- any open questions or risks
+- a "## Risks" section: things the implementer should watch for
+- a "## Questions for you" section: a numbered list of decisions only the user can make,
+  one line each. If there are none, write "None."
 """
 
 RUN_INSTRUCTIONS = """\
@@ -58,12 +61,45 @@ def chat_prompt(messages: list[dict]) -> str:
     return CHAT_INSTRUCTIONS + "\n# Conversation\n\n" + "\n\n".join(turns) + "\n"
 
 
-def plan_prompt(task: dict, feedback: str = "") -> str:
+_QUESTIONS_HEADING = re.compile(r"^#{1,6}\s*(open\s+)?questions\b", re.IGNORECASE)
+_HEADING = re.compile(r"^#{1,6}\s")
+_ITEM = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+(.*)$")
+_NONE = re.compile(r"^\W*(none|n/?a|no( open)? questions)\W*$", re.IGNORECASE)
+
+
+def plan_questions(plan: str) -> list[str]:
+    """The items of the plan's "Questions for you" (or "Open questions") section."""
+    items: list[str] = []
+    inside = False
+    for line in (plan or "").splitlines():
+        stripped = line.strip()
+        if _HEADING.match(stripped):
+            if inside:
+                break
+            inside = bool(_QUESTIONS_HEADING.match(stripped))
+            continue
+        if not inside or not stripped:
+            continue
+        item = _ITEM.match(line)
+        if item:
+            items.append(item.group(1).strip())
+        elif items and line[:1].isspace():
+            items[-1] += " " + stripped  # wrapped continuation of the previous item
+    return [q for q in items if q and not _NONE.match(q)]
+
+
+def plan_prompt(task: dict, feedback: str = "", answers: list[dict] | None = None) -> str:
     parts = [PLAN_INSTRUCTIONS, f"# Task #{task['id']}: {task['title']}"]
     if task.get("description", "").strip():
         parts.append(f"## Description\n{task['description'].strip()}")
     if task.get("plan", "").strip():
         parts.append(f"## Current draft plan\n{task['plan'].strip()}")
+    answered = [a for a in answers or [] if a.get("answer", "").strip()]
+    if answered:
+        qa = "\n\n".join(f"Q: {a.get('question', '').strip()}\nA: {a['answer'].strip()}" for a in answered)
+        parts.append(f"## Answers to your questions\n{qa}\n\n"
+                     "Fold these answers into a complete revised plan. Under \"Questions for you\", "
+                     "repeat only questions that are still open.")
     if feedback.strip():
         parts.append(f"## Feedback on the plan from the user\n{feedback.strip()}\n\n"
                      "Produce a revised, complete plan that addresses this feedback.")

@@ -11,6 +11,11 @@ if "FAIL" in prompt:
 
 if mode == "plan":
     print("1. Step one: create agent_output.txt\n2. Verify it exists")
+    if "## Answers to your questions" in prompt:
+        print("\nAnswers received: " + prompt.split("## Answers to your questions", 1)[1].split("\n\n")[0].strip())
+        print("\n## Questions for you\nNone.")
+    elif "ASK" in prompt:
+        print("\n## Questions for you\n1. Which colour should the output be?\n2. Should it log?")
 else:
     with open("agent_output.txt", "w", encoding="utf-8") as fh:
         fh.write("written by fake agent\n")
