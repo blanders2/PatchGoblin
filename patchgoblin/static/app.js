@@ -3,15 +3,6 @@
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-const state = {
-  projects: [],
-  pid: localStorageGet("pg.pid"),
-  tasks: [],
-  openTid: null,
-  formStamp: null, // server values of the editable fields when the drawer form was filled
-  dirty: false,
-};
-
 const STATUS_LABEL = {
   unplanned: "Unplanned", planning: "Planning…", planned: "Planned", queued: "Queued",
   running: "Running…", done: "Done", failed: "Failed",
@@ -20,7 +11,21 @@ const COLUMN_OF = {
   unplanned: "unplanned", planning: "unplanned", planned: "planned",
   queued: "queue", running: "queue", done: "finished", failed: "finished",
 };
+// Not locked by the AI and not finished; mirrors LOCKED in app.py.
+const ACTIONABLE = new Set(["unplanned", "planned", "queued", "failed"]);
+const BUSY = new Set(["planning", "running"]);
 
+const state = {
+  projects: [],
+  pid: localStorageGet("pg.pid"),
+  tab: validTab(localStorageGet("pg.tab")),
+  tasks: [],
+  openTid: null,
+  formStamp: null, // server values of the editable fields when the drawer form was filled
+  dirty: false,
+};
+
+function validTab(col) { return Object.values(COLUMN_OF).includes(col) ? col : "unplanned"; }
 function localStorageGet(key) { try { return localStorage.getItem(key); } catch { return null; } }
 function localStorageSet(key, value) { try { localStorage.setItem(key, value); } catch { /* ignore */ } }
 
@@ -158,9 +163,47 @@ function renderBoard() {
   for (const column of $$(".column")) {
     const col = column.dataset.col;
     const tasks = sortTasks(col, state.tasks.filter(t => COLUMN_OF[t.status] === col));
-    $(".count", column).textContent = tasks.length || "";
-    $(".cards", column).replaceChildren(...tasks.map(renderCard));
+    const active = col === state.tab;
+    $(".cards", column).replaceChildren(...(tasks.length ? tasks.map(renderCard)
+      : [el("div", { class: "muted empty-col" }, "No tasks here")]));
+    column.hidden = !active;
+
+    // The badge counts only tasks the user can act on; the tooltip gives the full breakdown.
+    const tab = $(`.queue-tab[data-col="${col}"]`);
+    const actionable = tasks.filter(t => ACTIONABLE.has(t.status)).length;
+    const byStatus = {};
+    for (const t of tasks) byStatus[t.status] = (byStatus[t.status] || 0) + 1;
+    const parts = [`${actionable} actionable`, ...Object.entries(byStatus)
+      .filter(([s]) => !ACTIONABLE.has(s))
+      .map(([s, n]) => `${n} ${STATUS_LABEL[s].replace("…", "").toLowerCase()}`)];
+    const summary = `${tab.dataset.label}: ${parts.join(", ")} (${tasks.length} total)`;
+    const count = $(".count", tab);
+    count.textContent = actionable || "";
+    count.classList.toggle("empty", !actionable);
+    $(".activity", tab).hidden = !tasks.some(t => BUSY.has(t.status));
+    tab.title = summary;
+    tab.setAttribute("aria-label", summary);
+    tab.setAttribute("aria-selected", String(active));
+    tab.classList.toggle("active", active);
+    tab.tabIndex = active ? 0 : -1;
   }
+}
+
+function selectTab(col, focus = false) {
+  state.tab = validTab(col);
+  localStorageSet("pg.tab", state.tab);
+  renderBoard();
+  if (focus) $(`.queue-tab[data-col="${state.tab}"]`).focus();
+}
+
+function onTabKeydown(e) {
+  const tabs = $$(".queue-tab").map(b => b.dataset.col);
+  const i = tabs.indexOf(state.tab);
+  const next = { ArrowLeft: tabs[(i - 1 + tabs.length) % tabs.length],
+    ArrowRight: tabs[(i + 1) % tabs.length], Home: tabs[0], End: tabs[tabs.length - 1] }[e.key];
+  if (!next) return;
+  e.preventDefault();
+  selectTab(next, true);
 }
 
 function renderCard(t) {
@@ -192,7 +235,8 @@ async function createTask(ev) {
     $("#nt-title").value = "";
     $("#nt-desc").value = "";
     state.tasks.push(task);
-    renderBoard();
+    if (state.tab !== "unplanned") selectTab("unplanned");
+    else renderBoard();
   } catch (e) { toast(e.message, true); }
 }
 
@@ -571,6 +615,8 @@ function init() {
   setupSettingsDialog();
   $("#new-task").onsubmit = createTask;
   $("#commits-btn").onclick = showCommits;
+  for (const btn of $$(".queue-tab")) btn.onclick = () => selectTab(btn.dataset.col);
+  $(".queue-tabs").onkeydown = onTabKeydown;
   $("#p-provider").onchange = e => updateProject({ provider: e.target.value });
   $("#p-model").onchange = e => updateProject({ model: e.target.value });
   $("#remove-project-btn").onclick = async () => {

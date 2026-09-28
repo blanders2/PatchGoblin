@@ -111,6 +111,12 @@ class ProjectTests(AppTestCase):
                                json={"path": self.proj_dir})
         self.assertEqual(res.status_code, 403)
 
+    def test_index_has_queue_tabs(self):
+        html = self.client.get("/").get_data(as_text=True)
+        for col in ("unplanned", "planned", "queue", "finished"):
+            self.assertIn(f'role="tab" id="tab-{col}" data-col="{col}"', html)
+            self.assertIn(f'id="col-{col}" data-col="{col}" role="tabpanel" aria-labelledby="tab-{col}"', html)
+
 
 class WorkflowTests(AppTestCase):
     def test_plan_queue_run_commit(self):

@@ -150,11 +150,30 @@ main { flex: 1; min-width: 0; overflow: auto; padding: 18px 22px; }
 .new-task #nt-desc { flex: 3; }
 
 /* ---- board ---- */
-.board { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: 14px; align-items: start; }
+.queue-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 12px; overflow-x: auto; }
+.queue-tab {
+  display: flex; align-items: center; gap: 6px;
+  background: transparent; color: var(--muted); border: 0; border-bottom: 2px solid transparent;
+  border-radius: 7px 7px 0 0; padding: 8px 12px; margin-bottom: -1px;
+}
+.queue-tab:hover { background: var(--panel-2); filter: none; color: var(--text); }
+.queue-tab.active { color: var(--text); font-weight: 600; border-bottom-color: var(--accent); }
+.queue-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.queue-tab .count {
+  background: var(--accent); color: var(--accent-ink); border-radius: 99px;
+  font-size: 11px; font-weight: 600; min-width: 18px; padding: 1px 6px; text-align: center;
+}
+.queue-tab .count.empty { display: none; }
+.queue-tab .activity {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--t-running);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.queue-tab .activity[hidden] { display: none; }
+.board { display: block; }
 .column { background: var(--panel-2); border-radius: 10px; padding: 10px; min-height: 120px; }
-.column h3 { padding: 2px 4px 8px; display: flex; gap: 6px; }
-.count { color: var(--text); opacity: .6; }
-.cards { display: flex; flex-direction: column; gap: 8px; }
+.column[hidden] { display: none; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; align-items: start; }
+.empty-col { padding: 8px 4px; }
 .card {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -186,6 +205,9 @@ main { flex: 1; min-width: 0; overflow: auto; padding: 18px 22px; }
   animation: pulse 1.2s ease-in-out infinite;
 }
 @keyframes pulse { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) {
+  .queue-tab .activity, .badge.planning::before, .badge.running::before { animation: none; }
+}
 
 /* ---- drawer ---- */
 .drawer {
@@ -272,6 +294,5 @@ legend { padding: 0 4px; font-weight: 600; }
   .layout { flex-direction: column; }
   .sidebar { width: auto; border-right: 0; border-bottom: 1px solid var(--line); max-height: 30vh; }
   main { padding: 14px 16px; }
-  .board { grid-template-columns: 1fr; }
   .new-task { flex-direction: column; }
 }

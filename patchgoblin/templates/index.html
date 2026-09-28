@@ -56,11 +56,17 @@
         <button type="submit">Add task</button>
       </form>
 
+      <div class="queue-tabs" role="tablist" aria-label="Task queues">
+        {% for col, label in [("unplanned", "Unplanned"), ("planned", "Planned"), ("queue", "AI queue"), ("finished", "Finished")] %}
+        <button type="button" class="queue-tab" role="tab" id="tab-{{ col }}" data-col="{{ col }}" data-label="{{ label }}" aria-controls="col-{{ col }}">
+          {{ label }} <span class="activity" hidden></span><span class="count empty"></span>
+        </button>
+        {% endfor %}
+      </div>
       <div class="board">
-        <div class="column" data-col="unplanned"><h3>Unplanned <span class="count"></span></h3><div class="cards"></div></div>
-        <div class="column" data-col="planned"><h3>Planned <span class="count"></span></h3><div class="cards"></div></div>
-        <div class="column" data-col="queue"><h3>AI queue <span class="count"></span></h3><div class="cards"></div></div>
-        <div class="column" data-col="finished"><h3>Finished <span class="count"></span></h3><div class="cards"></div></div>
+        {% for col in ["unplanned", "planned", "queue", "finished"] %}
+        <div class="column" id="col-{{ col }}" data-col="{{ col }}" role="tabpanel" aria-labelledby="tab-{{ col }}"><div class="cards"></div></div>
+        {% endfor %}
       </div>
     </section>
   </main>
