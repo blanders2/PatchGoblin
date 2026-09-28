@@ -464,7 +464,7 @@ class WorkflowTests(AppTestCase):
         doc = store.read(project, fresh=True)
         self.assertEqual([t["status"] for t in doc["tasks"]], ["drafted", "planned"])
         self.assertEqual(doc["tasks"][0]["history"][-1]["event"], "Plan has open questions")
-        self.assertEqual(doc["version"], 3)
+        self.assertEqual(doc["version"], 4)
 
         stamp = seed(2, [ASKING_PLAN, ASKING_PLAN])
         engine.reconcile(project)  # already migrated: planned tasks keep their questions
@@ -1461,7 +1461,8 @@ class EndpointSettingsTests(AppTestCase):
         self.assertEqual(res.status_code, 200, res.get_json())
         data = res.get_json()
         self.assertEqual([e["id"] for e in data["endpoints"]], ["openrouter", "local"])
-        self.assertEqual([p["id"] for p in data["providers"]], ["claude", "codex", "openrouter", "local"])
+        self.assertEqual([p["id"] for p in data["providers"]],
+                         ["claude", "codex", "opencode", "openrouter", "local"])
         self.assertIn("x/y", data["models"]["openrouter"])
         self.assertNotIn("sk-secret", json.dumps(data))
         got = self.client.get("/api/settings").get_json()
@@ -1658,6 +1659,269 @@ class ModelTests(AppTestCase):
             self.app.config["ENGINE"]._ai(p, {}, "plan", "prompt", job, role="chat")
         self.assertEqual([c.kwargs["model"] for c in run_ai.call_args_list], ["sonnet", "opus"])
         self.assertIn("run with claude / sonnet in", job.write.call_args_list[0].args[0])
+
+
+def write_file(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+class OpencodeTests(AppTestCase):
+    def setUp(self):
+        super().setUp()
+        # Keep the user's real opencode config out of the tests.
+        self.home = os.path.join(self.tmp.name, "home")
+        os.makedirs(self.home)
+        for patcher in (mock.patch("patchgoblin.hosts.LocalHost.home", return_value=self.home),
+                        mock.patch.dict(os.environ)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        os.environ.pop("OPENCODE_CONFIG", None)
+        os.environ.pop("OPENCODE_CONFIG_DIR", None)
+        self.set_opencode(plan=[sys.executable, FAKE, "plan", "--agent", "{agent}"],
+                          run=[sys.executable, FAKE, "run", "--agent", "{agent}"])
+
+    def set_opencode(self, **values):
+        self.app.config["SETTINGS"].update({"commands": {"opencode": values}})
+
+    def run_ai(self, mode, prompt, run_marker=None):
+        from patchgoblin.engine import Job
+        from patchgoblin.providers import run_ai
+        job = Job(mode)
+        out = run_ai("opencode", mode, prompt, host=LocalHost(), project={"path": self.proj_dir},
+                     settings=self.app.config["SETTINGS"].get(), model="", job=job, run_marker=run_marker)
+        return out, job.text()
+
+    def test_provider_is_listed(self):
+        from patchgoblin.store import provider_choices, valid_provider
+        s = self.app.config["SETTINGS"].get()
+        self.assertIn({"id": "opencode", "name": "opencode"}, provider_choices(s))
+        self.assertTrue(valid_provider(s, "opencode"))
+        self.assertEqual(self.add_project(provider="opencode")["provider"], "opencode")
+
+    def test_settings_defaults_and_validation(self):
+        from patchgoblin.store import Settings
+        fresh = Settings(os.path.join(self.tmp.name, "fresh"))
+        fresh.update({"commands": {"claude": {"plan_model": "opus"}}})  # saved file has no opencode key
+        cfg = fresh.get()["commands"]["opencode"]
+        self.assertEqual((cfg["plan"], cfg["plan_agent"], cfg["run_agent"], cfg["model_flag"]),
+                         ("opencode run --agent {agent}", "plan", "build", "-m"))
+        self.assertIs(cfg["require_agents"], True)
+        self.assertIs(cfg["plan_must_not_edit"], True)
+        self.assertEqual(self.client.get("/api/settings").get_json()["commands"]["opencode"]["run_agent"], "build")
+
+        values = {"plan_agent": " pg-plan ", "run_agent": "team/pg.build_2", "plan_model": "anthropic/x",
+                  "code_model": " openai/y ", "require_agents": False, "plan_must_not_edit": False}
+        res = self.client.put("/api/settings", headers=H, json={"commands": {"opencode": values}})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        cfg = res.get_json()["commands"]["opencode"]
+        self.assertEqual({k: cfg[k] for k in values},
+                         {"plan_agent": "pg-plan", "run_agent": "team/pg.build_2", "plan_model": "anthropic/x",
+                          "code_model": "openai/y", "require_agents": False, "plan_must_not_edit": False})
+        self.assertEqual(res.get_json()["models"]["opencode"], ["anthropic/x", "openai/y"])
+        for bad in ({"plan_agent": "a; rm"}, {"run_agent": ""}, {"plan_agent": "two words"},
+                    {"plan_agent": 3}, {"require_agents": "yes"}):
+            res = self.client.put("/api/settings", headers=H, json={"commands": {"opencode": bad}})
+            self.assertEqual(res.status_code, 400, bad)
+        self.assertEqual(self.app.config["SETTINGS"].get()["commands"]["opencode"]["plan_agent"], "pg-plan")
+
+    def test_cli_argv(self):
+        import shlex
+        from patchgoblin.providers import cli_argv
+        from patchgoblin.store import DEFAULT_SETTINGS
+        commands = DEFAULT_SETTINGS["commands"]
+        self.assertEqual(cli_argv(commands["opencode"], "plan", "anthropic/x"),
+                         ["opencode", "run", "--agent", "plan", "-m", "anthropic/x"])
+        self.assertEqual(cli_argv(commands["opencode"], "run", ""), ["opencode", "run", "--agent", "build"])
+        self.assertEqual(cli_argv({**commands["opencode"], "run_agent": "mine"}, "run", ""),
+                         ["opencode", "run", "--agent", "mine"])
+        self.assertEqual(cli_argv(commands["claude"], "plan", "opus"),
+                         shlex.split(commands["claude"]["plan"]) + ["--model", "opus"])
+        self.assertEqual(cli_argv(commands["codex"], "run", "gpt-5"),
+                         ["codex", "exec", "--sandbox", "workspace-write", "--color", "never", "-m", "gpt-5", "-"])
+
+    def test_strip_jsonc(self):
+        from patchgoblin.opencode import strip_jsonc
+        text = """{
+          // a comment
+          "url": "https://example.com/a", /* block
+          comment */ "quote": "say \\"hi\\" // not a comment",
+          "list": [1, 2,],
+          "nested": {"a": "/* kept */",},
+        }"""
+        self.assertEqual(json.loads(strip_jsonc(text)), {
+            "url": "https://example.com/a", "quote": 'say "hi" // not a comment',
+            "list": [1, 2], "nested": {"a": "/* kept */"}})
+        self.assertEqual(json.loads(strip_jsonc('{"a": "x,}", "b": "\\\\"}')), {"a": "x,}", "b": "\\"})
+
+    def test_config_models(self):
+        from patchgoblin.opencode import config_models
+        configs = [
+            {"model": "anthropic/a", "small_model": "anthropic/b",
+             "agent": {"plan": {"model": "openai/c"}, "build": {}, "odd": "x"}},
+            {"model": "anthropic/a", "provider": {"ollama": {"models": {"llama3": {}, "qwen": {}}},
+                                                   "bad": {"models": []}}},
+        ]
+        self.assertEqual(config_models(configs),
+                         ["anthropic/a", "anthropic/b", "openai/c", "ollama/llama3", "ollama/qwen"])
+        self.assertEqual(config_models([]), [])
+
+    def test_agent_names_and_list_dir(self):
+        from patchgoblin.opencode import agent_names, read_configs
+        host = LocalHost()
+        self.assertEqual(host.list_dir(os.path.join(self.tmp.name, "missing")), [])
+        os.makedirs(self.proj_dir)
+        write_file(os.path.join(self.proj_dir, "opencode.jsonc"), '{"agent": {"from-json": {},},}')
+        write_file(os.path.join(self.proj_dir, ".opencode", "agent", "from-md.md"), "---\n---\n")
+        write_file(os.path.join(self.proj_dir, ".opencode", "agent", "notes.txt"), "")
+        write_file(os.path.join(self.home, ".config", "opencode", "agents", "global.md"), "")
+        write_file(os.path.join(self.proj_dir, "opencode.json"), "{not json")
+        configs, warnings = read_configs(host, self.proj_dir)
+        self.assertEqual(len(configs), 1)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("opencode.json is not valid JSON", warnings[0])
+        self.assertEqual(agent_names(host, self.proj_dir, configs), {"from-json", "from-md", "global"})
+
+    def test_models_route(self):
+        from patchgoblin.hosts import Result
+        pid = self.add_project(provider="opencode")["id"]
+        url = f"/api/projects/{pid}/opencode/models"
+        write_file(os.path.join(self.home, ".config", "opencode", "opencode.json"),
+                   '{"model": "anthropic/global"}')
+        write_file(os.path.join(self.proj_dir, "opencode.json"),
+                   '// project\n{"agent": {"plan": {"model": "openai/plan"}}}')
+        self.set_opencode(plan_model="saved/model")
+        data = self.client.get(url).get_json()
+        self.assertEqual(data, {"models": ["saved/model", "anthropic/global", "openai/plan"],
+                                "source": "config", "error": ""})
+
+        # No models in any config: fall back to `opencode models` (cached until refreshed).
+        os.remove(os.path.join(self.home, ".config", "opencode", "opencode.json"))
+        write_file(os.path.join(self.proj_dir, "opencode.json"), "{}")
+        listing = Result(0, "\x1b[1manthropic/a\x1b[0m\nopenai/b\nnot a model\n", "")
+        with mock.patch("patchgoblin.hosts.LocalHost.run", return_value=listing) as run:
+            self.assertEqual(self.client.get(url).get_json()["source"], "config")  # still cached
+            data = self.client.get(url + "?refresh=1").get_json()
+            self.assertEqual(data, {"models": ["saved/model", "anthropic/a", "openai/b"],
+                                    "source": "cli", "error": ""})
+            self.assertEqual(run.call_args.args[0], ["opencode", "models"])
+
+        # A malformed config and a failing CLI are both reported.
+        write_file(os.path.join(self.proj_dir, "opencode.json"), "{broken")
+        with mock.patch("patchgoblin.hosts.LocalHost.run", return_value=Result(127, "", "Command not found")):
+            data = self.client.get(url + "?refresh=1").get_json()
+        self.assertEqual(data["models"], ["saved/model"])
+        self.assertIn("not valid JSON", data["error"])
+        self.assertIn("Command not found", data["error"])
+        self.assertEqual(self.client.get("/api/projects/nope/opencode/models").status_code, 404)
+
+    def test_agent_must_be_defined(self):
+        self.add_project()
+        out, log = self.run_ai("plan", "plan it")  # built-in agents need no definition
+        self.assertTrue(out.ok, out.error)
+        self.assertIn("--agent plan", log)
+
+        self.set_opencode(plan_agent="pg-plan")
+        out, log = self.run_ai("plan", "plan it")
+        self.assertFalse(out.ok)
+        self.assertIn('opencode agent "pg-plan" is not defined for this project', out.error)
+        self.assertNotIn("working...", log)  # the CLI never started
+
+        write_file(os.path.join(self.proj_dir, "opencode.json"),
+                   '{\n  // PatchGoblin\'s planner\n  "agent": {"pg-plan": {"mode": "primary"},},\n}')
+        out, log = self.run_ai("plan", "plan it")
+        self.assertTrue(out.ok, out.error)
+        self.assertIn("--agent pg-plan", log)
+
+        self.set_opencode(run_agent="pg-build", require_agents=False)
+        out, log = self.run_ai("run", "run it")
+        self.assertTrue(out.ok, out.error)  # the check is off
+        self.assertIn("--agent pg-build", log)
+
+    def test_plan_that_edits_files_fails(self):
+        self.add_project()
+        out, log = self.run_ai("plan", "please EDIT_DURING_PLAN")
+        self.assertFalse(out.ok)
+        self.assertIn("opencode's plan agent modified files: plan_edit.txt", out.error)
+        self.assertTrue(os.path.exists(os.path.join(self.proj_dir, "plan_edit.txt")))  # not reverted
+        self.assertIn('inline config: {"agent": {"plan": {"permission": {"edit": "deny", "bash": "deny"}}}}', log)
+        os.remove(os.path.join(self.proj_dir, "plan_edit.txt"))
+
+        # While a task run is active, changes can't be blamed on the plan.
+        out, log = self.run_ai("plan", "please EDIT_DURING_PLAN", run_marker=lambda: (1, True))
+        self.assertTrue(out.ok, out.error)
+        self.assertIn("aren't blamed on planning: plan_edit.txt", log)
+        os.remove(os.path.join(self.proj_dir, "plan_edit.txt"))
+
+        self.set_opencode(plan_must_not_edit=False)
+        out, _ = self.run_ai("plan", "please EDIT_DURING_PLAN")
+        self.assertTrue(out.ok, out.error)
+        out, log = self.run_ai("run", "run it")  # runs may edit and get no inline config
+        self.assertTrue(out.ok, out.error)
+        self.assertNotIn("inline config", log)
+
+    def test_plan_queue_run_with_opencode(self):
+        pid = self.add_project(provider="opencode")["id"]
+        tid = self.post_task(pid, "Create output file")["id"]
+        self.assertEqual(self.action(pid, tid, "plan").status_code, 200)
+        task = self.wait_for(pid, tid, {"planned", "unplanned"})
+        self.assertEqual(task["status"], "planned", task["error"])
+        self.assertIn("plan with opencode", task["output"])
+        self.assertEqual(self.action(pid, tid, "queue").status_code, 200)
+        task = self.wait_for(pid, tid, {"review", "failed"})
+        self.assertEqual(task["status"], "review", task["error"])
+        self.assertTrue(os.path.exists(os.path.join(self.proj_dir, "agent_output.txt")))
+        self.assertTrue(git_log(self.proj_dir)[0].startswith("PatchGoblin: task #1"))
+
+    def test_rename_reserved_endpoints(self):
+        from patchgoblin.store import rename_reserved_endpoints
+        eps, renames = rename_reserved_endpoints([{"id": "opencode", "name": "A"}, {"id": "or"}])
+        self.assertEqual(([e["id"] for e in eps], renames), (["opencode-api", "or"], {"opencode": "opencode-api"}))
+        eps, renames = rename_reserved_endpoints([{"id": "opencode-api"}, {"id": "opencode"}])
+        self.assertEqual([e["id"] for e in eps], ["opencode-api", "opencode-api-2"])
+        self.assertEqual(rename_reserved_endpoints([{"id": "or"}]), ([{"id": "or"}], {}))
+
+    def test_endpoint_named_opencode_is_renamed_once(self):
+        data_dir = os.path.join(self.tmp.name, "upgrade")
+        old_dir, new_dir = os.path.join(self.tmp.name, "old"), os.path.join(self.tmp.name, "new")
+        for path, version in ((old_dir, 3), (new_dir, 4)):
+            subprocess.run(["git", "init", "-q", path], check=True)
+            write_file(os.path.join(path, ".patchgoblin", "tasks.json"), json.dumps({
+                "version": version, "next_id": 3,
+                "tasks": [{"id": 1, "title": "a", "status": "unplanned", "provider": "opencode", "history": []},
+                          {"id": 2, "title": "b", "status": "unplanned", "provider": "claude", "history": []}]}))
+        settings_path = os.path.join(data_dir, "settings.json")
+        write_file(settings_path, json.dumps({"endpoints": [
+            {"id": "opencode", "name": "opencode Zen", "base_url": "https://opencode.ai/zen/v1"}]}))
+        write_file(os.path.join(data_dir, "projects.json"), json.dumps({"projects": [
+            {"id": "old", "name": "old", "location": "local", "path": old_dir, "provider": "opencode"},
+            {"id": "new", "name": "new", "location": "local", "path": new_dir, "provider": "claude"}]}))
+
+        app = create_app(data_dir, start_engine=False)
+        client = app.test_client()
+        s = app.config["SETTINGS"].get()
+        self.assertEqual([e["id"] for e in s["endpoints"]], ["opencode-api"])
+        self.assertEqual(s["provider_renames"], {"opencode": "opencode-api"})
+        self.assertEqual(app.config["REGISTRY"].get("old")["provider"], "opencode-api")
+        self.assertEqual(app.config["REGISTRY"].get("new")["provider"], "claude")
+        providers = lambda pid: [t["provider"] for t in client.get(f"/api/projects/{pid}/tasks").get_json()["tasks"]]
+        self.assertEqual(providers("old"), ["opencode-api", "claude"])
+        self.assertEqual(providers("new"), ["opencode", "claude"])  # version 4: already the CLI
+
+        # The next write stores the new id; afterwards "opencode" there means the CLI.
+        client.patch("/api/projects/old/tasks/2", headers=H, json={"provider": "opencode"})
+        with open(os.path.join(old_dir, ".patchgoblin", "tasks.json"), encoding="utf-8") as fh:
+            doc = json.load(fh)
+        self.assertEqual((doc["version"], [t["provider"] for t in doc["tasks"]]), (4, ["opencode-api", "opencode"]))
+        client.patch("/api/projects/old", headers=H, json={"provider": "opencode"})
+
+        stamp = os.stat(settings_path).st_mtime_ns
+        app = create_app(data_dir, start_engine=False)
+        self.assertEqual(os.stat(settings_path).st_mtime_ns, stamp)  # renamed only once
+        self.assertEqual(app.config["REGISTRY"].get("old")["provider"], "opencode")
+        tasks = app.test_client().get("/api/projects/old/tasks").get_json()["tasks"]
+        self.assertEqual([t["provider"] for t in tasks], ["opencode-api", "opencode"])
 
 
 if __name__ == "__main__":

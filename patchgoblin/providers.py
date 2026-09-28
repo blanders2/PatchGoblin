@@ -1,7 +1,9 @@
 """AI back ends. Each runs *in the project directory on the project's host*:
 
-* ``claude`` / ``codex`` — the CLI agents, launched in the project directory
-  (over SSH for remote projects), with the prompt sent on stdin.
+* ``claude`` / ``codex`` / ``opencode`` — the CLI agents, launched in the project
+  directory (over SSH for remote projects), with the prompt sent on stdin. opencode
+  runs a named opencode agent (``plan_agent`` for planning and chat, ``run_agent`` for
+  runs) and gets extra checks, since its agents are defined by the user's opencode config.
 * configured endpoints (``openai``, ``openrouter``, …) — a tool-calling loop
   against an OpenAI-compatible Chat Completions API. The model's file and command
   tools are executed through the project's host, so remote projects work without
@@ -19,7 +21,8 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
-from .gitops import git
+from . import opencode
+from .gitops import git, status_lines
 from .store import find_endpoint
 
 PLAN_INSTRUCTIONS = """\
@@ -232,8 +235,12 @@ class Outcome:
 
 
 def run_ai(provider: str, mode: str, prompt: str, *, host, project: dict, settings: dict,
-           model: str, job) -> Outcome:
-    """Run ``prompt`` with ``provider`` in ``mode`` ("plan" or "run")."""
+           model: str, job, run_marker=None) -> Outcome:
+    """Run ``prompt`` with ``provider`` in ``mode`` ("plan" or "run").
+
+    ``run_marker`` (optional) returns a value that changes whenever a task run starts or is
+    active in the project; opencode's plan check uses it to avoid blaming a run's edits on a plan.
+    """
     timeout = float(settings["timeouts"][mode])
     endpoint = find_endpoint(settings, provider)
     if endpoint is not None:
@@ -241,13 +248,24 @@ def run_ai(provider: str, mode: str, prompt: str, *, host, project: dict, settin
     if provider not in settings["commands"]:
         return Outcome(False, error=f"AI provider '{provider}' is not configured "
                                     "(it may have been removed in Settings).")
+    if provider == "opencode":
+        return run_opencode(settings["commands"][provider], mode, prompt, host=host, cwd=project["path"],
+                            model=model, timeout=timeout, job=job, run_marker=run_marker)
     return run_cli(settings["commands"][provider], mode, prompt, host=host, cwd=project["path"],
                    model=model, timeout=timeout, job=job)
+
+
+def agent_for(cfg: dict, mode: str) -> str:
+    """The agent name a CLI config uses in ``mode`` (planning and chat use the plan agent)."""
+    value = cfg.get("plan_agent" if mode == "plan" else "run_agent")
+    return value.strip() if isinstance(value, str) else ""
 
 
 def cli_argv(cfg: dict, mode: str, model: str) -> list[str]:
     template = cfg[mode]
     argv = list(template) if isinstance(template, list) else shlex.split(template)
+    agent = agent_for(cfg, mode)
+    argv = [arg.replace("{agent}", agent) for arg in argv]
     if model and cfg.get("model_flag"):
         # Keep a trailing "-" (read prompt from stdin) as the final argument.
         at = len(argv) - 1 if argv and argv[-1] == "-" else len(argv)
@@ -255,12 +273,56 @@ def cli_argv(cfg: dict, mode: str, model: str) -> list[str]:
     return argv
 
 
+def run_opencode(cfg: dict, mode: str, prompt: str, *, host, cwd: str, model: str,
+                 timeout: float, job, run_marker=None) -> Outcome:
+    """opencode, with checks for what its config can get wrong: the agent must be defined
+    (opencode may otherwise fall back to its full-access default agent), and planning must
+    leave the working tree as it was (changed files are reported, never reverted)."""
+    agent = agent_for(cfg, mode)
+    role = "plan" if mode == "plan" else "run"
+    if not agent:
+        return Outcome(False, error=f"No opencode {role} agent is set. Set it in Settings → opencode.")
+    if cfg.get("require_agents", True) and agent not in opencode.BUILTIN_AGENTS:
+        configs, _ = opencode.read_configs(host, cwd)
+        if agent not in opencode.agent_names(host, cwd, configs):
+            return Outcome(False, error=f'opencode agent "{agent}" is not defined for this project. Add it to '
+                                        f'opencode.json or .opencode/agent/{agent}.md, or change it in '
+                                        "Settings → opencode.")
+    env = {"NO_COLOR": "1"}
+    if mode == "plan":
+        # Highest-precedence inline config: the planning agent may read but not edit or run commands.
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(
+            {"agent": {agent: {"permission": {"edit": "deny", "bash": "deny"}}}})
+    check = mode == "plan" and cfg.get("plan_must_not_edit", True) is not False
+    before = set(status_lines(host, cwd, ignore_metadata=True)) if check else set()
+    marker = run_marker() if check and run_marker else None
+    outcome = run_cli(cfg, mode, prompt, host=host, cwd=cwd, model=model, timeout=timeout, job=job, env=env)
+    outcome.text = opencode.strip_ansi(outcome.text).strip()
+    outcome.error = opencode.strip_ansi(outcome.error)
+    if not check:
+        return outcome
+    changed = set(status_lines(host, cwd, ignore_metadata=True)) ^ before
+    if not changed:
+        return outcome
+    paths = sorted({line[3:].strip('"') for line in changed})
+    if run_marker and (marker != run_marker() or marker[1]):
+        job.write(f"Files changed while a task run was active, so they aren't blamed on planning: "
+                  f"{', '.join(paths)}\n")
+        return outcome
+    return Outcome(False, outcome.text,
+                   f"opencode's plan agent modified files: {', '.join(paths)}. Review them, and set "
+                   f'agent.{agent} permissions edit/bash to "deny" in opencode.json.')
+
+
 def run_cli(cfg: dict, mode: str, prompt: str, *, host, cwd: str, model: str,
-            timeout: float, job) -> Outcome:
+            timeout: float, job, env: dict | None = None) -> Outcome:
     argv = cli_argv(cfg, mode, model)
     job.write(f"$ {' '.join(argv)}\n")
-    res = host.run(argv, cwd=cwd, input=prompt, timeout=timeout,
-                   on_output=job.write, on_start=job.attach, login=True)
+    stdin = prompt
+    if cfg.get("prompt_arg"):  # for CLIs that take the prompt as an argument, not on stdin
+        argv, stdin = [*argv, prompt], None
+    res = host.run(argv, cwd=cwd, input=stdin, timeout=timeout,
+                   on_output=job.write, on_start=job.attach, login=True, env=env)
     if job.cancelled:
         raise Cancelled()
     text = res.stdout.strip()

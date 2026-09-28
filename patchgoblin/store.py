@@ -19,14 +19,16 @@ from datetime import datetime, timezone
 from .hosts import host_for
 
 STATUSES = ("unplanned", "planning", "drafted", "planned", "queued", "running", "review", "done", "failed")
-CLI_PROVIDERS = ("claude", "codex")
-CLI_NAMES = {"claude": "Claude Code", "codex": "Codex"}
+CLI_PROVIDERS = ("claude", "codex", "opencode")
+CLI_NAMES = {"claude": "Claude Code", "codex": "Codex", "opencode": "opencode"}
 # Suggestions for the model dropdowns; any other model name can still be entered as "Custom…".
-# "openai" is only used for the built-in endpoint with that id.
+# "openai" is only used for the built-in endpoint with that id. opencode's models come from
+# each project's opencode config (see opencode.py), so it has no fixed list.
 MODELS = {
     "claude": ("opus", "sonnet", "haiku", "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5",
                "claude-haiku-4-5"),
     "codex": ("gpt-5-codex", "gpt-5", "gpt-5-mini"),
+    "opencode": (),
     "openai": ("gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1"),
 }
 TASKS_DIR = ".patchgoblin"
@@ -49,6 +51,18 @@ DEFAULT_SETTINGS = {
             "model_flag": "-m",
             "plan_model": "",
             "code_model": "",
+        },
+        "opencode": {
+            # {agent} is replaced by plan_agent (planning and chat) or run_agent (runs).
+            "plan": "opencode run --agent {agent}",
+            "run": "opencode run --agent {agent}",
+            "plan_agent": "plan",
+            "run_agent": "build",
+            "model_flag": "-m",
+            "plan_model": "",
+            "code_model": "",
+            "require_agents": True,  # refuse to start if a custom agent isn't defined
+            "plan_must_not_edit": True,  # fail a plan (or chat) that changed files
         },
     },
     "endpoints": [{
@@ -221,6 +235,16 @@ class Registry:
                     return p
             return None
 
+    def rename_provider(self, old: str, new: str) -> None:
+        """Point projects using provider ``old`` at ``new`` (after an endpoint id rename)."""
+        with self.file.lock:
+            data = self.file.load()
+            projects = [p for p in data["projects"] if p.get("provider") == old]
+            for p in projects:
+                p["provider"] = new
+            if projects:
+                self.file.save(data)
+
     def remove(self, pid: str) -> bool:
         with self.file.lock:
             data = self.file.load()
@@ -229,9 +253,60 @@ class Registry:
             return len(kept) != len(data["projects"])
 
 
+def rename_reserved_endpoints(endpoints: list) -> tuple[list, dict]:
+    """Give endpoints whose id is now a CLI provider's a free new id (``opencode`` →
+    ``opencode-api``, or ``opencode-api-2`` if that is taken). Returns (endpoints, {old: new})."""
+    taken = {ep.get("id") for ep in endpoints if isinstance(ep, dict)}
+    out, renames = [], {}
+    for ep in endpoints:
+        if isinstance(ep, dict) and ep.get("id") in CLI_PROVIDERS:
+            base = new = f"{ep['id']}-api"
+            n = 2
+            while new in taken or new in CLI_PROVIDERS:
+                new = f"{base}-{n}"
+                n += 1
+            taken.add(new)
+            renames[ep["id"]] = new
+            ep = {**ep, "id": new}
+        out.append(ep)
+    return out, renames
+
+
+def rename_task_providers(doc: dict, renames: dict) -> bool:
+    """Point tasks saved before the renames (tasks.json version < 4) at their endpoint's new id.
+    Changes ``doc`` in place; True if any task changed."""
+    if not renames or (doc.get("version") or 1) >= 4:
+        return False
+    changed = False
+    for task in doc.get("tasks", []):
+        if task.get("provider") in renames:
+            task["provider"] = renames[task["provider"]]
+            changed = True
+    return changed
+
+
 class Settings:
     def __init__(self, data_dir: str):
         self.file = JsonFile(os.path.join(data_dir, "settings.json"), {})
+        with self.file.lock:
+            self.renamed = self._migrate()
+
+    def _migrate(self) -> dict:
+        """Rename saved endpoints whose id became a CLI provider (once). Returns {old: new}.
+
+        Every rename is also kept in ``provider_renames`` so tasks.json files saved before it
+        (possibly on an offline SSH host, or pulled in later) can be pointed at the new id.
+        """
+        data = self.file.load()
+        endpoints = data.get("endpoints")
+        if not isinstance(endpoints, list):
+            return {}
+        endpoints, renames = rename_reserved_endpoints(endpoints)
+        if renames:
+            data["endpoints"] = endpoints
+            data["provider_renames"] = {**(data.get("provider_renames") or {}), **renames}
+            self.file.save(data)
+        return renames
 
     def get(self) -> dict:
         saved = self.file.load()
@@ -243,6 +318,8 @@ class Settings:
         out = _merge(DEFAULT_SETTINGS, saved)
         endpoints = out["endpoints"] if isinstance(out["endpoints"], list) else []
         out["endpoints"] = [_endpoint(ep) for ep in endpoints if isinstance(ep, dict) and ep.get("id")]
+        if not isinstance(out.get("provider_renames"), dict):
+            out["provider_renames"] = {}
         return out
 
     def update(self, values: dict) -> dict:
@@ -262,7 +339,9 @@ class Settings:
 
 # tasks.json format. 2: the 'drafted' status exists (version-1 files are migrated by
 # Engine.reconcile; every write stamps the current version). 3: the 'review' status exists.
-DOC_VERSION = 3
+# 4: a task provider "opencode" means the opencode CLI; older files meant an endpoint with that
+# id, which was renamed (TaskStore applies Settings' provider_renames when loading them).
+DOC_VERSION = 4
 
 
 def empty_doc() -> dict:
@@ -279,9 +358,11 @@ class TaskStore:
 
     CACHE_SECONDS = 2.0
 
-    def __init__(self):
+    def __init__(self, provider_renames: dict | None = None):
         self._locks: dict[str, threading.RLock] = defaultdict(threading.RLock)
         self._cache: dict[str, tuple[float, dict]] = {}
+        # Endpoint ids renamed by Settings; applied to documents saved before the rename.
+        self.provider_renames = dict(provider_renames or {})
 
     def _load(self, project: dict) -> dict:
         text = host_for(project).read_text(tasks_path(project))
@@ -290,6 +371,7 @@ class TaskStore:
         doc = json.loads(text)
         doc.setdefault("tasks", [])
         doc.setdefault("next_id", max((t["id"] for t in doc["tasks"]), default=0) + 1)
+        rename_task_providers(doc, self.provider_renames)
         return doc
 
     def read(self, project: dict, fresh: bool = False) -> dict:

@@ -177,6 +177,15 @@ class LocalHost:
         except OSError as exc:
             raise HostError(f"Could not read {path}: {exc}") from exc
 
+    def list_dir(self, path: str) -> list[str]:
+        """Names of the entries in ``path``; [] if it is not a directory."""
+        try:
+            return sorted(os.listdir(path))
+        except (FileNotFoundError, NotADirectoryError):
+            return []
+        except OSError as exc:
+            raise HostError(f"Could not list {path}: {exc}") from exc
+
     def write_text(self, path: str, text: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = f"{path}.{os.getpid()}.tmp"
@@ -288,6 +297,13 @@ class SSHHost:
         if not res.ok:
             raise HostError(f"Could not read {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
         return res.stdout
+
+    def list_dir(self, path: str) -> list[str]:
+        q = shlex.quote(path)
+        res = self._exec(f"if [ -d {q} ]; then ls -1A {q}; fi", timeout=60)
+        if not res.ok:
+            raise HostError(f"Could not list {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+        return sorted(line for line in res.stdout.splitlines() if line)
 
     def write_text(self, path: str, text: str) -> None:
         q, tmp = shlex.quote(path), shlex.quote(f"{path}.tmp")

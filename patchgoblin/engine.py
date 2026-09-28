@@ -96,6 +96,7 @@ class Engine:
         # manual sync never changes the working tree under a running task. Re-entrant so
         # auto-sync can run inside the task's own run.
         self._sync_locks: dict[str, threading.RLock] = {}
+        self._runs_started: dict[str, int] = {}
 
     # ---- helpers -------------------------------------------------------
     def job(self, pid: str, tid: int) -> Job | None:
@@ -104,6 +105,12 @@ class Engine:
     def busy(self, pid: str) -> bool:
         """True while any AI job (planning, run or chat) is active for the project."""
         return any(key[0] == pid for key in list(self.jobs)) or self.chat(pid).job is not None
+
+    def _run_marker(self, pid: str) -> tuple[int, bool]:
+        """(runs started so far, whether one is active) for the project: if this differs
+        before and after a plan, or a run is active, working-tree changes may be the run's."""
+        active = any(key[0] == pid and job.kind == "run" for key, job in list(self.jobs.items()))
+        return self._runs_started.get(pid, 0), active
 
     def _sync_lock(self, pid: str) -> threading.RLock:
         with self._lock:
@@ -130,7 +137,8 @@ class Engine:
         job.write(f"[{now()}] {mode} with {provider}{' / ' + model if model else ''} in {project['path']}\n")
         try:
             return run_ai(provider, mode, prompt, host=host_for(project), project=project,
-                          settings=self.settings.get(), model=model, job=job)
+                          settings=self.settings.get(), model=model, job=job,
+                          run_marker=lambda: self._run_marker(project["id"]))
         except Cancelled:
             raise
         except Exception as exc:  # host/network failures become task errors
@@ -384,6 +392,7 @@ class Engine:
                 task = queued[0]
                 key = (pid, task["id"])
                 self.jobs[key] = job
+                self._runs_started[pid] = self._runs_started.get(pid, 0) + 1
                 task["started_at"] = now()
                 task["finished_at"] = None
                 task["error"] = ""

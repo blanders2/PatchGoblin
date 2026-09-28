@@ -1,9 +1,16 @@
-"""Stand-in for the claude/codex CLIs in tests: reads the prompt on stdin."""
+"""Stand-in for the claude/codex/opencode CLIs in tests: reads the prompt on stdin."""
+import os
 import sys
 
 mode = sys.argv[1]
 prompt = sys.stdin.read()
 print("working...", file=sys.stderr, flush=True)
+if os.environ.get("OPENCODE_CONFIG_CONTENT"):
+    print("inline config: " + os.environ["OPENCODE_CONFIG_CONTENT"], file=sys.stderr, flush=True)
+
+if mode == "plan" and "EDIT_DURING_PLAN" in prompt:
+    with open("plan_edit.txt", "w", encoding="utf-8") as fh:
+        fh.write("a planning agent should not write this\n")
 
 if "FAIL" in prompt:
     print("simulated agent failure", file=sys.stderr)

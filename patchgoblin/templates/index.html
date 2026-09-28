@@ -320,8 +320,8 @@
       <label>Default AI
         <select name="provider" class="provider-select">{% for p in providers %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}</select>
       </label>
-      <label class="grow">Planning Model <select name="plan_model"></select></label>
-      <label class="grow">Coding Model <select name="code_model"></select></label>
+      <label class="grow">Planning Model <select name="plan_model" data-no-project></select></label>
+      <label class="grow">Coding Model <select name="code_model" data-no-project></select></label>
     </div>
     <label class="check"><input type="checkbox" name="create" checked> Create the directory if it doesn't exist</label>
     <p class="muted small">A git repository is initialized in the directory if it isn't already a repo root.</p>
@@ -382,6 +382,29 @@
         <label class="grow">Default planning model <input name="codex.plan_model" placeholder="CLI default"></label>
         <label class="grow">Default coding model <input name="codex.code_model" placeholder="CLI default"></label>
       </div>
+    </fieldset>
+    <fieldset>
+      <legend>opencode</legend>
+      <label>Planning command <input name="opencode.plan" class="mono"></label>
+      <label>Run command <input name="opencode.run" class="mono"></label>
+      <p class="muted small"><code>{agent}</code> in a command is replaced by the agent below; a command
+        without it ignores the agent names. Planning and chat use the planning agent.</p>
+      <div class="row">
+        <label class="grow">Planning agent <input name="opencode.plan_agent" class="mono" required
+          pattern="[A-Za-z0-9._/\-]+" placeholder="plan"></label>
+        <label class="grow">Run agent <input name="opencode.run_agent" class="mono" required
+          pattern="[A-Za-z0-9._/\-]+" placeholder="build"></label>
+      </div>
+      <div class="row">
+        <label class="grow">Default planning model <input name="opencode.plan_model" placeholder="opencode default"></label>
+        <label class="grow">Default coding model <input name="opencode.code_model" placeholder="opencode default"></label>
+      </div>
+      <p class="muted small">Models are <code>provider/model</code>, e.g. <code>anthropic/claude-sonnet-5</code>.
+        Each project's model list comes from its opencode config.</p>
+      <label class="check" title="opencode might otherwise fall back to its default agent, which can edit files and run commands">
+        <input type="checkbox" name="opencode.require_agents"> Refuse to run if a custom agent isn't defined</label>
+      <label class="check" title="Changed files are kept for you to review, not reverted">
+        <input type="checkbox" name="opencode.plan_must_not_edit"> Fail planning if the plan agent edits files</label>
     </fieldset>
     <fieldset>
       <legend>OpenAI-compatible APIs</legend>

@@ -1,7 +1,7 @@
 # PatchGoblin
 
 A small Flask web app for queueing up AI work on your projects. Write tasks, get an
-AI (Claude Code, Codex, or any OpenAI-compatible API such as OpenAI, OpenRouter or
+AI (Claude Code, Codex, opencode, or any OpenAI-compatible API such as OpenAI, OpenRouter or
 Ollama) to help plan them, then queue them for the
 AI to implement. Projects can be local directories or directories on SSH hosts, and
 every completed task is committed to the project's own git repository.
@@ -151,7 +151,9 @@ Each project has a **Planning Model** (used to plan tasks), a **Coding Model** (
 run them) and an optional **Chat model** (blank means the planning model), all set in
 Project settings; the chat panel's model picker is a quick override that saves at once. Each task can override its planning and coding models in the task
 drawer, or for many tasks at once with **Set models** in the batch bar. **Settings** has
-a default planning and coding model for Claude Code, Codex and each endpoint.
+a default planning and coding model for Claude Code, Codex, opencode and each endpoint.
+opencode's model dropdown lists the models in the project's opencode config (or, if it
+names none, `opencode models`).
 
 The model for a job is the first one set of:
 
@@ -176,6 +178,7 @@ field, after saving a one-time backup to `projects.json.bak` in its data directo
   prompting. Tighten the run command in Settings if you want less.
 - **Codex** (`codex exec`) uses the `read-only` sandbox for planning and
   `workspace-write` for runs.
+- **opencode** (`opencode run`) runs a named opencode agent (see below).
 - **OpenAI-compatible endpoints** run a tool-calling agent against a Chat Completions
   API (see below). The agent can list, read and search files, and during runs it can
   also write files. Its tools run through the project's host, so remote projects don't
@@ -184,6 +187,57 @@ field, after saving a one-time backup to `projects.json.bak` in its data directo
   endpoint runs them unsandboxed.
 
 The CLIs must be installed and logged in on whichever machine hosts the project.
+
+### opencode
+
+Log in with `opencode auth login` on the machine that hosts the project. PatchGoblin
+runs `opencode run --agent {agent}` with the prompt on stdin. `{agent}` is the
+**planning agent** for planning and chat, or the **run agent** for runs. By default these
+are opencode's built-in `plan` and `build` agents; you can change them under
+**Settings → opencode**. Model names are `provider/model`, e.g. `anthropic/claude-sonnet-5`.
+
+Safety checks (both are on by default):
+
+- **Refuse to run if a custom agent isn't defined.** A name other than a built-in agent must
+  be defined in the project's or your `opencode.json`, or as an `.opencode/agent/<name>.md`
+  (or `~/.config/opencode/agent/<name>.md`) file. Otherwise the job fails before opencode
+  starts, rather than letting opencode fall back to a different agent.
+- **Fail planning if the plan agent edits files.** PatchGoblin compares `git status` before
+  and after planning (and chat). If files changed, the plan fails and names them. The
+  changes are left in place for you to review. While a task run is active in the same
+  project, changes can't be traced to the plan, so they are only logged.
+
+For planning, PatchGoblin also passes inline config (`OPENCODE_CONFIG_CONTENT`) that
+denies the planning agent `edit` and `bash`. It is still worth setting this in your own
+config, so the plan agent is read-only however opencode is started:
+
+```jsonc
+// opencode.json
+{
+  "agent": {
+    "plan": { "permission": { "edit": "deny", "bash": "deny", "webfetch": "allow" } }
+  }
+}
+```
+
+or in `.opencode/agent/plan.md` front matter:
+
+```markdown
+---
+permission:
+  edit: deny
+  bash: deny
+  webfetch: allow
+---
+```
+
+Permissions set to `ask` have no one to answer them under `opencode run`, so a job may
+wait until the plan or run timeout. The `build` agent has unsandboxed shell access, just
+like the Claude Code run command.
+
+An OpenAI-compatible endpoint saved with the id `opencode` (from before opencode was a
+CLI provider) is renamed to `opencode-api` on first start. Projects and tasks that used it
+are updated to match.
 
 ### OpenAI-compatible endpoints
 

@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 from flask import Flask, abort, jsonify, render_template, request
 
-from . import gitops
+from . import gitops, opencode
 from .engine import Engine
 from .hosts import HostError, host_for, open_terminal
 from .providers import PLAN_TRUST_LEVELS, endpoint_key, list_models, plan_questions, ready_status
@@ -26,9 +26,17 @@ ENDPOINT_ID = re.compile(r"^[a-z0-9_-]{1,32}$")
 MODELS_CACHE_SECONDS = 600
 
 
+AGENT_NAME = re.compile(r"^[A-Za-z0-9._/-]+$")
+COMMAND_FLAGS = ("require_agents", "plan_must_not_edit", "prompt_arg")
+
+
 def model_suggestions(settings: dict) -> dict:
-    """Model dropdown suggestions per provider id (endpoint lists are extended live in the UI)."""
+    """Model dropdown suggestions per provider id (endpoint lists, and opencode's per project,
+    are extended live in the UI)."""
     out = {p: list(MODELS[p]) for p in CLI_PROVIDERS}
+    opencode_cfg = settings["commands"].get("opencode") or {}
+    out["opencode"] += [m for m in (opencode_cfg.get("plan_model"), opencode_cfg.get("code_model"))
+                        if isinstance(m, str) and m and m not in out["opencode"]]
     for ep in settings["endpoints"]:
         builtin = list(MODELS["openai"]) if ep["id"] == "openai" else []
         own = [m for m in (ep["model"], ep.get("code_model", "")) if m]
@@ -49,11 +57,21 @@ def clean_commands(commands) -> dict:
     """Check the CLI settings sent by the Settings form (their model defaults must be names)."""
     if not isinstance(commands, dict):
         raise ValueError("commands must be an object.")
-    for cfg in commands.values():
+    for name, cfg in commands.items():
         if isinstance(cfg, dict):
             for key in MODEL_KEYS:
                 if key in cfg:
                     cfg[key] = model_name(cfg[key], "default model")
+            for key in ("plan_agent", "run_agent"):
+                if key in cfg:
+                    value = cfg[key].strip() if isinstance(cfg[key], str) else ""
+                    if not AGENT_NAME.match(value):
+                        raise ValueError(f"{name} {key.replace('_', ' ')} must be a name made of letters, "
+                                         "digits, '.', '_', '-' or '/'.")
+                    cfg[key] = value
+            for key in COMMAND_FLAGS:
+                if key in cfg and not isinstance(cfg[key], bool):
+                    raise ValueError(f"{name}.{key} must be true or false.")
     return commands
 
 
@@ -148,7 +166,11 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     app = Flask(__name__)
     data_dir = data_dir or os.environ.get("PATCHGOBLIN_DATA") or os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
-    registry, settings, store = Registry(data_dir), Settings(data_dir), TaskStore()
+    registry, settings = Registry(data_dir), Settings(data_dir)
+    # An endpoint whose id became a CLI provider was just renamed (once): follow it in projects.
+    for old, new in settings.renamed.items():
+        registry.rename_provider(old, new)
+    store = TaskStore(settings.get()["provider_renames"])
     engine = Engine(registry, store, settings)
     app.config.update(REGISTRY=registry, SETTINGS=settings, STORE=store, ENGINE=engine)
 
@@ -276,6 +298,35 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             except RuntimeError as exc:
                 live, error = [], str(exc)
         return jsonify(models=list(dict.fromkeys(suggestions + live)), error=error)
+
+    # ---- opencode -------------------------------------------------------------
+    opencode_cache: dict[str, tuple[float, dict]] = {}
+
+    @app.get("/api/projects/<pid>/opencode/models")
+    def opencode_models(pid):
+        """Models from the project's opencode config, else from ``opencode models``, plus the
+        Settings defaults. ``source`` says which ("config" or "cli")."""
+        project = project_or_404(pid)
+        with models_lock:
+            cached = opencode_cache.get(pid)
+        if cached and not request.args.get("refresh") and time.monotonic() - cached[0] < MODELS_CACHE_SECONDS:
+            found = cached[1]
+        else:
+            host, errors = host_for(project), []
+            models, source = [], "config"
+            try:
+                configs, errors = opencode.read_configs(host, project["path"])
+                models = opencode.config_models(configs)
+                if not models:
+                    models, source = opencode.cli_models(host, project["path"]), "cli"
+            except (HostError, RuntimeError) as exc:
+                errors.append(str(exc))
+            found = {"models": models, "source": source, "error": " ".join(errors)}
+            if not errors:
+                with models_lock:
+                    opencode_cache[pid] = (time.monotonic(), found)
+        defaults = model_suggestions(settings.get())["opencode"]
+        return jsonify({**found, "models": list(dict.fromkeys(defaults + found["models"]))})
 
     @app.post("/api/endpoints/test")
     def test_endpoint():

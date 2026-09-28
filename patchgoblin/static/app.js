@@ -96,14 +96,24 @@ const openTask = () => state.tasks.find(t => t.id === state.openTid);
 const MODELS = JSON.parse(document.body.dataset.models || "{}");
 let PROVIDERS = JSON.parse(document.body.dataset.providers || "[]");
 const CUSTOM_MODEL = "\u0000custom";
-const CLI = new Set(["claude", "codex"]);
+const CLI = new Set(["claude", "codex", "opencode"]);
+// opencode's models come from each project's own opencode config, so they are listed per project.
+const PER_PROJECT_MODELS = new Set(["opencode"]);
 
-// Endpoint model lists are fetched from the API once per session and merged into MODELS.
-const modelFetch = new Map(); // provider -> Promise
+// Live model lists are fetched once per session and merged into MODELS, under modelKey().
+const modelFetch = new Map(); // model key -> Promise
 const modelLoading = new Set();
 const modelErrors = {};
 
 const isEndpoint = id => !!id && !CLI.has(id) && PROVIDERS.some(p => p.id === id);
+const fetchesModels = id => isEndpoint(id) || PER_PROJECT_MODELS.has(id);
+
+// Where a provider's model list is kept: per project for opencode (pid "" = no project yet).
+const modelKey = (provider, pid = state.pid) =>
+  PER_PROJECT_MODELS.has(provider) ? `${provider}@${pid || ""}` : provider;
+// Selects in the Add project dialog (data-no-project) belong to no project yet.
+const selectPid = select => ("noProject" in select.dataset ? "" : state.pid);
+const modelList = (provider, pid = state.pid) => MODELS[modelKey(provider, pid)] || MODELS[provider] || [];
 
 function providerName(id) {
   const p = PROVIDERS.find(x => x.id === id);
@@ -129,26 +139,32 @@ function renderProviderSelects() {
   }
 }
 
-function ensureModels(provider, refresh = false) {
-  if (!isEndpoint(provider)) return Promise.resolve();
-  if (!refresh && modelFetch.has(provider)) return modelFetch.get(provider);
-  modelLoading.add(provider);
-  const job = api("GET", `/api/endpoints/${encodeURIComponent(provider)}/models${refresh ? "?refresh=1" : ""}`)
+function ensureModels(provider, refresh = false, pid = state.pid) {
+  if (!fetchesModels(provider)) return Promise.resolve();
+  const perProject = PER_PROJECT_MODELS.has(provider);
+  if (perProject && !pid) return Promise.resolve(); // no project yet: only the saved defaults
+  const key = modelKey(provider, pid);
+  if (!refresh && modelFetch.has(key)) return modelFetch.get(key);
+  modelLoading.add(key);
+  const url = perProject ? `/api/projects/${encodeURIComponent(pid)}/${provider}/models`
+    : `/api/endpoints/${encodeURIComponent(provider)}/models`;
+  const job = api("GET", url + (refresh ? "?refresh=1" : ""))
     .then(data => {
-      MODELS[provider] = [...new Set([...(MODELS[provider] || []), ...data.models])];
-      modelErrors[provider] = data.error || "";
+      MODELS[key] = [...new Set([...modelList(provider, pid), ...data.models])];
+      modelErrors[key] = data.error || "";
     })
-    .catch(e => { modelErrors[provider] = e.message; modelFetch.delete(provider); })
-    .finally(() => modelLoading.delete(provider));
-  modelFetch.set(provider, job);
+    .catch(e => { modelErrors[key] = e.message; modelFetch.delete(key); })
+    .finally(() => modelLoading.delete(key));
+  modelFetch.set(key, job);
   return job;
 }
 
-// Fills the select now, then again once the endpoint's live model list arrives.
+// Fills the select now, then again once the provider's live model list arrives.
 async function fillModelSelectLive(select, provider, current, stillValid = () => true, blankLabel = undefined) {
   fillModelSelect(select, provider, current, blankLabel);
-  if (!isEndpoint(provider) || (modelFetch.has(provider) && !modelLoading.has(provider))) return;
-  const job = ensureModels(provider);
+  const pid = selectPid(select), key = modelKey(provider, pid);
+  if (!fetchesModels(provider) || (modelFetch.has(key) && !modelLoading.has(key))) return;
+  const job = ensureModels(provider, false, pid);
   fillModelSelect(select, provider, current);
   await job;
   if (stillValid()) fillModelSelect(select, provider, select.dataset.value);
@@ -158,15 +174,16 @@ async function fillModelSelectLive(select, provider, current, stillValid = () =>
 // it is remembered on the select so later refills keep it.
 function fillModelSelect(select, provider, current = "", blankLabel = select.dataset.blank || "default") {
   select.dataset.blank = blankLabel;
-  const models = [...(MODELS[provider] || [])];
+  const pid = selectPid(select), key = modelKey(provider, pid);
+  const models = [...modelList(provider, pid)];
   if (current && !models.includes(current)) models.push(current);
   select.replaceChildren(el("option", { value: "" }, blankLabel),
     ...models.map(m => el("option", { value: m }, m)),
-    modelLoading.has(provider) ? el("option", { value: "", disabled: true }, "Loading models…") : null,
+    modelLoading.has(key) ? el("option", { value: "", disabled: true }, "Loading models…") : null,
     el("option", { value: CUSTOM_MODEL }, "Custom…"));
   select.value = current;
   select.dataset.value = current;
-  select.title = modelErrors[provider] ? `Couldn't list models: ${modelErrors[provider]}` : "";
+  select.title = modelErrors[key] ? `Couldn't list models: ${modelErrors[key]}` : "";
 }
 
 // Resolves the select's new value, asking for a name when "Custom…" is picked.
@@ -183,7 +200,7 @@ function pickModel(select, provider) {
 }
 
 // A model belongs to its provider, so drop it when switching to a provider that doesn't list it.
-const modelFor = (provider, model) => ((MODELS[provider] || []).includes(model) ? model : "");
+const modelFor = (provider, model, pid = state.pid) => (modelList(provider, pid).includes(model) ? model : "");
 
 /* ---------------- projects ---------------- */
 
@@ -284,7 +301,7 @@ function openProjectSettings() {
   $("#ps-where").textContent = p.location === "ssh"
     ? `SSH · ${p.ssh_target}${p.ssh_port ? ":" + p.ssh_port : ""} · ${p.path}` : `Local · ${p.path}`;
   setProviderValue(form.provider, provider);
-  $("#ps-model-refresh").hidden = !isEndpoint(provider);
+  $("#ps-model-refresh").hidden = !fetchesModels(provider);
   // A late model list must not refill the selects once the form shows another provider or project.
   const stillValid = () => state.view === "settings" && form.dataset.pid === p.id
     && form.provider.value === provider;
@@ -422,7 +439,7 @@ function setupProjectSettings() {
     const provider = form.provider.value;
     const before = chosen();
     const keep = () => before.map(m => modelFor(provider, m));
-    $("#ps-model-refresh").hidden = !isEndpoint(provider);
+    $("#ps-model-refresh").hidden = !fetchesModels(provider);
     refillSettingsModels(form, provider, keep());
     await ensureModels(provider);
     if (form.provider.value === provider && state.view === "settings") refillSettingsModels(form, provider, keep());
@@ -434,8 +451,8 @@ function setupProjectSettings() {
     await job;
     if (form.provider.value !== provider || state.view !== "settings") return;
     refillSettingsModels(form, provider, chosen());
-    toast(modelErrors[provider] ? `Couldn't list models: ${modelErrors[provider]}` : "Model list refreshed",
-      !!modelErrors[provider]);
+    const error = modelErrors[modelKey(provider)];
+    toast(error ? `Couldn't list models: ${error}` : "Model list refreshed", !!error);
   };
   for (const select of settingsModelSelects(form)) {
     select.addEventListener("change", () => pickModel(select, form.provider.value));
@@ -1292,9 +1309,9 @@ function setupProjectDialog() {
     const selects = [form.plan_model, form.code_model];
     const current = selects.map(s => s.dataset.value || "");
     for (const select of selects) fillModelSelect(select, provider, "");
-    await ensureModels(provider);
+    await ensureModels(provider, false, "");
     if (form.provider.value !== provider) return;
-    selects.forEach((select, i) => fillModelSelect(select, provider, modelFor(provider, current[i])));
+    selects.forEach((select, i) => fillModelSelect(select, provider, modelFor(provider, current[i], "")));
   };
   for (const select of [form.plan_model, form.code_model]) {
     select.onchange = () => pickModel(select, form.provider.value);
@@ -1327,6 +1344,8 @@ function setupProjectDialog() {
 const SETTING_FIELDS = [
   "claude.plan", "claude.run", "codex.plan", "codex.run",
   "claude.plan_model", "claude.code_model", "codex.plan_model", "codex.code_model",
+  "opencode.plan", "opencode.run", "opencode.plan_agent", "opencode.run_agent",
+  "opencode.plan_model", "opencode.code_model", "opencode.require_agents", "opencode.plan_must_not_edit",
   "timeouts.plan", "timeouts.run", "automation.auto_plan", "automation.auto_queue",
 ];
 
@@ -1429,7 +1448,7 @@ function applyProviderSettings(s) {
 
 function settingPath(name, settings) {
   const [group, key] = name.split(".");
-  return group === "claude" || group === "codex" ? [settings.commands[group], key] : [settings[group], key];
+  return CLI.has(group) ? [settings.commands[group], key] : [settings[group], key];
 }
 
 function setupSettingsDialog() {
@@ -1456,7 +1475,7 @@ function setupSettingsDialog() {
   };
   form.onsubmit = async ev => {
     ev.preventDefault();
-    const out = { commands: { claude: {}, codex: {} }, timeouts: {}, automation: {},
+    const out = { commands: Object.fromEntries([...CLI].map(p => [p, {}])), timeouts: {}, automation: {},
       endpoints: $$("#endpoint-list .endpoint").map(readEndpoint) };
     for (const name of SETTING_FIELDS) {
       const [obj, key] = settingPath(name, out);

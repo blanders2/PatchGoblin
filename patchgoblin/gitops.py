@@ -54,12 +54,17 @@ def _identity(host, path: str) -> list[str]:
     return [] if git(host, path, "config", "user.email").ok else FALLBACK_IDENTITY
 
 
-def has_changes(host, path: str, ignore_metadata: bool = False) -> bool:
+def status_lines(host, path: str, ignore_metadata: bool = False) -> list[str]:
+    """``git status --porcelain`` lines (untracked files listed one by one)."""
     res = _check(git(host, path, "status", "--porcelain", "--untracked-files=all"), "status")
     lines = [ln for ln in res.stdout.splitlines() if ln.strip()]
     if ignore_metadata:
         lines = [ln for ln in lines if not ln[3:].strip('"').startswith(".patchgoblin/")]
-    return bool(lines)
+    return lines
+
+
+def has_changes(host, path: str, ignore_metadata: bool = False) -> bool:
+    return bool(status_lines(host, path, ignore_metadata))
 
 
 def commit_all(host, path: str, message: str) -> str:
