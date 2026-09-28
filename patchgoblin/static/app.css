@@ -144,6 +144,7 @@ main { flex: 1; min-width: 0; overflow: auto; padding: 18px 22px; }
 .project-head .muted { word-break: break-all; }
 .project-controls { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
 .project-controls select, .project-controls input { width: auto; }
+.project-controls #p-plan-limit { width: 6.5em; }
 
 .new-task { display: flex; gap: 8px; margin: 12px 0 16px; }
 .new-task #nt-title { flex: 2; }
@@ -169,6 +170,18 @@ main { flex: 1; min-width: 0; overflow: auto; padding: 18px 22px; }
   animation: pulse 1.2s ease-in-out infinite;
 }
 .queue-tab .activity[hidden] { display: none; }
+/* Batch toolbar: appears once any card is ticked, and stays in view while scrolling. */
+.batch-bar {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  background: var(--b-planned); border: 1px solid var(--accent); border-radius: 9px;
+  padding: 6px 10px; margin-bottom: 10px; box-shadow: var(--shadow);
+}
+.batch-bar[hidden], .batch-bar [hidden] { display: none; }
+.batch-bar label.check { color: var(--text); font-weight: 600; margin-right: 4px; }
+.batch-actions, .batch-provider { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.batch-provider select { width: auto; padding: 2px 6px; font-size: 12.5px; }
+#batch-delete { margin-left: auto; }
 .board { display: block; }
 .column { background: var(--panel-2); border-radius: 10px; padding: 10px; min-height: 120px; }
 .column[hidden] { display: none; }
@@ -188,6 +201,8 @@ main { flex: 1; min-width: 0; overflow: auto; padding: 18px 22px; }
 }
 .card:hover { border-color: var(--accent); }
 .card.open { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.card.selected { background: var(--b-planned); border-color: var(--accent); }
+.card input.select { width: auto; margin: 0; flex-shrink: 0; cursor: pointer; order: -1; }
 .card-top { display: contents; }
 .tid { color: var(--muted); font-size: 12px; min-width: 2.5em; order: 0; }
 .card-title { font-weight: 550; word-break: break-word; flex: 1; min-width: 0; order: 1; }

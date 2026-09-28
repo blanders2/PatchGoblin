@@ -24,6 +24,8 @@ const state = {
   formStamp: null, // server values of the editable fields when the drawer form was filled
   questionStamp: null, // questions shown in the drawer, so polling doesn't wipe typed answers
   dirty: false,
+  selected: new Set(), // task ids ticked for batch actions; always within the current tab
+  lastSelected: null, // anchor for shift-click range selection
 };
 
 function validTab(col) { return Object.values(COLUMN_OF).includes(col) ? col : "unplanned"; }
@@ -140,6 +142,7 @@ function renderProjects() {
 
 async function selectProject(pid) {
   if (pid !== state.pid) closeDrawer();
+  if (pid !== state.pid) clearSelection(false);
   state.pid = pid;
   if (pid) localStorageSet("pg.pid", pid);
   renderProjects();
@@ -150,6 +153,7 @@ async function selectProject(pid) {
     ? `${p.ssh_target}${p.ssh_port ? ":" + p.ssh_port : ""}:${p.path}` : p.path;
   $("#p-provider").value = p.provider || "claude";
   fillModelSelect($("#p-model"), p.provider || "claude", p.model || "");
+  $("#p-plan-limit").value = p.plan_limit || "";
   state.tasks = [];
   renderBoard();
   loadChat();
@@ -220,9 +224,11 @@ function renderBoard() {
     tab.classList.toggle("active", active);
     tab.tabIndex = active ? 0 : -1;
   }
+  renderBatchBar();
 }
 
 function selectTab(col, focus = false) {
+  if (validTab(col) !== state.tab) clearSelection(false);
   state.tab = validTab(col);
   localStorageSet("pg.tab", state.tab);
   renderBoard();
@@ -245,12 +251,24 @@ const hasOpenQuestions = t => PLANNABLE.has(t.status) && (t.questions || []).len
 
 function renderCard(t) {
   const p = currentProject();
+  const selected = state.selected.has(t.id);
   return el("div", {
-    class: `card status-${t.status}${t.id === state.openTid ? " open" : ""}`,
+    class: `card status-${t.status}${t.id === state.openTid ? " open" : ""}${selected ? " selected" : ""}`,
     tabindex: "0",
+    "data-tid": String(t.id),
     onclick: () => openDrawer(t.id),
-    onkeydown: e => { if (e.key === "Enter") openDrawer(t.id); },
+    onkeydown: e => {
+      if (e.target !== e.currentTarget) return;
+      if (e.key === "Enter") openDrawer(t.id);
+      if (e.key === " ") { e.preventDefault(); toggleSelect(t.id, !selected, e.shiftKey, true); }
+    },
   },
+  el("input", {
+    type: "checkbox", class: "select", checked: selected, "aria-label": `Select task #${t.id}`,
+    title: "Select for batch actions (Shift+click selects a range)",
+    onclick: e => { e.stopPropagation(); toggleSelect(t.id, e.target.checked, e.shiftKey, false); },
+    onkeydown: e => e.stopPropagation(),
+  }),
   el("div", { class: "card-top" },
     el("span", { class: "tid" }, `#${t.id}`),
     el("span", { class: `badge ${t.status}` }, STATUS_LABEL[t.status])),
@@ -277,6 +295,128 @@ async function createTask(ev) {
     if (state.tab !== "unplanned") selectTab("unplanned");
     else renderBoard();
   } catch (e) { toast(e.message, true); }
+}
+
+/* ---------------- batch actions ---------------- */
+
+// Mirrors the drawer's per-status buttons and TRANSITIONS in app.py.
+const BATCH_ACTIONS = [
+  { action: "plan", label: "Plan with AI", from: ["unplanned", "planned", "failed"] },
+  { action: "mark_planned", label: "Mark planned", from: ["unplanned", "failed"] },
+  { action: "queue", label: "Queue for AI", from: ["planned", "failed"] },
+  { action: "dequeue", label: "Remove from queue", from: ["queued"] },
+  { action: "unplan", label: "Back to unplanned", from: ["planned"] },
+  { action: "reopen", label: "Reopen", from: ["done"] },
+  { action: "cancel", label: "Cancel", from: ["planning", "running"], cls: "danger" },
+];
+const NOT_BUSY = ["unplanned", "planned", "queued", "done", "failed"];
+const BATCH_VERB = { delete: "Deleted", set_provider: "Updated", plan: "Started planning",
+  mark_planned: "Marked planned", queue: "Queued", dequeue: "Removed from queue",
+  unplan: "Moved back", reopen: "Reopened", cancel: "Cancelled" };
+
+const tabTasks = () => sortTasks(state.tab, state.tasks.filter(t => COLUMN_OF[t.status] === state.tab));
+const selectedTasks = () => state.tasks.filter(t => state.selected.has(t.id));
+const eligible = from => selectedTasks().filter(t => from.includes(t.status));
+
+function clearSelection(render = true) {
+  state.selected.clear();
+  state.lastSelected = null;
+  if (render) renderBoard();
+}
+
+function toggleSelect(tid, on, range, focus) {
+  const ids = tabTasks().map(t => t.id);
+  const from = ids.indexOf(state.lastSelected);
+  const to = ids.indexOf(tid);
+  const span = range && from >= 0 && to >= 0
+    ? ids.slice(Math.min(from, to), Math.max(from, to) + 1) : [tid];
+  for (const id of span) on ? state.selected.add(id) : state.selected.delete(id);
+  state.lastSelected = tid;
+  renderBoard();
+  if (focus) { const card = $(`.card[data-tid="${tid}"]`); if (card) card.focus(); }
+}
+
+function renderBatchBar() {
+  const bar = $("#batch-bar");
+  // Drop ids that left the tab (status changed) or were deleted.
+  const inTab = new Set(tabTasks().map(t => t.id));
+  for (const id of state.selected) if (!inTab.has(id)) state.selected.delete(id);
+  const n = state.selected.size;
+  bar.hidden = n === 0;
+  if (!n) return;
+
+  $("#batch-count").textContent = `${n} selected`;
+  const all = $("#batch-all");
+  all.checked = n === inTab.size;
+  all.indeterminate = n > 0 && n < inTab.size;
+  all.title = all.checked ? "Select none" : "Select all in this tab";
+
+  $("#batch-actions").replaceChildren(...BATCH_ACTIONS.map(a => {
+    const count = eligible(a.from).length;
+    return count ? actionButton(`${a.label} (${count})`, () => doBatch(a.action), `small ${a.cls || ""}`) : null;
+  }).filter(Boolean));
+
+  const editable = eligible(NOT_BUSY).length;
+  $(".batch-provider", bar).hidden = !editable;
+  $("#batch-provider-btn").textContent = `Set AI (${editable})`;
+  const del = $("#batch-delete");
+  del.hidden = !editable;
+  del.textContent = `Delete (${editable})`;
+}
+
+async function doBatch(action, extra = {}) {
+  const label = action === "delete" ? "Delete" : action === "set_provider" ? "Set AI"
+    : BATCH_ACTIONS.find(a => a.action === action).label;
+  const from = BATCH_ACTIONS.find(a => a.action === action)?.from || NOT_BUSY;
+  const targets = eligible(from);
+  if (!targets.length) return;
+  const n = targets.length;
+  const many = `${n} task${n === 1 ? "" : "s"}`;
+  if (action === "delete" && !confirm(`Delete ${many} permanently?\n\n${targets.map(t => `#${t.id} ${t.title}`).join("\n")}`)) return;
+  if (action === "cancel" && !confirm(`Cancel the AI job for ${many}?`)) return;
+  if (action === "queue") {
+    const asking = targets.filter(hasOpenQuestions).length;
+    if (asking && !confirm(`${asking} of these plans still have unanswered questions. Queue anyway?`)) return;
+  }
+  const body = { action, ids: targets.map(t => t.id), ...extra };
+  if (action === "plan") {
+    const feedback = prompt(`Plan ${many} with AI.\nOptional feedback for the AI (applies to every task):`, "");
+    if (feedback === null) return;
+    body.feedback = feedback;
+  }
+  let data;
+  try {
+    data = await api("POST", `/api/projects/${state.pid}/tasks/batch`, body);
+  } catch (e) { toast(e.message, true); return; }
+
+  state.tasks = data.tasks;
+  const ok = data.results.filter(r => r.ok);
+  const failed = data.results.filter(r => !r.ok);
+  for (const r of ok) state.selected.delete(r.id);
+  const affectsDrawer = state.openTid !== null && ok.some(r => r.id === state.openTid);
+  if (affectsDrawer) state.formStamp = null;
+  renderBoard();
+  if (state.openTid !== null) renderDrawer(false);
+
+  let message = `${BATCH_VERB[action] || label} ${ok.length}`;
+  if (failed.length) {
+    message += `, skipped ${failed.length}: ` + failed.slice(0, 3).map(r => `#${r.id} ${r.error}`).join("; ")
+      + (failed.length > 3 ? "; …" : "");
+  }
+  if (affectsDrawer && state.dirty) message += " (the open task has unsaved edits; they were kept)";
+  toast(message, failed.length > 0);
+}
+
+function setupBatchBar() {
+  $("#batch-all").onchange = e => {
+    if (e.target.checked) for (const t of tabTasks()) state.selected.add(t.id);
+    else state.selected.clear();
+    state.lastSelected = null;
+    renderBoard();
+  };
+  $("#batch-clear").onclick = () => clearSelection();
+  $("#batch-delete").onclick = () => doBatch("delete");
+  $("#batch-provider-btn").onclick = () => doBatch("set_provider", { provider: $("#batch-provider").value });
 }
 
 /* ---------------- drawer ---------------- */
@@ -781,6 +921,7 @@ function init() {
   setupProjectDialog();
   setupSettingsDialog();
   setupChat();
+  setupBatchBar();
   $("#new-task").onsubmit = createTask;
   $("#commits-btn").onclick = showCommits;
   $("#terminal-btn").onclick = async () => {
@@ -800,6 +941,10 @@ function init() {
   $("#p-model").onchange = e => {
     const model = pickModel(e.target, currentProject().provider || "claude");
     if (model !== null) updateProject({ model });
+  };
+  $("#p-plan-limit").onchange = async e => {
+    await updateProject({ plan_limit: e.target.value === "" ? 0 : Number(e.target.value) });
+    e.target.value = currentProject().plan_limit || "";
   };
   $("#remove-project-btn").onclick = async () => {
     const p = currentProject();
@@ -830,6 +975,8 @@ function init() {
     else $("#" + id).close();
   });
   document.addEventListener("keydown", e => {
+    if (e.key === "Escape" && $("#drawer").hidden && $("#chat").hidden && state.selected.size
+        && !document.querySelector("dialog[open]")) clearSelection();
     if (e.key === "Escape" && !$("#drawer").hidden && !document.querySelector("dialog[open]")) closeDrawer();
     if (e.key === "Escape" && !$("#chat").hidden && !document.querySelector("dialog[open]")) closeChat();
     if ((e.ctrlKey || e.metaKey) && e.key === "s" && !$("#drawer").hidden) { e.preventDefault(); saveTask(); }

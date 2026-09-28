@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -11,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from patchgoblin import create_app  # noqa: E402
 from patchgoblin.hosts import HostError, LocalHost, SSHHost, terminal_command  # noqa: E402
-from patchgoblin.providers import OpenAIAgent, ProjectFiles  # noqa: E402
+from patchgoblin.providers import OpenAIAgent, Outcome, ProjectFiles  # noqa: E402
 
 FAKE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_agent.py")
 H = {"X-PatchGoblin": "1"}
@@ -203,6 +204,154 @@ class WorkflowTests(AppTestCase):
             self.assertEqual(self.action(pid, tid, "queue").get_json()["status"], "queued")
         self.assertEqual(self.action(pid, tid, "dequeue").get_json()["status"], "planned")
         self.assertEqual(self.action(pid, tid, "bogus").status_code, 400)
+
+    def batch(self, pid, action, ids, **extra):
+        return self.client.post(f"/api/projects/{pid}/tasks/batch", headers=H,
+                                json={"action": action, "ids": ids, **extra})
+
+    def slow_ai(self, delay=0.4):
+        """Replace the engine's AI call with a slow fake that records peak planning concurrency."""
+        engine = self.app.config["ENGINE"]
+        seen = {"now": 0, "peak": 0, "calls": []}
+        lock = threading.Lock()
+
+        def fake(project, task, mode, prompt, job):
+            with lock:
+                seen["now"] += 1
+                seen["peak"] = max(seen["peak"], seen["now"])
+                seen["calls"].append(task["id"])
+            time.sleep(delay)
+            with lock:
+                seen["now"] -= 1
+            return Outcome(True, text="plan text")
+        patcher = mock.patch.object(engine, "_ai", side_effect=fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return seen
+
+    def test_batch_mark_planned_and_queue(self):
+        pid = self.add_project()["id"]
+        engine = self.app.config["ENGINE"]
+        ids = [self.post_task(pid, f"t{i}")["id"] for i in range(3)]
+        res = self.batch(pid, "mark_planned", ids)
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertTrue(all(r["ok"] for r in res.get_json()["results"]))
+        with mock.patch.object(engine, "kick") as kick:
+            data = self.batch(pid, "queue", ids).get_json()
+        self.assertEqual(kick.call_count, 1)
+        tasks = [t for t in data["tasks"] if t["id"] in ids]
+        self.assertEqual({t["status"] for t in tasks}, {"queued"})
+        self.assertEqual(len({t["queued_at"] for t in tasks}), 1)
+        data = self.batch(pid, "dequeue", ids).get_json()
+        self.assertEqual({t["status"] for t in data["tasks"]}, {"planned"})
+
+    def test_batch_partial_failure(self):
+        pid = self.add_project()["id"]
+        engine = self.app.config["ENGINE"]
+        a, b = (self.post_task(pid, t)["id"] for t in ("a", "b"))
+        self.action(pid, b, "mark_planned")
+        with mock.patch.object(engine, "kick") as kick:
+            res = self.batch(pid, "queue", [a, b, 99, b])
+        self.assertEqual(res.status_code, 200)
+        results = {r["id"]: r for r in res.get_json()["results"]}
+        self.assertEqual(list(results), [a, b, 99])
+        self.assertFalse(results[a]["ok"])
+        self.assertIn("unplanned", results[a]["error"])
+        self.assertTrue(results[b]["ok"])
+        self.assertEqual(results[99]["error"], "not found")
+        self.assertEqual(kick.call_count, 1)
+        with mock.patch.object(engine, "kick") as kick:
+            self.batch(pid, "queue", [a])
+        kick.assert_not_called()
+
+    def test_batch_plan_unlimited(self):
+        pid = self.add_project()["id"]
+        ids = [self.post_task(pid, f"t{i}")["id"] for i in range(3)]
+        seen = self.slow_ai()
+        res = self.batch(pid, "plan", ids, feedback="keep it short")
+        self.assertTrue(all(r["ok"] for r in res.get_json()["results"]), res.get_json())
+        for tid in ids:
+            self.assertEqual(self.wait_for(pid, tid, {"planned"})["plan"], "plan text")
+        self.assertEqual(seen["peak"], 3)
+
+    def test_batch_plan_respects_limit(self):
+        pid = self.add_project()["id"]
+        res = self.client.patch(f"/api/projects/{pid}", headers=H, json={"plan_limit": 1})
+        self.assertEqual(res.get_json()["plan_limit"], 1)
+        ids = [self.post_task(pid, f"t{i}")["id"] for i in range(3)]
+        seen = self.slow_ai(0.2)
+        self.batch(pid, "plan", ids)
+        for tid in ids:
+            self.wait_for(pid, tid, {"planned"})
+        self.assertEqual(seen["peak"], 1)
+        self.assertEqual(sorted(seen["calls"]), ids)
+
+    def test_plan_limit_validation(self):
+        pid = self.add_project()["id"]
+        url = f"/api/projects/{pid}"
+        for bad in (-1, "abc", 1.5, True):
+            self.assertEqual(self.client.patch(url, headers=H, json={"plan_limit": bad}).status_code, 400, bad)
+        for value, stored in ((0, 0), ("", 0), (None, 0), ("3", 3), (2, 2)):
+            self.assertEqual(self.client.patch(url, headers=H, json={"plan_limit": value})
+                             .get_json()["plan_limit"], stored)
+
+    def test_batch_cancel_waiting_planner(self):
+        pid = self.add_project()["id"]
+        self.client.patch(f"/api/projects/{pid}", headers=H, json={"plan_limit": 1})
+        a, b = (self.post_task(pid, t)["id"] for t in ("a", "b"))
+        self.action(pid, b, "mark_planned")
+        seen = self.slow_ai(1.5)
+        self.action(pid, a, "plan")
+        deadline = time.time() + 5
+        while not seen["calls"] and time.time() < deadline:
+            time.sleep(0.05)
+        self.action(pid, b, "plan")
+        res = self.batch(pid, "cancel", [b])
+        self.assertTrue(res.get_json()["results"][0]["ok"], res.get_json())
+        task = self.wait_for(pid, b, {"planned"})
+        self.assertIn("cancelled", task["error"])
+        self.assertIn("Waiting for a planning slot", task["output"])
+        self.wait_for(pid, a, {"planned"})
+        self.assertEqual(seen["calls"], [a])
+        res = self.batch(pid, "cancel", [a])
+        self.assertIn("No AI job", res.get_json()["results"][0]["error"])
+
+    def test_batch_delete_and_provider_skip_locked(self):
+        pid = self.add_project()["id"]
+        a, b, c = (self.post_task(pid, t)["id"] for t in ("a", "b", "c"))
+        path = os.path.join(self.proj_dir, ".patchgoblin", "tasks.json")
+        engine = self.app.config["ENGINE"]
+        engine.jobs[(pid, c)] = mock.Mock()  # keep reconcile() from resetting the fake "running" task
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        doc["tasks"][2]["status"] = "running"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        self.app.config["STORE"].forget(pid)
+
+        data = self.batch(pid, "set_provider", [a, b, c], provider="codex").get_json()
+        self.assertEqual([r["ok"] for r in data["results"]], [True, True, False])
+        by_id = {t["id"]: t for t in data["tasks"]}
+        self.assertEqual((by_id[a]["provider"], by_id[c]["provider"]), ("codex", ""))
+        self.assertEqual(by_id[a]["history"][-1]["event"], "Edited provider")
+        self.assertEqual(self.batch(pid, "set_provider", [a], provider="nope").status_code, 400)
+        data = self.batch(pid, "set_provider", [a], provider="").get_json()
+        self.assertEqual(data["tasks"][0]["provider"], "")
+
+        data = self.batch(pid, "delete", [a, b, c]).get_json()
+        self.assertEqual([r["ok"] for r in data["results"]], [True, True, False])
+        self.assertEqual([t["id"] for t in data["tasks"]], [c])
+        del engine.jobs[(pid, c)]
+
+    def test_batch_validation(self):
+        pid = self.add_project()["id"]
+        tid = self.post_task(pid, "t")["id"]
+        for action, ids in (("bogus", [tid]), ("queue", []), ("queue", ["1"]), ("queue", [True]),
+                            ("queue", "1"), ("queue", list(range(201)))):
+            self.assertEqual(self.batch(pid, action, ids).status_code, 400, (action, ids))
+        res = self.client.post(f"/api/projects/{pid}/tasks/batch", json={"action": "queue", "ids": [tid]})
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(self.batch("nope", "queue", [tid]).status_code, 404)
 
     def test_interrupted_tasks_are_reconciled(self):
         pid = self.add_project()["id"]

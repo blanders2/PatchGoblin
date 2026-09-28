@@ -49,6 +49,20 @@ Planning and implementation both run **in the project's directory, on the projec
 host**. Each project runs one task at a time, in queue order. Different projects run in
 parallel. Planning jobs start straight away because they don't change files.
 
+**Plan limit.** By default there's no limit on how many planning jobs a project runs
+at once, and each job is a separate AI process. If batch planning hits your provider's
+rate limits, set **Plan limit** in the project bar. Extra tasks then show as Planning…
+and wait for a free slot. Leave it blank for unlimited. Lowering the limit doesn't stop
+jobs that are already running.
+
+**Batch actions.** Tick the checkbox on each card you want (Shift+click selects a
+range, Space toggles the focused card, Esc clears). A toolbar then shows the actions
+that apply to the ticked tasks: Plan with AI, Mark planned, Queue for AI, Remove from
+queue, Back to unplanned, Reopen, Cancel, Set AI and Delete. The same rules apply as for
+a single task. Tasks that don't qualify are skipped and listed in the result message,
+and the rest still go through. Batch-queued tasks run in id order. Selections stay
+within the current tab.
+
 **Git.** Before a run, any uncommitted changes you made are committed as a
 `checkpoint before task #N`, so the AI's commit contains only its own work. After a
 successful run, everything is committed as `PatchGoblin: task #N <title>` with the

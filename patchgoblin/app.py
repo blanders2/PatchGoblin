@@ -157,7 +157,23 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             fields["provider"] = data["provider"]
         if "model" in data:
             fields["model"] = (data["model"] or "").strip()
+        if "plan_limit" in data:
+            fields["plan_limit"] = plan_limit(data["plan_limit"])
         return jsonify(registry.update(project["id"], fields))
+
+    def plan_limit(value) -> int:
+        """Max simultaneous planning jobs for a project; 0 means unlimited."""
+        if value is None or value == "":
+            return 0
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise ValueError("Plan limit must be a whole number ≥ 0.")
+        try:
+            limit = int(value)
+        except ValueError:
+            raise ValueError("Plan limit must be a whole number ≥ 0.") from None
+        if limit < 0:
+            raise ValueError("Plan limit must be a whole number ≥ 0.")
+        return limit
 
     @app.delete("/api/projects/<pid>")
     def remove_project(pid):
@@ -275,31 +291,107 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         "reopen": (("done",), "planned", "Reopened"),
     }
 
-    @app.post("/api/projects/<pid>/tasks/<int:tid>/action")
-    def task_action(pid, tid):
-        project = project_or_404(pid)
-        data = body()
-        action = data.get("action")
+    def transition(task: dict, action: str, queued_at: str | None = None) -> None:
+        allowed, status, message = TRANSITIONS[action]
+        if task["status"] not in allowed:
+            raise ValueError(f"Cannot {action.replace('_', ' ')} a task that is {task['status']}.")
+        if action == "queue":
+            task["queued_at"] = queued_at or now()
+        set_status(task, status, message)
+
+    def apply_action(project: dict, tid: int, action: str, data: dict) -> None:
+        """One task's action; raises KeyError for a missing task, ValueError if not allowed."""
+        pid = project["id"]
         if action == "plan":
             engine.start_planning(project, tid, data.get("feedback") or "", plan_answers(data.get("answers")))
         elif action == "cancel":
             if not engine.cancel(pid, tid):
                 raise ValueError("No AI job is running for this task.")
         elif action in TRANSITIONS:
-            allowed, status, message = TRANSITIONS[action]
             with store.edit(project) as doc:
-                task = find_task(doc, tid) or abort(404)
-                if task["status"] not in allowed:
-                    raise ValueError(f"Cannot {action.replace('_', ' ')} a task that is {task['status']}.")
-                if action == "queue":
-                    task["queued_at"] = now()
-                set_status(task, status, message)
-            if action == "queue":
-                engine.kick(pid)
+                task = find_task(doc, tid)
+                if task is None:
+                    raise KeyError(tid)
+                transition(task, action)
         else:
             raise ValueError(f"Unknown action {action!r}.")
+
+    @app.post("/api/projects/<pid>/tasks/<int:tid>/action")
+    def task_action(pid, tid):
+        project = project_or_404(pid)
+        data = body()
+        action = data.get("action")
+        try:
+            apply_action(project, tid, action, data)
+        except KeyError:
+            abort(404)
+        if action == "queue":
+            engine.kick(pid)
         doc = store.read(project, fresh=True)
         return jsonify(task_view(pid, find_task(doc, tid) or abort(404)))
+
+    BATCH_ACTIONS = set(TRANSITIONS) | {"plan", "cancel", "delete", "set_provider"}
+    MAX_BATCH = 200
+
+    @app.post("/api/projects/<pid>/tasks/batch")
+    def batch_action(pid):
+        """Apply one action to many tasks. Each task succeeds or fails on its own."""
+        project = project_or_404(pid)
+        data = body()
+        action = data.get("action")
+        if action not in BATCH_ACTIONS:
+            raise ValueError(f"Unknown action {action!r}.")
+        ids = data.get("ids")
+        if not isinstance(ids, list) or not ids or not all(
+                isinstance(i, int) and not isinstance(i, bool) for i in ids):
+            raise ValueError("ids must be a non-empty list of task ids.")
+        ids = list(dict.fromkeys(ids))
+        if len(ids) > MAX_BATCH:
+            raise ValueError(f"At most {MAX_BATCH} tasks per batch.")
+        provider = data.get("provider") or ""
+        if action == "set_provider" and provider and provider not in PROVIDERS:
+            raise ValueError("Unknown provider.")
+
+        errors: dict[int, str] = {}
+
+        def each(fn) -> None:
+            for tid in ids:
+                try:
+                    fn(tid)
+                except KeyError:
+                    errors[tid] = "not found"
+                except ValueError as exc:
+                    errors[tid] = str(exc)
+
+        if action == "plan":
+            each(lambda tid: engine.start_planning(project, tid, data.get("feedback") or ""))
+        elif action == "cancel":
+            each(lambda tid: apply_action(project, tid, "cancel", data))
+        else:
+            # Everything else is a plain edit of tasks.json: one read and one write for the batch.
+            stamp = now()
+            with store.edit(project) as doc:
+                def edit_one(tid):
+                    task = find_task(doc, tid)
+                    if task is None:
+                        raise KeyError(tid)
+                    if action in TRANSITIONS:
+                        transition(task, action, stamp)
+                    elif task["status"] in LOCKED:
+                        raise ValueError(f"Task is {task['status']}; cancel it first.")
+                    elif action == "delete":
+                        doc["tasks"].remove(task)
+                    elif task.get("provider", "") != provider:
+                        task["provider"] = provider
+                        log_event(task, "Edited provider")
+                each(edit_one)
+            if action == "queue" and len(errors) < len(ids):
+                engine.kick(pid)
+
+        doc = store.read(project, fresh=True)
+        results = [{"id": tid, "ok": False, "error": errors[tid]} if tid in errors else {"id": tid, "ok": True}
+                   for tid in ids]
+        return jsonify(results=results, tasks=[task_view(pid, t) for t in doc["tasks"]])
 
     @app.get("/api/projects/<pid>/tasks/<int:tid>/live")
     def live(pid, tid):

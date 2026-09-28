@@ -3,7 +3,8 @@
 The queue itself is just the task states in each project's tasks.json: the
 runner for a project repeatedly claims the oldest ``queued`` task. Runs in one
 project are strictly sequential (they share a working tree and git history);
-different projects run in parallel. Planning is read-only and runs immediately.
+different projects run in parallel. Planning is read-only and runs immediately,
+unless the project sets a ``plan_limit`` on simultaneous planning jobs.
 """
 from __future__ import annotations
 
@@ -86,6 +87,10 @@ class Engine:
         self._lock = threading.Lock()
         self._runners: set[str] = set()
         self._pending: set[str] = set()
+        # Planning concurrency per project. A Condition rather than a Semaphore because the
+        # project's plan_limit can change at runtime and 0 means "no limit".
+        self._plan_gate = threading.Condition()
+        self._planners: dict[str, int] = {}
 
     # ---- helpers -------------------------------------------------------
     def job(self, pid: str, tid: int) -> Job | None:
@@ -170,11 +175,42 @@ class Engine:
         threading.Thread(target=self._plan, args=(project, snapshot, feedback, answers, job),
                          name=f"pg-plan-{pid}-{tid}", daemon=True).start()
 
+    def _plan_limit(self, pid: str) -> int:
+        try:
+            return max(0, int((self.registry.get(pid) or {}).get("plan_limit") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _acquire_plan_slot(self, pid: str, job: Job) -> None:
+        """Wait until the project has a free planning slot; raise Cancelled if cancelled first."""
+        with self._plan_gate:
+            waiting = False
+            while True:
+                if job.cancelled:
+                    raise Cancelled()
+                limit = self._plan_limit(pid)  # re-read so a changed limit applies at once
+                if limit <= 0 or self._planners.get(pid, 0) < limit:
+                    break
+                if not waiting:
+                    job.write(f"[{now()}] Waiting for a planning slot (limit {limit})\n")
+                    waiting = True
+                self._plan_gate.wait(timeout=1)
+            self._planners[pid] = self._planners.get(pid, 0) + 1
+
+    def _release_plan_slot(self, pid: str) -> None:
+        with self._plan_gate:
+            self._planners[pid] = max(0, self._planners.get(pid, 0) - 1)
+            self._plan_gate.notify_all()
+
     def _plan(self, project, task, feedback, answers, job) -> None:
         pid, tid = project["id"], task["id"]
         try:
             try:
-                outcome = self._ai(project, task, "plan", plan_prompt(task, feedback, answers), job)
+                self._acquire_plan_slot(pid, job)
+                try:
+                    outcome = self._ai(project, task, "plan", plan_prompt(task, feedback, answers), job)
+                finally:
+                    self._release_plan_slot(pid)
             except Cancelled:
                 outcome = Outcome(False, error="Planning cancelled.")
             with self.store.edit(project) as doc:

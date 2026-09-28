@@ -44,6 +44,10 @@
             </select>
           </label>
           <label>Model <select id="p-model"></select></label>
+          <label>Plan limit
+            <input id="p-plan-limit" type="number" min="0" step="1" placeholder="∞"
+                   title="Max simultaneous planning jobs (blank = unlimited). Each job is one AI CLI process.">
+          </label>
           <button class="ghost" id="chat-btn" title="Ask the AI about this project (read-only)">Chat</button>
           <button class="ghost" id="terminal-btn" title="Open a terminal in the project directory">Terminal</button>
           <button class="ghost" id="commits-btn">Commits</button>
@@ -64,6 +68,19 @@
           {{ label }} <span class="activity" hidden></span><span class="count empty"></span>
         </button>
         {% endfor %}
+      </div>
+      <div id="batch-bar" class="batch-bar" hidden role="toolbar" aria-label="Batch actions">
+        <label class="check small"><input type="checkbox" id="batch-all"> <span id="batch-count"></span></label>
+        <span class="batch-actions" id="batch-actions"></span>
+        <span class="batch-provider">
+          <select id="batch-provider" aria-label="AI for the selected tasks">
+            <option value="">project default</option>
+            {% for p in providers %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+          </select>
+          <button type="button" class="ghost small" id="batch-provider-btn">Set AI</button>
+        </span>
+        <button type="button" class="ghost small danger" id="batch-delete"></button>
+        <button type="button" class="ghost small" id="batch-clear" title="Clear selection (Esc)">✕</button>
       </div>
       <div class="board">
         {% for col in ["unplanned", "planned", "queue", "finished"] %}
