@@ -1,0 +1,14 @@
+[project]
+name = "patchgoblin"
+version = "0.1.0"
+description = "Queue AI planning and implementation tasks on local and SSH projects."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "Flask>=3.1,<4",
+    "waitress>=3.0,<4",
+]
+
+[tool.uv]
+# An app run from this directory (python run.py), not an installable package.
+package = false

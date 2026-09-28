@@ -1,0 +1,283 @@
+"""Background work: AI planning jobs and the per-project run queue.
+
+The queue itself is just the task states in each project's tasks.json: the
+runner for a project repeatedly claims the oldest ``queued`` task. Runs in one
+project are strictly sequential (they share a working tree and git history);
+different projects run in parallel. Planning is read-only and runs immediately.
+"""
+from __future__ import annotations
+
+import logging
+import threading
+import time
+
+from . import gitops
+from .hosts import HostError, host_for, kill_tree
+from .providers import Cancelled, Outcome, plan_prompt, run_ai, run_prompt
+from .store import find_task, log_event, now, set_status
+
+log = logging.getLogger("patchgoblin")
+
+MAX_OUTPUT = 60000
+MAX_LIVE = 200000
+
+
+class Job:
+    """A running AI job: its live output buffer and a handle for cancelling it."""
+
+    def __init__(self, kind: str):
+        self.kind = kind
+        self.started = time.monotonic()
+        self.cancelled = False
+        self._chunks: list[str] = []
+        self._size = 0
+        self._proc = None
+        self._lock = threading.Lock()
+
+    def write(self, text: str) -> None:
+        with self._lock:
+            self._chunks.append(text)
+            self._size += len(text)
+            while self._size > MAX_LIVE and len(self._chunks) > 1:
+                self._size -= len(self._chunks.pop(0))
+
+    def text(self) -> str:
+        with self._lock:
+            return "".join(self._chunks)
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started
+
+    def attach(self, proc) -> None:
+        self._proc = proc
+        if self.cancelled:
+            kill_tree(proc)
+
+    def cancel(self) -> None:
+        self.cancelled = True
+        if self._proc is not None:
+            kill_tree(self._proc)
+
+
+def _clip(text: str) -> str:
+    return text if len(text) <= MAX_OUTPUT else "… [earlier output truncated]\n" + text[-MAX_OUTPUT:]
+
+
+class Engine:
+    def __init__(self, registry, store, settings):
+        self.registry, self.store, self.settings = registry, store, settings
+        self.jobs: dict[tuple[str, int], Job] = {}
+        self._lock = threading.Lock()
+        self._runners: set[str] = set()
+        self._pending: set[str] = set()
+
+    # ---- helpers -------------------------------------------------------
+    def job(self, pid: str, tid: int) -> Job | None:
+        return self.jobs.get((pid, tid))
+
+    def provider_for(self, project: dict, task: dict) -> tuple[str, str]:
+        provider = task.get("provider") or project.get("provider") or "claude"
+        model = project.get("model", "") if provider == (project.get("provider") or "claude") else ""
+        return provider, model
+
+    def _ai(self, project, task, mode, prompt, job) -> Outcome:
+        provider, model = self.provider_for(project, task)
+        job.write(f"[{now()}] {mode} with {provider} in {project['path']}\n")
+        try:
+            return run_ai(provider, mode, prompt, host=host_for(project), project=project,
+                          settings=self.settings.get(), model=model, job=job)
+        except Cancelled:
+            raise
+        except Exception as exc:  # host/network failures become task errors
+            log.exception("AI %s failed", mode)
+            return Outcome(False, error=f"{type(exc).__name__}: {exc}")
+
+    # ---- startup / consistency ------------------------------------------
+    def reconcile(self, project: dict) -> None:
+        """Tasks left 'planning'/'running' by a previous server process are interrupted."""
+        pid = project["id"]
+        doc = self.store.read(project)
+        stale = [t["id"] for t in doc["tasks"]
+                 if t["status"] in ("planning", "running") and (pid, t["id"]) not in self.jobs]
+        if not stale:
+            return
+        with self.store.edit(project) as doc:
+            for task in doc["tasks"]:
+                if task["id"] in stale and (pid, task["id"]) not in self.jobs \
+                        and task["status"] in ("planning", "running"):
+                    if task["status"] == "planning":
+                        task["error"] = "Planning was interrupted (PatchGoblin restarted)."
+                        set_status(task, task.get("prev_status") or "unplanned", "Planning interrupted")
+                    else:
+                        task["error"] = ("Run was interrupted (PatchGoblin restarted). "
+                                         "Review the working tree before re-queueing.")
+                        set_status(task, "failed", "Run interrupted")
+
+    def startup(self) -> None:
+        def work():
+            for project in self.registry.list():
+                try:
+                    self.reconcile(project)
+                    self.kick(project["id"])
+                except Exception as exc:
+                    log.warning("Project %s unavailable at startup: %s", project.get("name"), exc)
+        threading.Thread(target=work, name="pg-startup", daemon=True).start()
+
+    # ---- planning --------------------------------------------------------
+    def start_planning(self, project: dict, tid: int, feedback: str = "") -> None:
+        pid = project["id"]
+        job = Job("plan")
+        try:
+            # The job is registered under the store lock so reconcile() never
+            # mistakes this task for one orphaned by a previous process.
+            with self.store.edit(project) as doc:
+                task = find_task(doc, tid)
+                if task is None:
+                    raise KeyError(tid)
+                if task["status"] not in ("unplanned", "planned", "failed"):
+                    raise ValueError(f"Cannot plan a task that is {task['status']}.")
+                if (pid, tid) in self.jobs:
+                    raise ValueError("This task already has a job running.")
+                self.jobs[(pid, tid)] = job
+                task["prev_status"] = task["status"]
+                task["error"] = ""
+                set_status(task, "planning", "AI planning started" + (" with feedback" if feedback else ""))
+                snapshot = dict(task)
+        except BaseException:
+            if self.jobs.get((pid, tid)) is job:
+                del self.jobs[(pid, tid)]
+            raise
+        threading.Thread(target=self._plan, args=(project, snapshot, feedback, job),
+                         name=f"pg-plan-{pid}-{tid}", daemon=True).start()
+
+    def _plan(self, project, task, feedback, job) -> None:
+        pid, tid = project["id"], task["id"]
+        try:
+            try:
+                outcome = self._ai(project, task, "plan", plan_prompt(task, feedback), job)
+            except Cancelled:
+                outcome = Outcome(False, error="Planning cancelled.")
+            with self.store.edit(project) as doc:
+                current = find_task(doc, tid)
+                if current is None:
+                    return
+                current["output"] = _clip(job.text())
+                if outcome.ok:
+                    current["plan"] = outcome.text
+                    current["error"] = ""
+                    set_status(current, "planned", "AI plan ready")
+                else:
+                    current["error"] = outcome.error
+                    set_status(current, current.get("prev_status") or "unplanned",
+                               "AI planning failed" if not job.cancelled else "Planning cancelled")
+        except Exception:
+            log.exception("Could not record planning result for %s#%s", pid, tid)
+        finally:
+            self.jobs.pop((pid, tid), None)
+
+    # ---- run queue -------------------------------------------------------
+    def kick(self, pid: str) -> None:
+        """Make sure the project's runner is working through its queue."""
+        with self._lock:
+            if pid in self._runners:
+                self._pending.add(pid)
+                return
+            self._runners.add(pid)
+        threading.Thread(target=self._runner, args=(pid,), name=f"pg-run-{pid}", daemon=True).start()
+
+    def _runner(self, pid: str) -> None:
+        while True:
+            claimed = None
+            try:
+                project = self.registry.get(pid)
+                claimed = self._claim(project) if project else None
+            except Exception as exc:
+                log.warning("Queue for project %s unavailable: %s", pid, exc)
+            if claimed:
+                self._execute(project, *claimed)
+                continue
+            with self._lock:
+                if pid in self._pending:
+                    self._pending.discard(pid)
+                    continue
+                self._runners.discard(pid)
+                return
+
+    def _claim(self, project: dict):
+        pid, key, job = project["id"], None, Job("run")
+        try:
+            with self.store.edit(project) as doc:
+                queued = sorted((t for t in doc["tasks"] if t["status"] == "queued"),
+                                key=lambda t: (t.get("queued_at") or "", t["id"]))
+                if not queued:
+                    return None
+                task = queued[0]
+                key = (pid, task["id"])
+                self.jobs[key] = job
+                task["started_at"] = now()
+                task["finished_at"] = None
+                task["error"] = ""
+                set_status(task, "running", "AI run started")
+                claimed = dict(task)
+        except BaseException:
+            if key and self.jobs.get(key) is job:
+                del self.jobs[key]
+            raise
+        return claimed, job
+
+    def _execute(self, project: dict, task: dict, job: Job) -> None:
+        pid, tid = project["id"], task["id"]
+        host, path = host_for(project), project["path"]
+        commit, outcome = "", None
+        try:
+            try:
+                if gitops.has_changes(host, path, ignore_metadata=True):
+                    sha = gitops.commit_all(host, path, f"PatchGoblin: checkpoint before task #{tid}")
+                    job.write(f"Committed pre-existing changes as checkpoint {sha[:10]}\n")
+                outcome = self._ai(project, task, "run", run_prompt(task), job)
+            except Cancelled:
+                outcome = Outcome(False, error="Cancelled by user. Review the working tree before re-queueing.")
+            except HostError as exc:
+                outcome = Outcome(False, error=str(exc))
+
+            with self.store.edit(project) as doc:
+                current = find_task(doc, tid)
+                if current is None:
+                    return
+                current["output"] = _clip(outcome.text or job.text()) if outcome.ok else _clip(job.text())
+                current["finished_at"] = now()
+                if outcome.ok:
+                    current["error"] = ""
+                    set_status(current, "done", "AI run finished")
+                else:
+                    current["error"] = outcome.error
+                    set_status(current, "failed", "AI run failed")
+
+            if outcome.ok:
+                summary = outcome.text.strip()[:1500]
+                commit = gitops.commit_all(host, path, f"PatchGoblin: task #{tid} {task['title']}\n\n{summary}\n")
+                with self.store.edit(project) as doc:
+                    current = find_task(doc, tid)
+                    if current is not None:
+                        current["commit"] = commit
+                        log_event(current, f"Committed {commit[:10]}" if commit else "No file changes to commit")
+        except Exception as exc:
+            log.exception("Run of %s#%s failed", pid, tid)
+            try:
+                with self.store.edit(project) as doc:
+                    current = find_task(doc, tid)
+                    if current is not None:
+                        current["error"] = (current.get("error") or "") + f"\n{type(exc).__name__}: {exc}"
+                        if current["status"] == "running":
+                            set_status(current, "failed", "AI run failed")
+            except Exception:
+                log.exception("Could not record failure for %s#%s", pid, tid)
+        finally:
+            self.jobs.pop((pid, tid), None)
+
+    def cancel(self, pid: str, tid: int) -> bool:
+        job = self.jobs.get((pid, tid))
+        if job is None:
+            return False
+        job.cancel()
+        return True

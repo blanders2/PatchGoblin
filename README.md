@@ -1,147 +1,111 @@
 # PatchGoblin
 
-A local Flask web app for planning and queuing AI work across local directories and SSH hosts.
+A small Flask web app for queueing up AI work on your projects. Write tasks, get an
+AI (Claude Code, Codex, or the OpenAI API) to help plan them, then queue them for the
+AI to implement. Projects can be local directories or directories on SSH hosts, and
+every completed task is committed to the project's own git repository.
 
 ## Run
 
-Requires Python 3.10+ and Git. On Windows, from this directory:
-
-```powershell
-py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe run.py
-```
-
-On Linux/macOS:
+Requires [uv](https://docs.astral.sh/uv/) and git (uv provides Python 3.10+ if needed).
 
 ```sh
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python run.py
+uv sync
+uv run run.py
 ```
 
-Open **http://127.0.0.1:5050**. Keep that process running for the queue to work.
-The included launcher uses Waitress, one background queue worker, and a single-instance lock.
-Use `run.py`, not Flask's reloader or a multi-process WSGI deployment.
-`PATCHGOBLIN_PORT` changes the port; `PATCHGOBLIN_DATA` changes the local registry directory
-(default `.patchgoblin-app` relative to the launch directory).
+`uv sync` creates `.venv` from `pyproject.toml` / `uv.lock`.
 
-## Workflow
+Then open <http://127.0.0.1:5050>. Set `PATCHGOBLIN_PORT` to change the port and
+`PATCHGOBLIN_DATA` to change where the app keeps its project list and settings
+(default `./data`).
 
-1. Connect a project using an absolute directory. A missing directory is created and Git is initialized if needed.
-2. Create tasks. Each project's source of truth is **`.patchgoblin/tasks.json` inside that project**, including on SSH hosts.
-3. Choose **Plan with AI**, or write a plan in **Edit task & plan** and choose **Mark planned**. Manual planning does not require AI credentials.
-4. Review the plan, then queue the task. Planning and implementation both use that project's directory and selected provider.
-5. Inspect the result, errors, history, and commit in the task detail panel. Successful runs enter **Validation**, never Completed automatically. Review the changes and checks, then choose **Mark complete** or **Send back to run queue**.
+## How it works
 
-States: `unplanned → planning_queued → planning → planned → queued → running → validation → completed`.
-Manual planning skips the two planning states. Run errors become `failed`; failed tasks can be edited,
-replanned, or marked planned again. Planning and implementation share a first-in-first-out queue.
-**Pause queue** stops new jobs, allowing current work to finish. Waiting tasks can be removed from the queue.
+**Projects.** Add a project by giving it a directory, either on this computer or
+on an SSH host. Type the path or use **Browse…** to pick a folder. The browser lists
+folders on whichever machine the project is on (drives on Windows, the remote file
+system over SSH), and you can add a new subfolder name to start a fresh project. If the directory doesn't exist it's created. If it isn't already the
+root of a git repository, `git init` is run there (with a basic `.gitignore`) and an
+initial commit is made. Existing repositories are left as they are.
 
-**Validation and discussion:** Open a task and use **Work on the plan** to report problems, ask questions, and collaborate with AI. Each reply reads the current project, sees the previous result and recent conversation, and updates the editable plan. Validation discussion uses `revising_queued → revising → validation`; it never launches implementation. Repeat the discussion as needed, edit the plan manually, then send the task back to the run queue. Only explicit user validation marks a task complete. Conversation messages are saved in the project task JSON. Initial planning tasks support the same discussion interface.
+**Tasks** are stored in `.patchgoblin/tasks.json` inside the project directory (on the
+remote host for SSH projects), so the task list and plans live with the code and are
+committed along with it.
 
-Task files survive server restarts. Queued work resumes; active work is never blindly rerun.
-Use **Recover interrupted run** if a crashed run remains active. It refuses recovery while the
-host's run lock is held. An interrupted project's further work waits for recovery.
-There is no force-cancel button: use the host's process tools if an agent must be terminated.
+**States:**
 
-## Providers
+| State | Meaning |
+| --- | --- |
+| Unplanned | New task. Edit it, ask the AI to plan it, or mark it planned yourself. |
+| Planning… | The AI is investigating the project (read-only) and writing a plan. |
+| Planned | Has a plan (AI-drafted or yours). You can edit it, refine it with AI feedback, or queue it. |
+| Queued | Waiting for the AI to implement it. |
+| Running… | The AI is working in the project directory. Live output is shown in the task panel. |
+| Done | Finished and committed. You can reopen it. |
+| Failed | The run failed or was cancelled. You can re-queue it, replan it, or mark it planned. |
 
-### Codex CLI
+Planning and implementation both run **in the project's directory, on the project's
+host**. Each project runs one task at a time, in queue order. Different projects run in
+parallel. Planning jobs start straight away because they don't change files.
 
-Install and authenticate `codex` on each project host; it must be on the launching process's PATH.
-PatchGoblin uses `codex exec`, sends the prompt through stdin, sets the project working directory,
-and uses the `read-only` sandbox for planning and `workspace-write` for implementation.
-Leave Model ID empty to use the CLI configuration.
-It does not drive or embed the Codex desktop GUI; you can open the same repository in your IDE.
+**Git.** Before a run, any uncommitted changes you made are committed as a
+`checkpoint before task #N`, so the AI's commit contains only its own work. After a
+successful run, everything is committed as `PatchGoblin: task #N <title>` with the
+AI's summary. Nothing is ever pushed. The commit uses your git identity if it's set,
+otherwise `PatchGoblin <patchgoblin@localhost>`. Failed runs leave their changes
+uncommitted so you can inspect them. The **Commits** button shows recent history.
 
-Reference: [Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode).
+## AI providers
 
-### Claude Code CLI
+Choose a default AI for each project and optionally a model. Individual tasks can
+override the default. Commands can be edited under **Settings**.
 
-Install and authenticate `claude` on each project host. PatchGoblin invokes print mode and parses its JSON result.
-Planning exposes Read/Glob/Grep. Implementation exposes Read/Glob/Grep/Edit/Write, with Bash
-only when **Allow Claude / API agents to run commands** is enabled. Command execution is authorized
-for the entire task when that option is enabled; it is not an interactive terminal approval flow.
-Existing Claude hooks and configuration still apply. No permission-bypass flag is used.
+- **Claude Code** (`claude`) runs in print mode with the prompt on stdin. Planning
+  only allows read/search tools. Runs use `--permission-mode acceptEdits` and allow
+  `Read, Glob, Grep, Edit, Write, Bash`, so the agent can run tests and builds without
+  prompting. Tighten the run command in Settings if you want less.
+- **Codex** (`codex exec`) uses the `read-only` sandbox for planning and
+  `workspace-write` for runs.
+- **OpenAI API** runs a tool-calling agent against any OpenAI-compatible Chat
+  Completions endpoint (set the base URL and model in Settings). The key is read from
+  `OPENAI_API_KEY` in PatchGoblin's environment and is never stored. The agent can list,
+  read and search files, and during runs it can also write files. Its tools run
+  through the project's host, so remote projects don't need a key on the remote
+  machine. It can't write to `.git/` or `.patchgoblin/`, or to paths outside the project.
+  Shell commands are off by default. Turning them on in Settings runs them unsandboxed.
 
-Reference: [Run Claude Code programmatically](https://code.claude.com/docs/en/headless).
+The CLIs must be installed and logged in on whichever machine hosts the project.
 
-### OpenAI API
+## SSH projects
 
-Choose OpenAI API and enter a model ID available to your account that supports Responses function calling.
-Set `OPENAI_API_KEY` in the environment **on the project host** before starting PatchGoblin or the remote helper.
-No key is stored in task files, the project registry, or browser storage.
+- PatchGoblin uses your system `ssh` client, so `~/.ssh/config` aliases, keys and agents
+  work as usual. Connections use `BatchMode=yes`, so key-based login is required
+  (password prompts aren't supported). Connect once in a terminal first to accept the
+  host key.
+- The remote host must have a POSIX shell and git. Paths must be absolute
+  (e.g. `/home/me/project`).
+- Agent commands run in a login shell (`$SHELL -lc`), so PATH changes from your profile
+  (npm, nvm, `~/.local/bin`) apply.
+- Cancelling a remote run closes the SSH session. Most CLIs exit when that happens, but
+  check the host if one doesn't.
 
-The built-in Responses API loop provides project file listing, reading, and writing. Planning is read-only.
-Paths are resolved within the project (including symlink checks), and `.git`, PatchGoblin metadata,
-`.env*`, `.pem`, and `.key` paths are reserved. Listing respects Git ignore rules.
-The optional command tool runs argument arrays with the project as cwd, with **no OS sandbox**.
-Only enable it for trusted tasks and repositories; CLI tools also inherit the host account's environment.
-Without command access, the API can edit files but cannot run tests/builds or install dependencies.
-Files sent to this provider go to OpenAI; API charges apply to live runs.
-The loop is bounded to 40 model steps and approximately 30 minutes (an in-flight request can finish after that limit).
+## Safety notes
 
-Reference: [Responses function calling](https://developers.openai.com/api/docs/guides/function-calling).
-
-## SSH hosts
-
-The controller can run on Windows, macOS, or Linux. Remote hosts currently require a POSIX shell
-(Linux/macOS), Python 3.10+, Git, and the selected AI CLI or `OPENAI_API_KEY`.
-
-- Use `user@hostname` or an alias from your SSH config. Configure keys/agent access first.
-- Verify and add the host's key using normal SSH before registering it; host verification is never disabled.
-- Test `ssh your-alias 'python3 --version'` and the provider's availability in that same noninteractive environment.
-- Enter an absolute POSIX directory (for example `/home/me/projects/service`) and, if needed, a custom Python executable.
-- SSH uses the controller's `ssh` executable and configuration. Port defaults to 22.
-- The standard-library helper is sent through stdin; no app installation or remote HTTP port is needed.
-- Prompts and paths are sent as data, not interpolated into remote shell commands.
-- API keys must already be available to noninteractive SSH sessions. They are never forwarded from the controller.
-- A disconnected run can continue on the host. Refresh and inspect its state before recovery/retry.
-
-Remote Windows hosts and password-prompt SSH sessions are not currently supported.
-
-## Git behavior
-
-Project registration initializes an independent repository at that directory if `.git` is absent,
-including when its parent is another repository. Existing repositories and remotes are preserved.
-New repositories receive basic ignore patterns for dependencies and common credential files; inspect
-your own `.gitignore` before committing a real project. Existing ignore rules are not replaced.
-New repositories get an initial commit containing only `.gitignore` and the task JSON. Existing
-project source is left for an explicit user checkpoint; an empty new project is ready immediately.
-
-Before implementation, tracked and untracked changes outside `.patchgoblin` must be committed.
-**Create Git checkpoint** shows the current file list and commits all nonignored changes when selected.
-Successful implementation stages and commits changes with a task-specific message. Commits use
-per-command `PatchGoblin <patchgoblin@localhost>` identity without changing Git configuration.
-No pushes happen. Failures preserve edits for review. Task JSON is tracked; operational locks are excluded.
-The final commit ID is saved after committing, so task metadata can remain modified between checkpoints.
-Avoid editing the same working tree while an AI job runs; Git cannot distinguish simultaneous human edits.
-
-## Storage and operating limits
-
-- Atomic JSON replacement and host-side OS file locks protect task writes and serialize project runs.
-- The local registry holds project connection settings and the queue pause flag. It is ignored by Git.
-- One app instance owns each registry. Multiple controllers may share host locks, but a single controller
-  is the supported operating mode; this is not a distributed or multi-user service.
-- Serve only on localhost. Mutations require a per-process browser token; Host and Origin are checked.
-  There is no user authentication or public deployment support.
-- Logs/results render as plain text, including Markdown, to avoid interpreting model-generated HTML.
-- Large/binary file editing, force cancellation, streaming agent logs and embedded
-  IDE sessions are not included. Plans can be edited and regenerated with updated task instructions.
+- The server only listens on 127.0.0.1 and rejects requests with a foreign `Host`.
+  Write requests also need a custom header that other websites can't send. There is
+  no login, so don't expose it on a network.
+- AI agents act with your user account's permissions in the project directory. Review
+  commits (`git show`) before relying on them.
+- If PatchGoblin is restarted during a job, that task is marked interrupted: planning
+  goes back to its previous state and a run is marked failed. Queued tasks resume.
 
 ## Tests
 
-```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```sh
+uv run python -m unittest discover -s tests -v
 ```
 
-Tests use real temporary directories, JSON, Git repositories, HTTP routes, and local helper subprocesses.
-AI responses and the SSH transport are mocked, so the suite does not make paid API calls or require a remote host.
-
-For the optional browser smoke test, install Playwright in your own development environment, start
-`.venv/Scripts/python.exe -m tests.serve_browser_fixture` (or `.venv/bin/python` on POSIX), then run
-`node tests/browser-smoke.cjs`. This uses an isolated temporary project on port 5051 and fake AI replies.
-It requires installed Chrome by default; set `PATCHGOBLIN_BROWSER=msedge` for Edge.
-Screenshots go to ignored `test-results/`. Stop the fixture server after testing.
+The tests use real temporary directories, git repositories and subprocesses. A fake
+agent script stands in for the CLIs, and the OpenAI HTTP call and SSH hop are mocked,
+so no AI or network access is needed.

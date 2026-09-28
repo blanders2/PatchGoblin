@@ -1,294 +1,259 @@
-import base64
+"""Flask app: JSON API plus a single-page UI."""
+from __future__ import annotations
+
 import json
-import logging
 import os
-from pathlib import Path
-import re
-import secrets
-import shlex
-import subprocess
-import sys
-import threading
-import uuid
-from urllib.parse import urlsplit
+from urllib.parse import urlparse
 
-from flask import Flask, jsonify, render_template, request
-from werkzeug.exceptions import HTTPException
+from flask import Flask, abort, jsonify, render_template, request
 
-from .host import atomic_json, lock
+from . import gitops
+from .engine import Engine
+from .hosts import HostError, host_for
+from .store import (PROVIDERS, STATUSES, Registry, Settings, TaskStore, empty_doc, find_task,
+                    log_event, new_task, now, set_status, tasks_path)
+
+EDITABLE = ("title", "description", "plan", "provider")
+LOCKED = ("planning", "running")
 
 
-class Transport:
-    def call(self, project, action, payload=None):
-        envelope = {"project": project, "action": action, "payload": payload or {}}
-        source = Path(__file__).with_name("host.py")
-        if project["kind"] == "local":
-            argv = [sys.executable, str(source)]
-            stdin = json.dumps(envelope)
-        else:
-            # SSH invokes a remote shell: quote every command argument and keep all
-            # project/task text in stdin, never in the remote command string.
-            argv = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
-                    "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15",
-                    "-o", "ServerAliveCountMax=3", "-p", str(project["port"]),
-                    project["host"], shlex.join([project["python"], "-c", "import sys; exec(sys.stdin.read())"])]
-            encoded = base64.b64encode(json.dumps(envelope).encode()).decode()
-            stdin = "__name__ = 'patchgoblin_remote'\n" + source.read_text(encoding="utf-8")
-            stdin += f"\nimport base64\nmain(json.loads(base64.b64decode('{encoded}')))\n"
-        timeout = 7800 if action == "run" else 45
-        try:
-            result = subprocess.run(argv, input=stdin, text=True, encoding="utf-8",
-                                    errors="replace", capture_output=True, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            raise ValueError("Host request timed out. An AI run may still be active; refresh before retrying.") from None
-        if result.returncode:
-            raise ValueError((result.stderr or result.stdout)[-4000:])
-        try:
-            answer = json.loads(result.stdout)
-        except json.JSONDecodeError:
-            raise ValueError("Host returned invalid output. Check Python, SSH shell startup output, and permissions.") from None
-        if not answer.get("ok"):
-            raise ValueError(answer.get("error", "Host operation failed."))
-        return answer["data"]
-
-
-class Registry:
-    def __init__(self, directory):
-        self.directory = Path(directory)
-        self.directory.mkdir(parents=True, exist_ok=True)
-        self.path = self.directory / "projects.json"
-        self.mutex = threading.RLock()
-        if not self.path.exists():
-            atomic_json(self.path, {"projects": [], "paused": False})
-
-    def read(self):
-        with self.mutex:
-            return json.loads(self.path.read_text(encoding="utf-8"))
-
-    def change(self, callback):
-        with self.mutex:
-            data = self.read()
-            result = callback(data)
-            atomic_json(self.path, data)
-            return result
-
-    def project(self, project_id):
-        for project in self.read()["projects"]:
-            if project["id"] == project_id:
-                return project
-        raise ValueError("Project not found.")
-
-
-class Worker:
-    def __init__(self, registry, transport):
-        self.registry, self.transport = registry, transport
-        self.wake = threading.Event()
-        self.stop = threading.Event()
-        self.active = None
-        self.errors = {}
-        self.thread = None
-
-    def start(self):
-        self.thread = threading.Thread(target=self.loop, name="patchgoblin-queue", daemon=True)
-        self.thread.start()
-
-    def step(self):
-        registry = self.registry.read()
-        if registry["paused"]:
-            return
-        candidates = []
-        for project in registry["projects"]:
-            try:
-                state = self.transport.call(project, "inspect")
-                self.errors.pop(project["id"], None)
-                # An interrupted run must be explicitly recovered before more work.
-                if any(t["status"] in {"running", "planning", "revising"} for t in state["tasks"]):
-                    continue
-                for task in state["tasks"]:
-                    if task["status"] in {"queued", "planning_queued", "revising_queued"}:
-                        candidates.append((task["queued_at"], project, task))
-            except Exception as exc:
-                self.errors[project["id"]] = str(exc)
-        if candidates:
-            _, project, task = min(candidates, key=lambda candidate: candidate[0])
-            self.active = {"project_id": project["id"], "task_id": task["id"], "title": task["title"]}
-            try:
-                self.transport.call(project, "run", {"task_id": task["id"]})
-            except Exception as exc:
-                self.errors[project["id"]] = str(exc)
-            finally:
-                self.active = None
-
-    def loop(self):
-        while not self.stop.is_set():
-            try:
-                self.step()
-            except Exception:
-                logging.exception("Queue iteration failed")
-            self.wake.wait(3)
-            self.wake.clear()
-
-
-def validate_config(body, existing=None):
-    project = dict(existing or {})
-    project.update({key: body[key] for key in ("name", "path", "kind", "host", "port", "python", "provider", "model", "allow_commands") if key in body})
-    project.setdefault("id", uuid.uuid4().hex)
-    project.setdefault("kind", "local")
-    project.setdefault("provider", "codex")
-    project.setdefault("model", "")
-    project.setdefault("host", "")
-    project.setdefault("port", 22)
-    project.setdefault("python", "python3")
-    project.setdefault("allow_commands", False)
-    for field in ("name", "path", "kind", "host", "python", "provider", "model"):
-        if not isinstance(project.get(field), str):
-            raise ValueError(f"{field} must be text.")
-        project[field] = project[field].strip()
-    if not project["name"] or len(project["name"]) > 100 or not project["path"]:
-        raise ValueError("Project name and absolute directory are required.")
-    if project["kind"] not in {"local", "ssh"} or project["provider"] not in {"codex", "claude", "openai"}:
-        raise ValueError("Invalid host type or provider.")
-    if project["provider"] == "openai" and not project["model"]:
-        raise ValueError("Enter an OpenAI model ID available to your account.")
-    if not isinstance(project["allow_commands"], bool):
-        raise ValueError("allow_commands must be a boolean.")
-    try:
-        project["port"] = int(project["port"])
-    except (ValueError, TypeError):
-        raise ValueError("SSH port must be a number.") from None
-    if not 1 <= project["port"] <= 65535:
-        raise ValueError("SSH port must be between 1 and 65535.")
-    if project["kind"] == "ssh":
-        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.@-]*", project["host"]):
-            raise ValueError("Use an SSH config alias or user@hostname (no spaces or options).")
-        if not project["path"].startswith("/"):
-            raise ValueError("SSH projects require an absolute POSIX directory such as /home/me/project.")
-        if not re.fullmatch(r"[A-Za-z0-9_/.+-]+", project["python"]) or project["python"].startswith("-"):
-            raise ValueError("Enter a Python executable name or absolute path.")
-    return project
-
-
-def create_app(data_dir=None, transport=None, start_worker=False):
+def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     app = Flask(__name__)
-    app.config["MAX_CONTENT_LENGTH"] = 200000
-    app.config["TRUSTED_HOSTS"] = ["localhost", "127.0.0.1", "[::1]"]
-    registry = Registry(data_dir or os.environ.get("PATCHGOBLIN_DATA", ".patchgoblin-app"))
-    transport = transport or Transport()
-    worker = Worker(registry, transport)
-    csrf = secrets.token_urlsafe(32)
-    app.extensions.update(registry=registry, transport=transport, worker=worker, csrf=csrf)
+    data_dir = data_dir or os.environ.get("PATCHGOBLIN_DATA") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+    registry, settings, store = Registry(data_dir), Settings(data_dir), TaskStore()
+    engine = Engine(registry, store, settings)
+    app.config.update(REGISTRY=registry, SETTINGS=settings, STORE=store, ENGINE=engine)
 
+    # ---- request guards ---------------------------------------------------
     @app.before_request
-    def protect_local_app():
-        if request.method not in {"GET", "HEAD", "OPTIONS"}:
-            if not secrets.compare_digest(request.headers.get("X-PatchGoblin-Token", ""), csrf):
-                return jsonify(error="Session expired. Reload the page."), 403
+    def guard():
+        # Local-only tool: refuse foreign Host headers (DNS rebinding) and require a
+        # custom header on writes, which cross-site pages cannot send without CORS.
+        host = (request.host or "").rsplit(":", 1)[0].strip("[]")
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            abort(403)
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            if request.headers.get("X-PatchGoblin") != "1":
+                abort(403)
             origin = request.headers.get("Origin")
-            if origin and urlsplit(origin).netloc != request.host:
-                return jsonify(error="Cross-origin requests are not allowed."), 403
+            if origin and urlparse(origin).netloc != request.host:
+                abort(403)
 
-    @app.after_request
-    def headers(response):
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
-        response.headers["Cache-Control"] = "no-store"
-        return response
+    @app.errorhandler(HostError)
+    def host_error(exc):
+        return jsonify(error=str(exc)), 502
 
     @app.errorhandler(ValueError)
-    def bad_request(exc):
+    def value_error(exc):
         return jsonify(error=str(exc)), 400
 
-    @app.errorhandler(Exception)
-    def other_error(exc):
-        if isinstance(exc, HTTPException):
-            return jsonify(error=exc.description), exc.code
-        app.logger.exception("Request failed")
-        return jsonify(error="Operation failed. Check the server output for details."), 500
+    def body() -> dict:
+        return request.get_json(silent=True) or {}
 
-    def body():
-        data = request.get_json()
-        if not isinstance(data, dict):
-            raise ValueError("Expected a JSON object.")
-        return data
+    def project_or_404(pid: str) -> dict:
+        project = registry.get(pid)
+        if project is None:
+            abort(404)
+        return project
 
+    def task_view(pid: str, task: dict) -> dict:
+        job = engine.job(pid, task["id"])
+        return {**task, "active": job is not None}
+
+    # ---- pages --------------------------------------------------------------
     @app.get("/")
     def index():
-        return render_template("index.html", csrf=csrf)
+        return render_template("index.html", statuses=STATUSES, providers=PROVIDERS)
 
+    # ---- settings -----------------------------------------------------------
+    @app.get("/api/settings")
+    def get_settings():
+        return jsonify(settings.get() | {"openai_key_present": bool(os.environ.get("OPENAI_API_KEY"))})
+
+    @app.put("/api/settings")
+    def put_settings():
+        data = body()
+        allowed = {k: data[k] for k in ("commands", "openai", "timeouts") if k in data}
+        return jsonify(settings.update(allowed))
+
+    # ---- projects -----------------------------------------------------------
     @app.get("/api/projects")
-    def projects():
-        return jsonify(**registry.read(), active=worker.active, errors=worker.errors.copy())
+    def list_projects():
+        return jsonify(projects=registry.list())
+
+    def project_fields(data: dict) -> dict:
+        provider = data.get("provider") or "claude"
+        if provider not in PROVIDERS:
+            raise ValueError(f"Unknown provider {provider}.")
+        location = data.get("location") or "local"
+        fields = {
+            "name": (data.get("name") or "").strip(),
+            "location": location,
+            "ssh_target": (data.get("ssh_target") or "").strip() if location == "ssh" else "",
+            "ssh_port": int(data["ssh_port"]) if location == "ssh" and data.get("ssh_port") else None,
+            "provider": provider,
+            "model": (data.get("model") or "").strip(),
+        }
+        return fields
+
+    @app.post("/api/browse")
+    def browse():
+        """List folders on the machine a project would live on (for the folder picker)."""
+        data = body()
+        host = host_for(project_fields(data))
+        path = (data.get("path") or "").strip()
+        if data.get("home") or (not path and not (os.name == "nt" and host.kind == "local")):
+            path = host.home()
+        return jsonify(host.list_dirs(path))
 
     @app.post("/api/projects")
     def add_project():
-        config = validate_config(body())
-        result = transport.call(config, "init")
-        config["path"] = result["path"]
-        def insert(data):
-            if any((p["kind"], p["host"], p["port"], os.path.normcase(p["path"])) ==
-                   (config["kind"], config["host"], config["port"], os.path.normcase(config["path"])) for p in data["projects"]):
-                raise ValueError("This directory is already registered.")
-            data["projects"].append(config)
-        registry.change(insert)
-        worker.wake.set()
-        return jsonify(config), 201
+        data = body()
+        fields = project_fields(data)
+        host = host_for(fields)
+        if fields["location"] == "ssh":
+            host.check()
+        path = host.normalize(data.get("path") or "")
+        fields["path"] = path
+        fields["name"] = fields["name"] or path.replace("\\", "/").rstrip("/").split("/")[-1] or path
+        if any(p["location"] == fields["location"] and p.get("ssh_target") == fields["ssh_target"]
+               and p["path"] == path for p in registry.list()):
+            raise ValueError("That project is already registered.")
+        if not host.is_dir(path):
+            if not data.get("create", True):
+                raise ValueError(f"Directory does not exist: {path}")
+            host.ensure_dir(path)
+        created = gitops.ensure_repo(host, path)
+        tpath = tasks_path(fields, host)
+        if host.read_text(tpath) is None:
+            host.write_text(tpath, json.dumps(empty_doc(), indent=2) + "\n")
+        if created:
+            gitops.commit_all(host, path, "PatchGoblin: initial commit")
+        return jsonify(registry.add(fields)), 201
 
-    @app.patch("/api/projects/<project_id>")
-    def settings(project_id):
-        current = registry.project(project_id)
-        payload = body()
-        config = validate_config({key: payload[key] for key in ("name", "provider", "model", "allow_commands") if key in payload}, current)
-        def update(data):
-            data["projects"] = [config if p["id"] == project_id else p for p in data["projects"]]
-        registry.change(update)
-        return jsonify(config)
+    @app.patch("/api/projects/<pid>")
+    def update_project(pid):
+        project = project_or_404(pid)
+        data = body()
+        fields = {}
+        if "name" in data and data["name"].strip():
+            fields["name"] = data["name"].strip()
+        if "provider" in data:
+            if data["provider"] not in PROVIDERS:
+                raise ValueError("Unknown provider.")
+            fields["provider"] = data["provider"]
+        if "model" in data:
+            fields["model"] = (data["model"] or "").strip()
+        return jsonify(registry.update(project["id"], fields))
 
-    @app.get("/api/projects/<project_id>")
-    def project_detail(project_id):
-        project = registry.project(project_id)
-        return jsonify(project=project, **transport.call(project, "inspect"))
+    @app.delete("/api/projects/<pid>")
+    def remove_project(pid):
+        project_or_404(pid)
+        if any(key[0] == pid for key in engine.jobs):
+            raise ValueError("Wait for this project's AI jobs to finish first.")
+        registry.remove(pid)
+        store.forget(pid)
+        return jsonify(ok=True)
 
-    @app.post("/api/projects/<project_id>/checkpoint")
-    def checkpoint(project_id):
-        return jsonify(transport.call(registry.project(project_id), "checkpoint"))
+    @app.get("/api/projects/<pid>/commits")
+    def commits(pid):
+        project = project_or_404(pid)
+        return jsonify(commits=gitops.recent_commits(host_for(project), project["path"]))
 
-    @app.post("/api/projects/<project_id>/tasks")
-    def create_task(project_id):
-        return jsonify(transport.call(registry.project(project_id), "create", body())), 201
+    # ---- tasks --------------------------------------------------------------
+    @app.get("/api/projects/<pid>/tasks")
+    def list_tasks(pid):
+        project = project_or_404(pid)
+        engine.reconcile(project)
+        doc = store.read(project)
+        return jsonify(tasks=[task_view(pid, t) for t in doc["tasks"]])
 
-    @app.post("/api/projects/<project_id>/tasks/<task_id>/<action>")
-    def task_action(project_id, task_id, action):
-        if action not in {"edit", "plan", "discuss", "mark_planned", "queue", "unqueue", "reopen", "recover", "complete"}:
-            raise ValueError("Unknown task action.")
-        payload = body()
-        payload["task_id"] = task_id
-        result = transport.call(registry.project(project_id), action, payload)
-        worker.wake.set()
-        return jsonify(result)
+    @app.post("/api/projects/<pid>/tasks")
+    def create_task(pid):
+        project = project_or_404(pid)
+        data = body()
+        title = (data.get("title") or "").strip()
+        if not title:
+            raise ValueError("A task needs a title.")
+        provider = data.get("provider") or ""
+        if provider and provider not in PROVIDERS:
+            raise ValueError("Unknown provider.")
+        with store.edit(project) as doc:
+            task = new_task(doc, title, (data.get("description") or "").strip(), provider)
+        return jsonify(task_view(pid, task)), 201
 
-    @app.post("/api/queue")
-    def pause_queue():
-        paused = body().get("paused")
-        if not isinstance(paused, bool):
-            raise ValueError("paused must be a boolean.")
-        registry.change(lambda data: data.update(paused=paused))
-        worker.wake.set()
-        return jsonify(paused=paused)
+    @app.patch("/api/projects/<pid>/tasks/<int:tid>")
+    def update_task(pid, tid):
+        project = project_or_404(pid)
+        data = body()
+        with store.edit(project) as doc:
+            task = find_task(doc, tid) or abort(404)
+            if task["status"] in LOCKED:
+                raise ValueError(f"Task is {task['status']}; wait or cancel first.")
+            changed = [k for k in EDITABLE if k in data and data[k] != task[k]]
+            if "provider" in changed and data["provider"] and data["provider"] not in PROVIDERS:
+                raise ValueError("Unknown provider.")
+            if "title" in changed and not str(data["title"]).strip():
+                raise ValueError("A task needs a title.")
+            for key in changed:
+                task[key] = data[key].strip() if key == "title" else data[key]
+            if changed:
+                log_event(task, "Edited " + ", ".join(changed))
+        return jsonify(task_view(pid, task))
 
-    if start_worker:
-        worker.start()
+    @app.delete("/api/projects/<pid>/tasks/<int:tid>")
+    def delete_task(pid, tid):
+        project = project_or_404(pid)
+        with store.edit(project) as doc:
+            task = find_task(doc, tid) or abort(404)
+            if task["status"] in LOCKED:
+                raise ValueError(f"Task is {task['status']}; cancel it first.")
+            doc["tasks"].remove(task)
+        return jsonify(ok=True)
+
+    # Simple state changes: action -> (allowed from, new status, history message)
+    TRANSITIONS = {
+        "mark_planned": (("unplanned", "failed"), "planned", "Marked planned"),
+        "unplan": (("planned",), "unplanned", "Moved back to unplanned"),
+        "queue": (("planned", "failed"), "queued", "Queued for AI"),
+        "dequeue": (("queued",), "planned", "Removed from queue"),
+        "reopen": (("done",), "planned", "Reopened"),
+    }
+
+    @app.post("/api/projects/<pid>/tasks/<int:tid>/action")
+    def task_action(pid, tid):
+        project = project_or_404(pid)
+        data = body()
+        action = data.get("action")
+        if action == "plan":
+            engine.start_planning(project, tid, data.get("feedback") or "")
+        elif action == "cancel":
+            if not engine.cancel(pid, tid):
+                raise ValueError("No AI job is running for this task.")
+        elif action in TRANSITIONS:
+            allowed, status, message = TRANSITIONS[action]
+            with store.edit(project) as doc:
+                task = find_task(doc, tid) or abort(404)
+                if task["status"] not in allowed:
+                    raise ValueError(f"Cannot {action.replace('_', ' ')} a task that is {task['status']}.")
+                if action == "queue":
+                    task["queued_at"] = now()
+                set_status(task, status, message)
+            if action == "queue":
+                engine.kick(pid)
+        else:
+            raise ValueError(f"Unknown action {action!r}.")
+        doc = store.read(project, fresh=True)
+        return jsonify(task_view(pid, find_task(doc, tid) or abort(404)))
+
+    @app.get("/api/projects/<pid>/tasks/<int:tid>/live")
+    def live(pid, tid):
+        job = engine.job(pid, tid)
+        return jsonify(active=job is not None, kind=job.kind if job else None,
+                       output=job.text() if job else "",
+                       elapsed=round(job.elapsed()) if job else 0)
+
+    if start_engine:
+        engine.startup()
     return app
-
-
-def main():
-    from waitress import serve
-    data_dir = Path(os.environ.get("PATCHGOBLIN_DATA", ".patchgoblin-app")).resolve()
-    with lock(data_dir / "server.lock"):
-        app = create_app(data_dir, start_worker=True)
-        port = int(os.environ.get("PATCHGOBLIN_PORT", "5050"))
-        print(f"PatchGoblin is ready at http://127.0.0.1:{port}", flush=True)
-        serve(app, host="127.0.0.1", port=port, threads=8)
-
-
-if __name__ == "__main__":
-    main()
