@@ -176,6 +176,40 @@ class WorkflowTests(AppTestCase):
         self.assertNotIn("Title:", task["plan"])
         self.assertIn("Step one", task["plan"])
 
+    def test_plan_trust_settings(self):
+        from patchgoblin import engine as engine_mod
+        pid = self.add_project()["id"]
+        res = self.client.patch(f"/api/projects/{pid}", headers=H, json={"plan_trust": "high"})
+        self.assertEqual(res.get_json()["plan_trust"], "high")
+        res = self.client.patch(f"/api/projects/{pid}", headers=H, json={"plan_trust": "extreme"})
+        self.assertEqual(res.status_code, 400)
+        res = self.client.patch(f"/api/projects/{pid}", headers=H, json={"plan_trust": ""})
+        self.assertEqual(res.status_code, 400)
+
+        res = self.client.post(f"/api/projects/{pid}/tasks", headers=H,
+                               json={"title": "Create output file", "plan_trust": "low"})
+        self.assertEqual(res.status_code, 201)
+        tid = res.get_json()["id"]
+        self.assertEqual(res.get_json()["plan_trust"], "low")
+        bad = self.client.post(f"/api/projects/{pid}/tasks", headers=H, json={"title": "x", "plan_trust": "max"})
+        self.assertEqual(bad.status_code, 400)
+
+        with mock.patch.object(engine_mod, "plan_prompt", wraps=engine_mod.plan_prompt) as spy:
+            self.assertEqual(self.action(pid, tid, "plan").status_code, 200)
+            self.wait_for(pid, tid, {"planned"})
+            self.assertEqual(spy.call_args.kwargs["trust"], "low")
+            self.assertIn("Planning trust is LOW", engine_mod.plan_prompt(*spy.call_args.args,
+                                                                          **spy.call_args.kwargs))
+
+            res = self.client.patch(f"/api/projects/{pid}/tasks/{tid}", headers=H, json={"plan_trust": ""})
+            self.assertEqual(res.get_json()["plan_trust"], "")
+            self.assertEqual(self.action(pid, tid, "plan").status_code, 200)
+            self.wait_for(pid, tid, {"planned"})
+            self.assertEqual(spy.call_args.kwargs["trust"], "high")
+
+        res = self.client.patch(f"/api/projects/{pid}/tasks/{tid}", headers=H, json={"plan_trust": "bogus"})
+        self.assertEqual(res.status_code, 400)
+
     def test_manual_plan_and_failed_run(self):
         pid = self.add_project()["id"]
         tid = self.post_task(pid, "This will FAIL")["id"]
@@ -749,7 +783,7 @@ class ChatTests(AppTestCase):
 
 class PlanPromptTests(unittest.TestCase):
     def test_plan_questions_parsing(self):
-        from patchgoblin.providers import plan_questions
+        from patchgoblin.providers import plan_questions, ready_status
         plan = ("Summary.\n\n## Steps\n1. Do a thing\n\n## Questions for you\n"
                 "1. Should we keep the old API\n   for existing callers?\n2) Which DB?\n- Bullet one\n\n"
                 "Trailing prose.\n## Other\n1. not a question")
@@ -762,6 +796,11 @@ class PlanPromptTests(unittest.TestCase):
         self.assertEqual(plan_questions("## Questions for you\n1. None"), [])
         self.assertEqual(plan_questions("1. Step\n2. Step"), [])
         self.assertEqual(plan_questions(""), [])
+        # An Assumptions section never leaks into the questions.
+        self.assertEqual([q["text"] for q in plan_questions("## Questions for you\n1. A\n\n## Assumptions\n- B")],
+                         ["A"])
+        self.assertEqual(plan_questions("## Steps\n1. S\n\n## Assumptions\n- B\n\n## Risks\n- R"), [])
+        self.assertEqual(ready_status("## Assumptions\n- B\n\n## Questions for you\nNone."), "planned")
 
     def test_plan_question_options(self):
         from patchgoblin.providers import plan_questions
@@ -798,6 +837,31 @@ class PlanPromptTests(unittest.TestCase):
         task = {"id": 1, "title": "T", "description": "", "plan": ""}
         self.assertNotIn("Title: <", plan_prompt(task))
         self.assertIn("Title: <", plan_prompt(task, rewrite_title=True))
+
+    def test_plan_prompt_trust(self):
+        from patchgoblin.providers import plan_prompt
+        task = {"id": 1, "title": "T", "description": "", "plan": ""}
+        self.assertEqual(plan_prompt(task), plan_prompt(task, trust="normal"))
+        self.assertNotIn("Planning trust", plan_prompt(task))
+        self.assertEqual(plan_prompt(task), plan_prompt(task, trust="bogus"))
+        high = plan_prompt(task, trust="high")
+        self.assertIn("HIGH", high)
+        self.assertIn("## Assumptions", high)
+        self.assertIn("## Questions for you", high)
+        low = plan_prompt(task, trust="low")
+        self.assertIn("LOW", low)
+        self.assertIn("## Assumptions", low)
+        both = plan_prompt(task, rewrite_title=True, trust="high")
+        self.assertLess(both.index("Planning trust is HIGH"), both.index("Title: <"))
+
+    def test_resolve_trust(self):
+        from patchgoblin.providers import resolve_trust
+        self.assertEqual(resolve_trust({"plan_trust": "low"}, {"plan_trust": "high"}), "low")
+        self.assertEqual(resolve_trust({"plan_trust": "normal"}, {"plan_trust": "high"}), "normal")
+        self.assertEqual(resolve_trust({"plan_trust": ""}, {"plan_trust": "high"}), "high")
+        self.assertEqual(resolve_trust({}, {"plan_trust": "low"}), "low")
+        self.assertEqual(resolve_trust({"plan_trust": "bogus"}, {"plan_trust": "extreme"}), "normal")
+        self.assertEqual(resolve_trust({}, {}), "normal")
 
     def test_split_title(self):
         from patchgoblin.providers import MAX_TITLE, split_title

@@ -37,6 +37,34 @@ Reply with ONLY the implementation plan, in Markdown:
   Open-ended questions have no brackets.
 """
 
+PLAN_TRUST_LEVELS = ("low", "normal", "high")
+
+TRUST_INSTRUCTIONS = {
+    "normal": "",
+    "low": """\
+Planning trust is LOW: do not assume. Whenever requirements, scope, UX, naming or approach
+are ambiguous, ask under "Questions for you" instead of choosing. Prefer asking over guessing.
+List any unavoidable assumptions as one-line bullets in a "## Assumptions" section placed
+before "## Risks" ("None." if there are none).
+""",
+    "high": """\
+Planning trust is HIGH: act on your best judgement. Resolve ambiguity yourself using the
+existing code, conventions and common practice. Record each such choice as a one-line bullet
+in a "## Assumptions" section placed before "## Risks" ("None." if there are none).
+Ask under "Questions for you" only about decisions that are costly or hard to undo if wrong
+(e.g. data loss, public API or file-format changes, security), or that can't be inferred at
+all. Never assume against an answer the user already gave. Most plans should have no questions.
+""",
+}
+
+
+def resolve_trust(task: dict, project: dict) -> str:
+    """The planning trust level for a task: its own override, else its project's, else 'normal'."""
+    for level in ((task or {}).get("plan_trust"), (project or {}).get("plan_trust")):
+        if level in PLAN_TRUST_LEVELS:
+            return level
+    return "normal"
+
 TITLE_INSTRUCTIONS = """\
 Start your reply with a single line `Title: <a concise, specific task title in the imperative,
 under 80 characters>`, then a blank line, then the plan.
@@ -148,8 +176,10 @@ def ready_status(plan: str) -> str:
 
 
 def plan_prompt(task: dict, feedback: str = "", answers: list[dict] | None = None,
-                rewrite_title: bool = False) -> str:
-    instructions = PLAN_INSTRUCTIONS + (TITLE_INSTRUCTIONS if rewrite_title else "")
+                rewrite_title: bool = False, trust: str = "normal") -> str:
+    # The title rule stays last so "Start your reply with…" wins.
+    instructions = (PLAN_INSTRUCTIONS + TRUST_INSTRUCTIONS.get(trust, "")
+                    + (TITLE_INSTRUCTIONS if rewrite_title else ""))
     parts = [instructions, f"# Task #{task['id']}: {task['title']}"]
     if task.get("description", "").strip():
         parts.append(f"## Description\n{task['description'].strip()}")

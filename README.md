@@ -62,6 +62,13 @@ concise title, which replaces the task's title. The old title is kept in the tas
 history. This is on by default. Untick **AI titles** in the project bar to keep your
 own titles. Marking a task planned by hand never changes its title.
 
+**Plan trust.** Sets how much the AI may assume when planning. **Low** asks about
+anything ambiguous instead of guessing; **High** makes its own calls and asks only about
+decisions that are costly or hard to undo; **Normal** (the default) is in between. At Low
+and High the plan lists the AI's guesses under **## Assumptions** so you can check them.
+Set it in the project bar; a task can override it in its drawer (**Project default**
+uses the project's level).
+
 **Batch actions.** Tick the checkbox on each card you want (Shift+click selects a
 range, Space toggles the focused card, Esc clears). A toolbar then shows the actions
 that apply to the ticked tasks: Plan with AI, Mark planned, Move to drafted, Queue for AI, Remove from

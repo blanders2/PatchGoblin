@@ -13,12 +13,12 @@ from flask import Flask, abort, jsonify, render_template, request
 from . import gitops
 from .engine import Engine
 from .hosts import HostError, host_for, open_terminal
-from .providers import endpoint_key, list_models, plan_questions, ready_status
+from .providers import PLAN_TRUST_LEVELS, endpoint_key, list_models, plan_questions, ready_status
 from .store import (CLI_PROVIDERS, MODELS, STATUSES, Registry, Settings, TaskStore, empty_doc, find_endpoint,
                     find_task, log_event, new_task, now, provider_choices, set_status, tasks_path,
                     valid_provider)
 
-EDITABLE = ("title", "description", "plan", "provider", "plan_model", "code_model")
+EDITABLE = ("title", "description", "plan", "provider", "plan_model", "code_model", "plan_trust")
 MODEL_KEYS = ("plan_model", "code_model")
 PROJECT_MODEL_KEYS = ("plan_model", "code_model", "chat_model")
 LOCKED = ("planning", "running")
@@ -322,6 +322,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             fields["auto_sync"] = bool(data["auto_sync"])
         if "sync_mode" in data:
             fields["sync_mode"] = sync_mode(data["sync_mode"])
+        if "plan_trust" in data:
+            fields["plan_trust"] = plan_trust(data["plan_trust"])
         return jsonify(registry.update(project["id"], fields))
 
     def plan_limit(value) -> int:
@@ -342,6 +344,12 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         if value not in gitops.SYNC_MODES:
             raise ValueError("Sync mode must be one of: " + ", ".join(gitops.SYNC_MODES) + ".")
         return value
+
+    def plan_trust(value, allow_blank: bool = False) -> str:
+        """A planning trust level; "" (a task's "use the project's level") only if allowed."""
+        if (value == "" and allow_blank) or value in PLAN_TRUST_LEVELS:
+            return value
+        raise ValueError("Plan trust must be one of: " + ", ".join(PLAN_TRUST_LEVELS) + ".")
 
     @app.delete("/api/projects/<pid>")
     def remove_project(pid):
@@ -447,8 +455,10 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         if provider and not valid_provider(settings.get(), provider):
             raise ValueError("Unknown provider.")
         models = {k: model_name(data.get(k)) for k in MODEL_KEYS}
+        trust = plan_trust(data.get("plan_trust") or "", allow_blank=True)
         with store.edit(project) as doc:
-            task = new_task(doc, title, (data.get("description") or "").strip(), provider, **models)
+            task = new_task(doc, title, (data.get("description") or "").strip(), provider, **models,
+                            plan_trust=trust)
         return jsonify(task_view(pid, task)), 201
 
     @app.patch("/api/projects/<pid>/tasks/<int:tid>")
@@ -460,6 +470,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             if task["status"] in LOCKED:
                 raise ValueError(f"Task is {task['status']}; wait or cancel first.")
             data = {**data, **{k: model_name(data[k]) for k in MODEL_KEYS if k in data}}
+            if "plan_trust" in data:
+                data["plan_trust"] = plan_trust(data["plan_trust"], allow_blank=True)
             changed = [k for k in EDITABLE if k in data and data[k] != task.get(k, "")]
             if "provider" in changed and data["provider"] and not valid_provider(settings.get(), data["provider"]):
                 raise ValueError("Unknown provider.")

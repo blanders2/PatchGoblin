@@ -83,7 +83,7 @@ function relTime(iso) {
 
 // Timestamps have one-second resolution, so compare field contents to detect server changes.
 const formStamp = t => JSON.stringify([t.title, t.description, t.provider, t.plan_model || "",
-  t.code_model || "", t.plan]);
+  t.code_model || "", t.plan_trust || "", t.plan]);
 
 const currentProject = () => state.projects.find(p => p.id === state.pid);
 const openTask = () => state.tasks.find(t => t.id === state.openTid);
@@ -218,6 +218,7 @@ async function selectProject(pid) {
   renderProjectModel();
   $("#p-plan-limit").value = p.plan_limit || "";
   $("#p-rewrite-titles").checked = p.rewrite_titles !== false;
+  renderProjectTrust();
   $("#p-auto-sync").checked = p.auto_sync === true;
   state.tasks = [];
   renderBoard();
@@ -238,6 +239,17 @@ function renderProjectModel() {
   fillBatchModel($("#batch-plan-model"), provider);
   fillBatchModel($("#batch-code-model"), provider);
   renderChatWhere();
+}
+
+const TRUST_NAMES = { low: "Low", normal: "Normal", high: "High" };
+
+// The project's plan trust select, and the level a task's "Project default" resolves to.
+function renderProjectTrust() {
+  const p = currentProject();
+  if (!p) return;
+  const level = TRUST_NAMES[p.plan_trust] ? p.plan_trust : "normal";
+  $("#p-plan-trust").value = level;
+  $("#d-plan-trust").options[0].textContent = `Project default (${TRUST_NAMES[level]})`;
 }
 
 // Refills the project's model selects from MODELS without fetching (after a refresh or provider change).
@@ -364,6 +376,7 @@ function renderCard(t) {
     t.provider && t.provider !== p.provider ? el("span", { class: "chip" }, providerName(t.provider)) : null,
     t.plan_model ? el("span", { class: "chip", title: "Planning model for this task" }, `plan: ${t.plan_model}`) : null,
     t.code_model ? el("span", { class: "chip", title: "Coding model for this task" }, `code: ${t.code_model}`) : null,
+    t.plan_trust ? el("span", { class: "chip", title: "Planning trust for this task" }, `trust: ${t.plan_trust}`) : null,
     hasOpenQuestions(t) ? el("span", { class: "chip question", title: t.questions.map(q => q.text).join("\n") },
       `? ${t.questions.length} question${t.questions.length === 1 ? "" : "s"}`) : null,
     t.error && t.status !== "failed" ? el("span", { class: "chip warn", title: t.error }, "last attempt failed") : null,
@@ -668,11 +681,12 @@ function renderDrawer(fillForm) {
     $("#d-desc").value = t.description || "";
     setProviderValue($("#d-provider"), t.provider || "");
     fillTaskModels(t.plan_model || "", t.code_model || "");
+    $("#d-plan-trust").value = t.plan_trust || "";
     $("#d-plan").value = t.plan || "";
     state.formStamp = formStamp(t);
     state.dirty = false;
   }
-  for (const id of ["#d-title", "#d-desc", "#d-provider", "#d-plan-model", "#d-code-model", "#d-plan"]) {
+  for (const id of ["#d-title", "#d-desc", "#d-provider", "#d-plan-model", "#d-code-model", "#d-plan-trust", "#d-plan"]) {
     $(id).disabled = locked;
   }
 
@@ -771,6 +785,7 @@ function formFields() {
     provider: $("#d-provider").value,
     plan_model: $("#d-plan-model").dataset.value || "",
     code_model: $("#d-code-model").dataset.value || "",
+    plan_trust: $("#d-plan-trust").value,
     plan: $("#d-plan").value,
   };
 }
@@ -1359,6 +1374,10 @@ function init() {
     await updateProject({ rewrite_titles: e.target.checked });
     e.target.checked = currentProject().rewrite_titles !== false;
   };
+  $("#p-plan-trust").onchange = async e => {
+    await updateProject({ plan_trust: e.target.value });
+    renderProjectTrust();
+  };
   $("#p-auto-sync").onchange = async e => {
     await updateProject({ auto_sync: e.target.checked });
     e.target.checked = currentProject().auto_sync === true;
@@ -1373,7 +1392,7 @@ function init() {
       await loadProjects();
     } catch (e) { toast(e.message, true); }
   };
-  for (const id of ["#d-title", "#d-desc", "#d-provider", "#d-plan"]) {
+  for (const id of ["#d-title", "#d-desc", "#d-provider", "#d-plan-trust", "#d-plan"]) {
     $(id).addEventListener("input", () => { state.dirty = true; renderEditActions(); });
   }
   $("#d-provider").addEventListener("change", () => {

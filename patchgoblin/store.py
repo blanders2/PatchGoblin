@@ -313,7 +313,7 @@ def find_task(doc: dict, tid: int) -> dict | None:
 
 
 def new_task(doc: dict, title: str, description: str = "", provider: str = "",
-             plan_model: str = "", code_model: str = "") -> dict:
+             plan_model: str = "", code_model: str = "", plan_trust: str = "") -> dict:
     ts = now()
     task = {
         "id": doc["next_id"],
@@ -324,6 +324,7 @@ def new_task(doc: dict, title: str, description: str = "", provider: str = "",
         "provider": provider,
         "plan_model": plan_model,
         "code_model": code_model,
+        "plan_trust": plan_trust,  # "" = the project's level
         "created_at": ts,
         "updated_at": ts,
         "queued_at": None,

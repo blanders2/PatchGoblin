@@ -15,7 +15,7 @@ import time
 from . import gitops
 from .hosts import HostError, host_for, kill_tree
 from .providers import (Cancelled, Outcome, chat_prompt, plan_prompt, plan_questions, ready_status, run_ai,
-                        run_prompt, split_title)
+                        resolve_trust, run_prompt, split_title)
 from .store import DOC_VERSION, find_task, global_model, log_event, now, set_status
 
 log = logging.getLogger("patchgoblin")
@@ -241,11 +241,12 @@ class Engine:
     def _plan(self, project, task, feedback, answers, job) -> None:
         pid, tid = project["id"], task["id"]
         rewrite = project.get("rewrite_titles", True) is not False
+        trust = resolve_trust(task, project)
         try:
             try:
                 self._acquire_plan_slot(pid, job)
                 try:
-                    prompt = plan_prompt(task, feedback, answers, rewrite_title=rewrite)
+                    prompt = plan_prompt(task, feedback, answers, rewrite_title=rewrite, trust=trust)
                     outcome = self._ai(project, task, "plan", prompt, job)
                 finally:
                     self._release_plan_slot(pid)
