@@ -277,6 +277,18 @@ main { flex: 1; min-width: 0; overflow: auto; padding: 18px 22px; }
 .question-list li::marker { color: var(--t-queued); font-weight: 600; }
 .question-list .question-text { color: var(--text); font-size: 13.5px; margin-bottom: 4px; }
 .question-list textarea { background: var(--panel); }
+.question-list textarea[hidden] { display: none; }
+.choice-group { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0; }
+.choice {
+  font: inherit; font-size: 12.5px; line-height: 1.2; cursor: pointer;
+  padding: 4px 12px; border-radius: 999px;
+  border: 1px solid var(--t-queued); background: var(--panel); color: var(--text);
+}
+.choice:hover { background: var(--panel-2); }
+.choice:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.choice[aria-pressed="true"] { background: var(--t-queued); color: var(--b-queued); font-weight: 600; }
+.choice.other { border-style: dashed; color: var(--muted); }
+.choice.other[aria-expanded="true"] { color: var(--text); }
 details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; padding: 4px 0; }
 .log {
   background: var(--panel-2);

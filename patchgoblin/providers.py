@@ -32,6 +32,9 @@ Reply with ONLY the implementation plan, in Markdown:
 - a "## Risks" section: things the implementer should watch for
 - a "## Questions for you" section: a numbered list of decisions only the user can make,
   one line each. If there are none, write "None."
+  If a question is yes/no, end it with `[Yes / No]`; if it has a few likely answers, end it
+  with them in brackets separated by ` / `, e.g. `[Tabs / Spaces]` (2–5 short options).
+  Open-ended questions have no brackets.
 """
 
 TITLE_INSTRUCTIONS = """\
@@ -93,10 +96,33 @@ _QUESTIONS_HEADING = re.compile(r"^#{1,6}\s*(open\s+)?questions\b", re.IGNORECAS
 _HEADING = re.compile(r"^#{1,6}\s")
 _ITEM = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+(.*)$")
 _NONE = re.compile(r"^\W*(none|n/?a|no( open)? questions)\W*$", re.IGNORECASE)
+_OPTIONS = re.compile(r"\s*\[([^\[\]]*/[^\[\]]*)\]\s*[.?]?\s*$")
+MAX_OPTIONS = 6
 
 
-def plan_questions(plan: str) -> list[str]:
-    """The items of the plan's "Questions for you" (or "Open questions") section."""
+def _parse_question(q: str) -> dict:
+    """Split a trailing ``[A / B / C]`` off a question into its answer options."""
+    match = _OPTIONS.search(q)
+    if not match:
+        return {"text": q, "options": []}
+    options, seen = [], set()
+    for opt in match.group(1).split("/"):
+        opt = opt.strip()
+        if opt and opt.lower() not in seen:
+            seen.add(opt.lower())
+            options.append(opt)
+    options = options[:MAX_OPTIONS]
+    if len(options) < 2:
+        return {"text": q, "options": []}
+    text = q[:match.start()].rstrip()
+    if "?" in q[match.end(1):] and not text.endswith("?"):  # "Which [A / B]?" keeps its "?"
+        text += "?"
+    return {"text": text, "options": options}
+
+
+def plan_questions(plan: str) -> list[dict]:
+    """The items of the plan's "Questions for you" (or "Open questions") section, as
+    ``{"text", "options"}``; options come only from a trailing ``[A / B]`` on the item."""
     items: list[str] = []
     inside = False
     for line in (plan or "").splitlines():
@@ -113,7 +139,7 @@ def plan_questions(plan: str) -> list[str]:
             items.append(item.group(1).strip())
         elif items and line[:1].isspace():
             items[-1] += " " + stripped  # wrapped continuation of the previous item
-    return [q for q in items if q and not _NONE.match(q)]
+    return [_parse_question(q) for q in items if q and not _NONE.match(q)]
 
 
 def ready_status(plan: str) -> str:

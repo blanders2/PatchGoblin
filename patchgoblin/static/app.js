@@ -364,7 +364,7 @@ function renderCard(t) {
     t.provider && t.provider !== p.provider ? el("span", { class: "chip" }, providerName(t.provider)) : null,
     t.plan_model ? el("span", { class: "chip", title: "Planning model for this task" }, `plan: ${t.plan_model}`) : null,
     t.code_model ? el("span", { class: "chip", title: "Coding model for this task" }, `code: ${t.code_model}`) : null,
-    hasOpenQuestions(t) ? el("span", { class: "chip question", title: t.questions.join("\n") },
+    hasOpenQuestions(t) ? el("span", { class: "chip question", title: t.questions.map(q => q.text).join("\n") },
       `? ${t.questions.length} question${t.questions.length === 1 ? "" : "s"}`) : null,
     t.error && t.status !== "failed" ? el("span", { class: "chip warn", title: t.error }, "last attempt failed") : null,
     t.commit ? el("span", { class: "chip mono" }, t.commit.slice(0, 7)) : null,
@@ -585,18 +585,70 @@ function renderQuestions(t, canPlan) {
   const stamp = JSON.stringify([t.id, questions]);
   if (stamp === state.questionStamp) return;
   state.questionStamp = stamp;
-  $("#d-question-list").replaceChildren(...questions.map((q, i) => el("li", {},
-    el("label", { for: `d-q-${i}`, class: "question-text" }, q),
-    el("textarea", { id: `d-q-${i}`, rows: "1", "data-q": String(i), placeholder: "Your answer…" }))));
+  $("#d-question-list").replaceChildren(...questions.map((q, i) => {
+    const options = q.options || [];
+    if (!options.length) {
+      return el("li", { "data-q": String(i) },
+        el("label", { for: `d-q-${i}`, class: "question-text" }, q.text),
+        el("textarea", { id: `d-q-${i}`, rows: "1", placeholder: "Your answer…" }));
+    }
+    return el("li", { "data-q": String(i) },
+      el("label", { for: `d-q-${i}`, class: "question-text" }, q.text),
+      el("div", { class: "choice-group", role: "group", "aria-label": q.text, onclick: pickChoice },
+        ...options.map(opt => el("button", { type: "button", class: "choice", "data-value": opt,
+          "aria-pressed": "false" }, opt)),
+        el("button", { type: "button", class: "choice other", "aria-expanded": "false",
+          "aria-controls": `d-q-${i}` }, "Other…")),
+      el("textarea", { id: `d-q-${i}`, rows: "1", hidden: true,
+        placeholder: "Add a note or type your own answer…" }));
+  }));
+}
+
+// One pressed option per question (click again to un-press); "Other…" shows/hides the note box.
+function pickChoice(e) {
+  const button = e.target.closest("button.choice");
+  if (!button) return;
+  const box = button.closest("li").querySelector("textarea");
+  if (button.classList.contains("other")) {
+    if (box.hidden) {
+      box.hidden = false;
+      button.setAttribute("aria-expanded", "true");
+      box.focus();
+    } else if (!box.value.trim()) {
+      box.value = "";
+      box.hidden = true;
+      button.setAttribute("aria-expanded", "false");
+    } else {
+      box.focus();  // never hide a typed note, or it would be sent unseen
+    }
+    return;
+  }
+  const on = button.getAttribute("aria-pressed") !== "true";
+  for (const b of $$(".choice:not(.other)", e.currentTarget)) b.setAttribute("aria-pressed", "false");
+  button.setAttribute("aria-pressed", String(on));
+}
+
+function resetQuestionAnswers() {
+  for (const box of $$("#d-question-list textarea")) box.value = "";
+  for (const b of $$("#d-question-list .choice[aria-pressed]")) b.setAttribute("aria-pressed", "false");
+  for (const b of $$("#d-question-list .choice.other")) {
+    b.setAttribute("aria-expanded", "false");
+    b.closest("li").querySelector("textarea").hidden = true;
+  }
 }
 
 async function answerQuestions() {
   const t = openTask();
   if (!t) return;
-  const answers = $$("#d-question-list textarea").map(box => ({
-    question: t.questions[Number(box.dataset.q)] || "", answer: box.value.trim(),
-  })).filter(a => a.answer);
-  if (!answers.length) { toast("Type an answer to at least one question first.", true); return; }
+  const answers = $$("#d-question-list > li").map(li => {
+    const picked = $(".choice[aria-pressed='true']:not(.other)", li)?.dataset.value || "";
+    const note = $("textarea", li).value.trim();
+    return {
+      question: t.questions[Number(li.dataset.q)]?.text || "",
+      answer: picked && note ? `${picked} — ${note}` : picked || note,
+    };
+  }).filter(a => a.answer);
+  if (!answers.length) { toast("Answer at least one question first.", true); return; }
   await doAction("plan", { answers });
 }
 
@@ -756,7 +808,7 @@ async function doAction(action, extra = {}) {
     Object.assign(t, updated);
     if (action === "plan") {
       $("#d-feedback").value = "";
-      for (const box of $$("#d-question-list textarea")) box.value = "";
+      resetQuestionAnswers();
     }
     state.formStamp = null;
     renderBoard();

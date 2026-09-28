@@ -194,22 +194,25 @@ class WorkflowTests(AppTestCase):
         tid = self.post_task(pid, "ASK me things")["id"]
         self.assertEqual(self.action(pid, tid, "plan").status_code, 200)
         task = self.wait_for(pid, tid, {"drafted"})
-        self.assertEqual(task["questions"], ["Which colour should the output be?", "Should it log?"])
-        self.assertEqual(task["history"][-1]["event"], "AI plan drafted (2 open questions)")
+        self.assertEqual(task["questions"], [
+            {"text": "Which colour should the output be?", "options": ["Red", "Blue", "Green"]},
+            {"text": "Should it log?", "options": ["Yes", "No"]},
+            {"text": "Any naming preferences?", "options": []}])
+        self.assertEqual(task["history"][-1]["event"], "AI plan drafted (3 open questions)")
 
         bad = self.action(pid, tid, "plan", answers="blue")
         self.assertEqual(bad.status_code, 400)
         bad = self.action(pid, tid, "plan", answers=[{"question": "q", "answer": 3}])
         self.assertEqual(bad.status_code, 400)
 
-        answers = [{"question": task["questions"][0], "answer": "blue"},
-                   {"question": task["questions"][1], "answer": "  "}]
+        answers = [{"question": task["questions"][1]["text"], "answer": "Yes — only in dev"},
+                   {"question": task["questions"][0]["text"], "answer": "  "}]
         res = self.action(pid, tid, "plan", answers=answers)
         self.assertEqual(res.status_code, 200, res.get_json())
         self.assertIn("with answers", res.get_json()["history"][-1]["event"])
         task = self.wait_for(pid, tid, {"planned"})
-        self.assertIn("A: blue", task["plan"])
-        self.assertNotIn("Should it log", task["plan"])
+        self.assertIn("Q: Should it log?\nA: Yes — only in dev", task["plan"])
+        self.assertNotIn("Which colour", task["plan"])
         self.assertEqual(task["questions"], [])
 
     def patch_plan(self, pid, tid, plan):
@@ -750,13 +753,34 @@ class PlanPromptTests(unittest.TestCase):
         plan = ("Summary.\n\n## Steps\n1. Do a thing\n\n## Questions for you\n"
                 "1. Should we keep the old API\n   for existing callers?\n2) Which DB?\n- Bullet one\n\n"
                 "Trailing prose.\n## Other\n1. not a question")
-        self.assertEqual(plan_questions(plan), [
+        self.assertEqual([q["text"] for q in plan_questions(plan)], [
             "Should we keep the old API for existing callers?", "Which DB?", "Bullet one"])
-        self.assertEqual(plan_questions("### Open questions or risks\n- Is X ok?"), ["Is X ok?"])
+        # No options are inferred from the wording.
+        self.assertEqual(plan_questions("### Open questions or risks\n- Is X ok?"),
+                         [{"text": "Is X ok?", "options": []}])
         self.assertEqual(plan_questions("## Questions for you\nNone."), [])
         self.assertEqual(plan_questions("## Questions for you\n1. None"), [])
         self.assertEqual(plan_questions("1. Step\n2. Step"), [])
         self.assertEqual(plan_questions(""), [])
+
+    def test_plan_question_options(self):
+        from patchgoblin.providers import plan_questions
+
+        def one(q):
+            (parsed,) = plan_questions(f"## Questions for you\n1. {q}")
+            return parsed
+
+        self.assertEqual(one("Proceed? [Yes / No]"), {"text": "Proceed?", "options": ["Yes", "No"]})
+        self.assertEqual(one("Which? [A / B / C]."), {"text": "Which?", "options": ["A", "B", "C"]})
+        self.assertEqual(one("Which one [A / B]?"), {"text": "Which one?", "options": ["A", "B"]})
+        self.assertEqual(one("Which? [A]"), {"text": "Which? [A]", "options": []})
+        self.assertEqual(one("See [docs](x) first?"), {"text": "See [docs](x) first?", "options": []})
+        self.assertEqual(one("Pick [A / a / B / ]")["options"], ["A", "B"])
+        self.assertEqual(one("Pick [A / B / C / D / E / F / G / H]")["options"], list("ABCDEF"))
+
+    def test_plan_instructions_ask_for_options(self):
+        from patchgoblin.providers import PLAN_INSTRUCTIONS
+        self.assertIn("[Yes / No]", PLAN_INSTRUCTIONS)
 
     def test_plan_prompt_with_answers(self):
         from patchgoblin.providers import plan_prompt
