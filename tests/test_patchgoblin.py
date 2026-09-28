@@ -140,6 +140,10 @@ class WorkflowTests(AppTestCase):
         self.assertEqual(self.action(pid, tid, "plan").status_code, 200)
         task = self.wait_for(pid, tid, {"planned"})
         self.assertIn("Step one", task["plan"])
+        self.assertFalse(task["plan"].startswith("Title:"))
+        self.assertEqual(task["title"], "Create agent output file")
+        self.assertTrue(any(h["event"] == "Title rewritten by AI (was: Create output file)"
+                            for h in task["history"]))
         self.assertIn("working...", task["output"])
 
         # Uncommitted user work is checkpointed separately before the AI runs.
@@ -150,7 +154,7 @@ class WorkflowTests(AppTestCase):
         self.assertEqual(task["status"], "done", task["error"])
         self.assertTrue(os.path.exists(os.path.join(self.proj_dir, "agent_output.txt")))
         log = git_log(self.proj_dir)
-        self.assertTrue(log[0].startswith("PatchGoblin: task #1 Create output file"))
+        self.assertTrue(log[0].startswith("PatchGoblin: task #1 Create agent output file"))
         self.assertEqual(log[1], "PatchGoblin: checkpoint before task #1")
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.proj_dir,
                               capture_output=True, text=True).stdout.strip()
@@ -159,6 +163,17 @@ class WorkflowTests(AppTestCase):
         with open(os.path.join(self.proj_dir, ".patchgoblin", "tasks.json"), encoding="utf-8") as fh:
             stored = json.load(fh)["tasks"][0]
         self.assertEqual(stored["status"], "done")
+
+    def test_plan_keeps_title_when_disabled(self):
+        pid = self.add_project()["id"]
+        res = self.client.patch(f"/api/projects/{pid}", headers=H, json={"rewrite_titles": False})
+        self.assertIs(res.get_json()["rewrite_titles"], False)
+        tid = self.post_task(pid, "Create output file")["id"]
+        self.assertEqual(self.action(pid, tid, "plan").status_code, 200)
+        task = self.wait_for(pid, tid, {"planned"})
+        self.assertEqual(task["title"], "Create output file")
+        self.assertNotIn("Title:", task["plan"])
+        self.assertIn("Step one", task["plan"])
 
     def test_manual_plan_and_failed_run(self):
         pid = self.add_project()["id"]
@@ -432,6 +447,26 @@ class PlanPromptTests(unittest.TestCase):
         self.assertIn("use tabs", prompt)
         self.assertIn("## Questions for you", prompt)
         self.assertNotIn("## Answers", plan_prompt(task))
+
+    def test_plan_prompt_title_instruction(self):
+        from patchgoblin.providers import plan_prompt
+        task = {"id": 1, "title": "T", "description": "", "plan": ""}
+        self.assertNotIn("Title: <", plan_prompt(task))
+        self.assertIn("Title: <", plan_prompt(task, rewrite_title=True))
+
+    def test_split_title(self):
+        from patchgoblin.providers import MAX_TITLE, split_title
+        self.assertEqual(split_title("Title: Add X\n\n1. Step"), ("Add X", "1. Step"))
+        self.assertEqual(split_title("**Title:** Add X\n\nPlan"), ("Add X", "Plan"))
+        self.assertEqual(split_title("# Title: `Add X`\nPlan"), ("Add X", "Plan"))
+        self.assertEqual(split_title("\n\n  title - \"Add   X\"\n\nPlan"), ("Add X", "Plan"))
+        self.assertEqual(split_title("1. Step\nTitle: late"), ("", "1. Step\nTitle: late"))
+        self.assertEqual(split_title("# Title of the plan\nPlan"), ("", "# Title of the plan\nPlan"))
+        self.assertEqual(split_title("Title: \"\"\nPlan"), ("", "Title: \"\"\nPlan"))
+        self.assertEqual(split_title(""), ("", ""))
+        title, plan = split_title("Title: " + "x" * 300 + "\nPlan")
+        self.assertEqual(len(title), MAX_TITLE)
+        self.assertEqual(plan, "Plan")
 
 
 class HostTests(unittest.TestCase):

@@ -55,6 +55,11 @@ rate limits, set **Plan limit** in the project bar. Extra tasks then show as Pla
 and wait for a free slot. Leave it blank for unlimited. Lowering the limit doesn't stop
 jobs that are already running.
 
+**AI titles.** When the AI plans a task (including replanning), it also suggests a
+concise title, which replaces the task's title. The old title is kept in the task's
+history. This is on by default. Untick **AI titles** in the project bar to keep your
+own titles. Marking a task planned by hand never changes its title.
+
 **Batch actions.** Tick the checkbox on each card you want (Shift+click selects a
 range, Space toggles the focused card, Esc clears). A toolbar then shows the actions
 that apply to the ticked tasks: Plan with AI, Mark planned, Queue for AI, Remove from

@@ -14,7 +14,7 @@ import time
 
 from . import gitops
 from .hosts import HostError, host_for, kill_tree
-from .providers import Cancelled, Outcome, chat_prompt, plan_prompt, run_ai, run_prompt
+from .providers import Cancelled, Outcome, chat_prompt, plan_prompt, run_ai, run_prompt, split_title
 from .store import find_task, log_event, now, set_status
 
 log = logging.getLogger("patchgoblin")
@@ -204,11 +204,13 @@ class Engine:
 
     def _plan(self, project, task, feedback, answers, job) -> None:
         pid, tid = project["id"], task["id"]
+        rewrite = project.get("rewrite_titles", True) is not False
         try:
             try:
                 self._acquire_plan_slot(pid, job)
                 try:
-                    outcome = self._ai(project, task, "plan", plan_prompt(task, feedback, answers), job)
+                    prompt = plan_prompt(task, feedback, answers, rewrite_title=rewrite)
+                    outcome = self._ai(project, task, "plan", prompt, job)
                 finally:
                     self._release_plan_slot(pid)
             except Cancelled:
@@ -219,7 +221,11 @@ class Engine:
                     return
                 current["output"] = _clip(job.text())
                 if outcome.ok:
-                    current["plan"] = outcome.text
+                    title, plan = split_title(outcome.text) if rewrite else ("", outcome.text)
+                    current["plan"] = plan.strip() or outcome.text
+                    if title and title != current["title"]:
+                        old, current["title"] = current["title"], title
+                        log_event(current, f"Title rewritten by AI (was: {old})")
                     current["error"] = ""
                     set_status(current, "planned", "AI plan ready")
                 else:

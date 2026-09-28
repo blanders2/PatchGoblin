@@ -48,6 +48,9 @@
             <input id="p-plan-limit" type="number" min="0" step="1" placeholder="∞"
                    title="Max simultaneous planning jobs (blank = unlimited). Each job is one AI CLI process.">
           </label>
+          <label class="check" title="When the AI plans a task, let it rewrite the task title">
+            <input type="checkbox" id="p-rewrite-titles"> AI titles
+          </label>
           <button class="ghost" id="chat-btn" title="Ask the AI about this project (read-only)">Chat</button>
           <button class="ghost" id="terminal-btn" title="Open a terminal in the project directory">Terminal</button>
           <button class="ghost" id="commits-btn">Commits</button>

@@ -31,6 +31,31 @@ Reply with ONLY the implementation plan, in Markdown:
   one line each. If there are none, write "None."
 """
 
+TITLE_INSTRUCTIONS = """\
+Start your reply with a single line `Title: <a concise, specific task title in the imperative,
+under 80 characters>`, then a blank line, then the plan.
+"""
+
+MAX_TITLE = 120
+_TITLE_LINE = re.compile(r"^\s*[#>*_\s]*title\s*[*_]*\s*[:\-]\s*[*_]*\s*(.+?)\s*[*_]*\s*$", re.IGNORECASE)
+
+
+def split_title(text: str) -> tuple[str, str]:
+    """Split a leading ``Title: …`` line off an AI plan: returns (title, rest), or ("", text)."""
+    lines = (text or "").splitlines()
+    first = next((i for i, line in enumerate(lines) if line.strip()), None)
+    if first is None:
+        return "", text
+    match = _TITLE_LINE.match(lines[first])
+    if not match:
+        return "", text
+    title = " ".join(match.group(1).strip().strip("\"'`").split())
+    if len(title) > MAX_TITLE:
+        title = title[:MAX_TITLE - 1].rstrip() + "…"
+    if not title:
+        return "", text
+    return title, "\n".join(lines[first + 1:]).strip("\n")
+
 RUN_INSTRUCTIONS = """\
 You are implementing a planned task in the project in the current working directory.
 Follow the plan, adapting it if the code requires. Keep changes focused on this task.
@@ -88,8 +113,10 @@ def plan_questions(plan: str) -> list[str]:
     return [q for q in items if q and not _NONE.match(q)]
 
 
-def plan_prompt(task: dict, feedback: str = "", answers: list[dict] | None = None) -> str:
-    parts = [PLAN_INSTRUCTIONS, f"# Task #{task['id']}: {task['title']}"]
+def plan_prompt(task: dict, feedback: str = "", answers: list[dict] | None = None,
+                rewrite_title: bool = False) -> str:
+    instructions = PLAN_INSTRUCTIONS + (TITLE_INSTRUCTIONS if rewrite_title else "")
+    parts = [instructions, f"# Task #{task['id']}: {task['title']}"]
     if task.get("description", "").strip():
         parts.append(f"## Description\n{task['description'].strip()}")
     if task.get("plan", "").strip():

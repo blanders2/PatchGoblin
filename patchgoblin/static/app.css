@@ -145,6 +145,7 @@ main { flex: 1; min-width: 0; overflow: auto; padding: 18px 22px; }
 .project-controls { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
 .project-controls select, .project-controls input { width: auto; }
 .project-controls #p-plan-limit { width: 6.5em; }
+.project-controls label.check { align-self: center; }
 
 .new-task { display: flex; gap: 8px; margin: 12px 0 16px; }
 .new-task #nt-title { flex: 2; }

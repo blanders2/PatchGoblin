@@ -159,6 +159,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             fields["model"] = (data["model"] or "").strip()
         if "plan_limit" in data:
             fields["plan_limit"] = plan_limit(data["plan_limit"])
+        if "rewrite_titles" in data:
+            fields["rewrite_titles"] = bool(data["rewrite_titles"])
         return jsonify(registry.update(project["id"], fields))
 
     def plan_limit(value) -> int:

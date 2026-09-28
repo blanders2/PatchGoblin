@@ -154,6 +154,7 @@ async function selectProject(pid) {
   $("#p-provider").value = p.provider || "claude";
   fillModelSelect($("#p-model"), p.provider || "claude", p.model || "");
   $("#p-plan-limit").value = p.plan_limit || "";
+  $("#p-rewrite-titles").checked = p.rewrite_titles !== false;
   state.tasks = [];
   renderBoard();
   loadChat();
@@ -945,6 +946,10 @@ function init() {
   $("#p-plan-limit").onchange = async e => {
     await updateProject({ plan_limit: e.target.value === "" ? 0 : Number(e.target.value) });
     e.target.value = currentProject().plan_limit || "";
+  };
+  $("#p-rewrite-titles").onchange = async e => {
+    await updateProject({ rewrite_titles: e.target.checked });
+    e.target.checked = currentProject().rewrite_titles !== false;
   };
   $("#remove-project-btn").onclick = async () => {
     const p = currentProject();

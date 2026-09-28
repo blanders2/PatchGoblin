@@ -10,6 +10,8 @@ if "FAIL" in prompt:
     sys.exit(3)
 
 if mode == "plan":
+    if "Title: <" in prompt:
+        print("Title: Create agent output file\n")
     print("1. Step one: create agent_output.txt\n2. Verify it exists")
     if "## Answers to your questions" in prompt:
         print("\nAnswers received: " + prompt.split("## Answers to your questions", 1)[1].split("\n\n")[0].strip())
