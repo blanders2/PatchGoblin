@@ -249,6 +249,21 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; paddi
 .history { list-style: none; padding: 0; margin: 6px 0 0; font-size: 12.5px; }
 .history li { padding: 3px 0; border-bottom: 1px dashed var(--line); }
 
+/* ---- chat ---- */
+#c-clear { margin-left: auto; }
+#chat .close { margin-left: 0; }
+.chat-body { flex: 1; }
+.chat-messages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.chat-messages li {
+  max-width: 92%; padding: 8px 11px; border-radius: 10px;
+  white-space: pre-wrap; word-break: break-word;
+}
+.chat-messages li.user { align-self: flex-end; background: var(--b-planned); }
+.chat-messages li.assistant { align-self: flex-start; background: var(--panel-2); }
+.chat-messages li.error { background: var(--b-failed); color: var(--t-failed); }
+.chat-messages .when { display: block; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+.chat-form { border-top: 1px solid var(--line); padding: 10px 16px 14px; display: flex; flex-direction: column; gap: 8px; }
+
 /* ---- dialogs ---- */
 dialog {
   border: 1px solid var(--line);

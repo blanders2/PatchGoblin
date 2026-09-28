@@ -196,6 +196,47 @@ class WorkflowTests(AppTestCase):
         self.assertIn("interrupted", task["error"])
 
 
+class ChatTests(AppTestCase):
+    def wait_chat(self, pid, timeout=30):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            chat = self.client.get(f"/api/projects/{pid}/chat").get_json()
+            if not chat["active"]:
+                return chat
+            time.sleep(0.2)
+        self.fail("chat reply never finished")
+
+    def test_chat_runs_read_only_in_project(self):
+        pid = self.add_project()["id"]
+        url = f"/api/projects/{pid}/chat"
+        self.assertEqual(self.client.post(url, headers=H, json={"message": " "}).status_code, 400)
+        self.assertEqual(self.client.post(url, json={"message": "hi"}).status_code, 403)
+        res = self.client.post(url, headers=H, json={"message": "What does this project do?"})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        chat = self.wait_chat(pid)
+        self.assertEqual([m["role"] for m in chat["messages"]], ["user", "assistant"])
+        self.assertIn("Step one", chat["messages"][1]["text"])  # the fake agent's read-only reply
+        self.assertFalse(os.path.exists(os.path.join(self.proj_dir, "agent_output.txt")))
+
+        self.client.post(url, headers=H, json={"message": "Now FAIL please"})
+        chat = self.wait_chat(pid)
+        self.assertTrue(chat["messages"][-1]["error"])
+        self.assertIn("exited with code 3", chat["messages"][-1]["text"])
+
+        self.assertEqual(self.client.post(url + "/cancel", headers=H).status_code, 400)
+        self.assertEqual(self.client.delete(url, headers=H).get_json()["messages"], [])
+        self.assertEqual(self.client.get("/api/projects/nope/chat").status_code, 404)
+
+    def test_chat_prompt_keeps_recent_history(self):
+        from patchgoblin.providers import MAX_CHAT_CONTEXT, chat_prompt
+        messages = [{"role": "user", "text": "old " * MAX_CHAT_CONTEXT},
+                    {"role": "assistant", "text": "an answer"}, {"role": "user", "text": "latest question"}]
+        prompt = chat_prompt(messages)
+        self.assertNotIn("old old", prompt)
+        self.assertLess(prompt.index("an answer"), prompt.index("latest question"))
+        self.assertIn("DO NOT create, modify or delete", prompt)
+
+
 class HostTests(unittest.TestCase):
     def test_ssh_target_validation(self):
         for bad in ("", "-oProxyCommand=calc", "user@host; rm -rf /", "a b"):

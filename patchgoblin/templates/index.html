@@ -44,6 +44,7 @@
             </select>
           </label>
           <label>Model <input id="p-model" placeholder="default" size="12"></label>
+          <button class="ghost" id="chat-btn" title="Ask the AI about this project (read-only)">Chat</button>
           <button class="ghost" id="terminal-btn" title="Open a terminal in the project directory">Terminal</button>
           <button class="ghost" id="commits-btn">Commits</button>
           <button class="ghost danger" id="remove-project-btn" title="Unregister (files are kept)">Remove</button>
@@ -110,6 +111,32 @@
       <ul id="d-history" class="history"></ul>
     </details>
   </div>
+</aside>
+
+<!-- Chat drawer -->
+<aside id="chat" class="drawer" hidden>
+  <div class="drawer-head">
+    <strong>Chat</strong>
+    <span class="muted small" id="c-where"></span>
+    <button class="ghost small" id="c-clear" title="Start a new conversation">Clear</button>
+    <button class="ghost close" data-close="chat" aria-label="Close">✕</button>
+  </div>
+  <div class="drawer-body chat-body" id="c-log" aria-live="polite">
+    <p class="muted small" id="c-empty">Ask the AI about this project. It runs in the project directory with
+      read-only access, using the project's AI and model. The conversation is kept until PatchGoblin restarts.</p>
+    <ul id="c-messages" class="chat-messages"></ul>
+    <details id="c-live-wrap" open hidden>
+      <summary>Thinking… <span class="muted" id="c-elapsed"></span></summary>
+      <pre id="c-live" class="log"></pre>
+    </details>
+  </div>
+  <form id="chat-form" class="chat-form">
+    <textarea id="c-input" rows="3" placeholder="Ask about the code… (Enter to send, Shift+Enter for a new line)"></textarea>
+    <div class="actions">
+      <button type="submit" id="c-send">Send</button>
+      <button type="button" class="danger" id="c-cancel" hidden>Cancel</button>
+    </div>
+  </form>
 </aside>
 
 <!-- Add project dialog -->

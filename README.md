@@ -56,6 +56,10 @@ AI's summary. Nothing is ever pushed. The commit uses your git identity if it's 
 otherwise `PatchGoblin <patchgoblin@localhost>`. Failed runs leave their changes
 uncommitted so you can inspect them. The **Commits** button shows recent history.
 
+**Chat.** The **Chat** button opens a conversation with the project's AI, running in
+the project directory with the same read-only access as planning (the planning command
+and timeout are used). Conversations are kept in memory until PatchGoblin restarts.
+
 ## AI providers
 
 Choose a default AI for each project and optionally a model. Individual tasks can

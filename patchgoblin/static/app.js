@@ -112,7 +112,7 @@ async function selectProject(pid) {
   if (pid) localStorageSet("pg.pid", pid);
   renderProjects();
   const p = currentProject();
-  if (!p) return;
+  if (!p) { closeChat(); return; }
   $("#p-name").textContent = p.name;
   $("#p-where").textContent = p.location === "ssh"
     ? `${p.ssh_target}${p.ssh_port ? ":" + p.ssh_port : ""}:${p.path}` : p.path;
@@ -120,6 +120,7 @@ async function selectProject(pid) {
   $("#p-model").value = p.model || "";
   state.tasks = [];
   renderBoard();
+  loadChat();
   await loadTasks();
 }
 
@@ -244,6 +245,7 @@ async function createTask(ev) {
 
 function openDrawer(tid) {
   if (state.openTid !== tid && state.dirty && !confirm("Discard unsaved changes to the open task?")) return;
+  closeChat();
   state.openTid = tid;
   state.dirty = false;
   $("#d-feedback").value = "";
@@ -416,6 +418,88 @@ async function pollLive() {
     if (!live.active) { pollLive.timer = null; loadTasks(); return; }
   } catch { /* transient; next tick retries */ }
   pollLive.timer = setTimeout(pollLive, 1500);
+}
+
+/* ---------------- chat ---------------- */
+
+const chat = { messages: [], active: false, timer: null };
+
+function openChat() {
+  if (!$("#drawer").hidden && !closeDrawer()) return;
+  $("#chat").hidden = false;
+  loadChat();
+  $("#c-input").focus();
+}
+
+function closeChat() {
+  $("#chat").hidden = true;
+  clearTimeout(chat.timer);
+  chat.timer = null;
+}
+
+async function loadChat() {
+  clearTimeout(chat.timer);
+  chat.timer = null;
+  const pid = state.pid;
+  if (!pid || $("#chat").hidden) return;
+  try {
+    const data = await api("GET", `/api/projects/${pid}/chat`);
+    if (pid === state.pid) renderChat(data);
+  } catch (e) { toast(e.message, true); }
+  if (chat.active && !$("#chat").hidden) chat.timer = setTimeout(loadChat, 1500);
+}
+
+function renderChat(data) {
+  const log = $("#c-log");
+  const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+  const p = currentProject();
+  $("#c-where").textContent = p ? `${p.name} · ${p.provider || "claude"}${p.model ? " · " + p.model : ""}` : "";
+  chat.active = data.active;
+  chat.messages = data.messages;
+  $("#c-empty").hidden = data.messages.length > 0;
+  $("#c-messages").replaceChildren(...data.messages.map(m => el("li", {
+    class: `${m.role}${m.error ? " error" : ""}`,
+  }, el("span", { class: "when" }, `${m.role === "user" ? "You" : "AI"} · ${new Date(m.at).toLocaleTimeString()}`),
+     m.text)));
+  $("#c-live-wrap").hidden = !data.active;
+  $("#c-live").textContent = data.output || "Waiting for output…";
+  $("#c-elapsed").textContent = data.active ? `${data.elapsed}s` : "";
+  $("#c-send").disabled = data.active;
+  $("#c-cancel").hidden = !data.active;
+  $("#c-clear").disabled = data.active || !data.messages.length;
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+async function chatRequest(method, suffix, body) {
+  try {
+    renderChat(await api(method, `/api/projects/${state.pid}/chat${suffix}`, body));
+    if (chat.active) loadChat();
+    return true;
+  } catch (e) { toast(e.message, true); return false; }
+}
+
+async function sendChat(ev) {
+  ev.preventDefault();
+  const input = $("#c-input");
+  const message = input.value.trim();
+  if (!message || chat.active) return;
+  $("#c-send").disabled = true;
+  if (await chatRequest("POST", "", { message })) {
+    input.value = "";
+    $("#c-log").scrollTop = $("#c-log").scrollHeight;
+  } else $("#c-send").disabled = false;
+}
+
+function setupChat() {
+  $("#chat-btn").onclick = openChat;
+  $("#chat-form").onsubmit = sendChat;
+  $("#c-input").onkeydown = e => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) sendChat(e);
+  };
+  $("#c-cancel").onclick = () => chatRequest("POST", "/cancel");
+  $("#c-clear").onclick = () => {
+    if (confirm("Clear this conversation?")) chatRequest("DELETE", "");
+  };
 }
 
 /* ---------------- dialogs ---------------- */
@@ -613,6 +697,7 @@ async function showCommits() {
 function init() {
   setupProjectDialog();
   setupSettingsDialog();
+  setupChat();
   $("#new-task").onsubmit = createTask;
   $("#commits-btn").onclick = showCommits;
   $("#terminal-btn").onclick = async () => {
@@ -643,10 +728,12 @@ function init() {
     if (!target) return;
     const id = target.dataset.close;
     if (id === "drawer") closeDrawer();
+    else if (id === "chat") closeChat();
     else $("#" + id).close();
   });
   document.addEventListener("keydown", e => {
     if (e.key === "Escape" && !$("#drawer").hidden && !document.querySelector("dialog[open]")) closeDrawer();
+    if (e.key === "Escape" && !$("#chat").hidden && !document.querySelector("dialog[open]")) closeChat();
     if ((e.ctrlKey || e.metaKey) && e.key === "s" && !$("#drawer").hidden) { e.preventDefault(); saveTask(); }
   });
   window.addEventListener("beforeunload", e => { if (state.dirty) e.preventDefault(); });

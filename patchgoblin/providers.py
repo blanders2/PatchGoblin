@@ -37,6 +37,27 @@ When you are done, reply with a short summary of what you changed and how you ve
 """
 
 
+CHAT_INSTRUCTIONS = """\
+You are chatting with the user about the project in the current working directory.
+Investigate the code as needed to answer, but DO NOT create, modify or delete any files.
+Reply to the user's latest message in Markdown, concisely.
+"""
+
+MAX_CHAT_CONTEXT = 40000
+
+
+def chat_prompt(messages: list[dict]) -> str:
+    """The conversation so far (oldest turns dropped if long), ending with the user's message."""
+    turns, size = [], 0
+    for msg in reversed(messages):
+        turn = f"### {'User' if msg['role'] == 'user' else 'Assistant'}\n{msg['text'].strip()}"
+        if turns and size + len(turn) > MAX_CHAT_CONTEXT:
+            break
+        turns.insert(0, turn)
+        size += len(turn)
+    return CHAT_INSTRUCTIONS + "\n# Conversation\n\n" + "\n\n".join(turns) + "\n"
+
+
 def plan_prompt(task: dict, feedback: str = "") -> str:
     parts = [PLAN_INSTRUCTIONS, f"# Task #{task['id']}: {task['title']}"]
     if task.get("description", "").strip():

@@ -150,10 +150,11 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     @app.delete("/api/projects/<pid>")
     def remove_project(pid):
         project_or_404(pid)
-        if any(key[0] == pid for key in engine.jobs):
+        if any(key[0] == pid for key in engine.jobs) or engine.chat(pid).job is not None:
             raise ValueError("Wait for this project's AI jobs to finish first.")
         registry.remove(pid)
         store.forget(pid)
+        engine.chats.pop(pid, None)
         return jsonify(ok=True)
 
     @app.get("/api/projects/<pid>/commits")
@@ -165,6 +166,42 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     def terminal(pid):
         open_terminal(project_or_404(pid))
         return jsonify(ok=True)
+
+    # ---- chat ---------------------------------------------------------------
+    def chat_view(pid: str) -> dict:
+        chat = engine.chat(pid)
+        job = chat.job
+        return {"messages": list(chat.messages), "active": job is not None,
+                "output": job.text() if job else "", "elapsed": round(job.elapsed()) if job else 0}
+
+    @app.get("/api/projects/<pid>/chat")
+    def get_chat(pid):
+        project_or_404(pid)
+        return jsonify(chat_view(pid))
+
+    @app.post("/api/projects/<pid>/chat")
+    def send_chat(pid):
+        project = project_or_404(pid)
+        text = (body().get("message") or "").strip()
+        if not text:
+            raise ValueError("Type a message first.")
+        engine.send_chat(project, text)
+        return jsonify(chat_view(pid))
+
+    @app.post("/api/projects/<pid>/chat/cancel")
+    def cancel_chat(pid):
+        project_or_404(pid)
+        job = engine.chat(pid).job
+        if job is None:
+            raise ValueError("The AI is not replying.")
+        job.cancel()
+        return jsonify(chat_view(pid))
+
+    @app.delete("/api/projects/<pid>/chat")
+    def clear_chat(pid):
+        project_or_404(pid)
+        engine.clear_chat(pid)
+        return jsonify(chat_view(pid))
 
     # ---- tasks --------------------------------------------------------------
     @app.get("/api/projects/<pid>/tasks")

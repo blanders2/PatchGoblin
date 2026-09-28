@@ -13,7 +13,7 @@ import time
 
 from . import gitops
 from .hosts import HostError, host_for, kill_tree
-from .providers import Cancelled, Outcome, plan_prompt, run_ai, run_prompt
+from .providers import Cancelled, Outcome, chat_prompt, plan_prompt, run_ai, run_prompt
 from .store import find_task, log_event, now, set_status
 
 log = logging.getLogger("patchgoblin")
@@ -59,6 +59,21 @@ class Job:
             kill_tree(self._proc)
 
 
+MAX_CHAT_MESSAGES = 200
+
+
+class Chat:
+    """A project's AI chat: the conversation (kept in memory only) and any reply in progress."""
+
+    def __init__(self):
+        self.messages: list[dict] = []
+        self.job: Job | None = None
+
+    def add(self, role: str, text: str, error: bool = False) -> None:
+        self.messages.append({"role": role, "text": text, "at": now(), "error": error})
+        del self.messages[:-MAX_CHAT_MESSAGES]
+
+
 def _clip(text: str) -> str:
     return text if len(text) <= MAX_OUTPUT else "… [earlier output truncated]\n" + text[-MAX_OUTPUT:]
 
@@ -67,6 +82,7 @@ class Engine:
     def __init__(self, registry, store, settings):
         self.registry, self.store, self.settings = registry, store, settings
         self.jobs: dict[tuple[str, int], Job] = {}
+        self.chats: dict[str, Chat] = {}
         self._lock = threading.Lock()
         self._runners: set[str] = set()
         self._pending: set[str] = set()
@@ -274,6 +290,45 @@ class Engine:
                 log.exception("Could not record failure for %s#%s", pid, tid)
         finally:
             self.jobs.pop((pid, tid), None)
+
+    # ---- chat ------------------------------------------------------------
+    def chat(self, pid: str) -> Chat:
+        with self._lock:
+            return self.chats.setdefault(pid, Chat())
+
+    def send_chat(self, project: dict, text: str) -> Chat:
+        """Add the user's message and start the AI reply. Chat is read-only, like planning."""
+        chat = self.chat(project["id"])
+        with self._lock:
+            if chat.job is not None:
+                raise ValueError("The AI is still replying; wait or cancel first.")
+            chat.add("user", text)
+            chat.job = job = Job("chat")
+            prompt = chat_prompt(chat.messages)
+        threading.Thread(target=self._chat, args=(project, chat, prompt, job),
+                         name=f"pg-chat-{project['id']}", daemon=True).start()
+        return chat
+
+    def _chat(self, project, chat, prompt, job) -> None:
+        try:
+            try:
+                outcome = self._ai(project, {}, "plan", prompt, job)
+            except Cancelled:
+                outcome = Outcome(False, error="Reply cancelled.")
+            if outcome.ok:
+                chat.add("assistant", outcome.text)
+            else:
+                chat.add("assistant", outcome.error or "The AI did not reply.", error=True)
+        finally:
+            with self._lock:
+                if chat.job is job:
+                    chat.job = None
+
+    def clear_chat(self, pid: str) -> None:
+        chat = self.chat(pid)
+        if chat.job is not None:
+            raise ValueError("The AI is still replying; wait or cancel first.")
+        chat.messages.clear()
 
     def cancel(self, pid: str, tid: int) -> bool:
         job = self.jobs.get((pid, tid))
