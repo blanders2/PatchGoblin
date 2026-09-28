@@ -43,8 +43,9 @@
               {% for p in providers %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
             </select>
           </label>
-          <label>Model <select id="p-model"></select></label>
-          <button type="button" class="ghost small" id="p-model-refresh" title="Reload the model list from the API" hidden>↻</button>
+          <label title="Used to plan tasks, and for chat unless chat has its own model">Planning Model <select id="p-plan-model"></select></label>
+          <label title="Used when the AI runs (codes) a task">Coding Model <select id="p-code-model"></select></label>
+          <button type="button" class="ghost small" id="p-model-refresh" title="Reload the model lists from the API" hidden>↻</button>
           <label>Plan limit
             <input id="p-plan-limit" type="number" min="0" step="1" placeholder="∞"
                    title="Max simultaneous planning jobs (blank = unlimited). Each job is one AI CLI process.">
@@ -87,6 +88,11 @@
           </select>
           <button type="button" class="ghost small" id="batch-provider-btn">Set AI</button>
         </span>
+        <span class="batch-models">
+          <select id="batch-plan-model" aria-label="Planning model for the selected tasks"></select>
+          <select id="batch-code-model" aria-label="Coding model for the selected tasks"></select>
+          <button type="button" class="ghost small" id="batch-models-btn">Set models</button>
+        </span>
         <button type="button" class="ghost small danger" id="batch-delete"></button>
         <button type="button" class="ghost small" id="batch-clear" title="Clear selection (Esc)">✕</button>
       </div>
@@ -116,6 +122,10 @@
         {% for p in providers %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
       </select>
     </label>
+    <div class="row">
+      <label class="inline">Planning Model <select id="d-plan-model"></select></label>
+      <label class="inline">Coding Model <select id="d-code-model"></select></label>
+    </div>
     <section id="d-questions" class="questions" hidden aria-labelledby="d-questions-title">
       <h4 id="d-questions-title">The AI has questions for you</h4>
       <p class="muted small">Answer the ones you can, then let the AI revise the plan. Blank answers are skipped.</p>
@@ -155,12 +165,13 @@
   <div class="drawer-head">
     <strong>Chat</strong>
     <span class="muted small" id="c-where"></span>
+    <label class="inline small">Model <select id="c-model" title="The project's chat model"></select></label>
     <button class="ghost small" id="c-clear" title="Start a new conversation">Clear</button>
     <button class="ghost close" data-close="chat" aria-label="Close">✕</button>
   </div>
   <div class="drawer-body chat-body" id="c-log" aria-live="polite">
     <p class="muted small" id="c-empty">Ask the AI about this project. It runs in the project directory with
-      read-only access, using the project's AI and model. The conversation is kept until PatchGoblin restarts.</p>
+      read-only access, using the project's AI and its chat model (the planning model unless you pick one). The conversation is kept until PatchGoblin restarts.</p>
     <ul id="c-messages" class="chat-messages"></ul>
     <details id="c-live-wrap" open hidden>
       <summary>Thinking… <span class="muted" id="c-elapsed"></span></summary>
@@ -214,7 +225,8 @@
       <label>Default AI
         <select name="provider" class="provider-select">{% for p in providers %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}</select>
       </label>
-      <label class="grow">Model <select name="model"></select></label>
+      <label class="grow">Planning Model <select name="plan_model"></select></label>
+      <label class="grow">Coding Model <select name="code_model"></select></label>
     </div>
     <label class="check"><input type="checkbox" name="create" checked> Create the directory if it doesn't exist</label>
     <p class="muted small">A git repository is initialized in the directory if it isn't already a repo root.</p>
@@ -266,16 +278,25 @@
   <form id="settings-form" method="dialog">
     <h2>Settings</h2>
     <p class="muted small">CLI commands run in the project directory (over SSH for remote projects) with the
-      prompt on stdin. The model flag is added when a project sets a model.</p>
+      prompt on stdin. Models are chosen per task, then per project, then from these defaults; when all
+      are blank the CLI or API uses its own default.</p>
     <fieldset>
       <legend>Claude Code</legend>
       <label>Planning command <input name="claude.plan" class="mono"></label>
       <label>Run command <input name="claude.run" class="mono"></label>
+      <div class="row">
+        <label class="grow">Default planning model <input name="claude.plan_model" placeholder="CLI default"></label>
+        <label class="grow">Default coding model <input name="claude.code_model" placeholder="CLI default"></label>
+      </div>
     </fieldset>
     <fieldset>
       <legend>Codex</legend>
       <label>Planning command <input name="codex.plan" class="mono"></label>
       <label>Run command <input name="codex.run" class="mono"></label>
+      <div class="row">
+        <label class="grow">Default planning model <input name="codex.plan_model" placeholder="CLI default"></label>
+        <label class="grow">Default coding model <input name="codex.code_model" placeholder="CLI default"></label>
+      </div>
     </fieldset>
     <fieldset>
       <legend>OpenAI-compatible APIs</legend>
@@ -298,7 +319,8 @@
         </div>
         <div class="muted small" data-f="key_status"></div>
         <div class="row">
-          <label>Default model <input data-f="model" size="18"></label>
+          <label>Default planning model <input data-f="model" size="18"></label>
+          <label>Default coding model <input data-f="code_model" size="18" placeholder="same as planning"></label>
           <label class="grow">Model suggestions <input data-f="models" placeholder="space or comma separated"></label>
           <label>Max steps <input data-f="max_steps" type="number" min="1" max="200" size="4"></label>
         </div>

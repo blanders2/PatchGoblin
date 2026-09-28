@@ -978,5 +978,139 @@ class EndpointSettingsTests(AppTestCase):
         self.assertEqual(lm.call_args.args[0]["api_key"], "sk-saved")
 
 
+class ModelTests(AppTestCase):
+    def resolve(self, project, task=None, role="plan"):
+        return self.app.config["ENGINE"].provider_for(project, task or {}, role)
+
+    def set_settings(self, **values):
+        self.app.config["SETTINGS"].update(values)
+
+    def test_provider_for_roles(self):
+        p = {"provider": "claude", "plan_model": "opus", "code_model": "sonnet", "chat_model": ""}
+        self.assertEqual(self.resolve(p, role="plan"), ("claude", "opus"))
+        self.assertEqual(self.resolve(p, role="run"), ("claude", "sonnet"))
+        self.assertEqual(self.resolve(p, role="chat"), ("claude", "opus"))
+        self.assertEqual(self.resolve({**p, "chat_model": "haiku"}, role="chat"), ("claude", "haiku"))
+        task = {"code_model": "x"}
+        self.assertEqual(self.resolve(p, task, "run"), ("claude", "x"))
+        self.assertEqual(self.resolve(p, task, "plan"), ("claude", "opus"))
+        # Legacy (unmigrated) project dicts still resolve.
+        self.assertEqual(self.resolve({"provider": "claude", "model": "old"}, role="run"), ("claude", "old"))
+
+    def test_provider_for_other_provider_and_globals(self):
+        p = {"provider": "claude", "plan_model": "opus", "code_model": "sonnet"}
+        codex_task = {"provider": "codex"}
+        self.assertEqual(self.resolve(p, codex_task, "run"), ("codex", ""))
+        self.assertEqual(self.resolve(p, {**codex_task, "plan_model": "gpt-5"}), ("codex", "gpt-5"))
+        self.set_settings(commands={"codex": {"code_model": "gpt-5-codex"},
+                                    "claude": {"code_model": "global-code"}})
+        self.assertEqual(self.resolve(p, codex_task, "run"), ("codex", "gpt-5-codex"))
+        blank = {"provider": "claude", "plan_model": "", "code_model": ""}
+        self.assertEqual(self.resolve(blank, role="run"), ("claude", "global-code"))
+        self.assertEqual(self.resolve(blank, role="plan"), ("claude", ""))
+
+    def test_provider_for_endpoint_code_model_falls_back(self):
+        self.set_settings(endpoints=[{"id": "or", "name": "OR", "base_url": "http://x/v1", "model": "m-plan"}])
+        p = {"provider": "or", "plan_model": "", "code_model": ""}
+        self.assertEqual(self.resolve(p, role="run"), ("or", "m-plan"))
+        self.set_settings(endpoints=[{"id": "or", "name": "OR", "base_url": "http://x/v1",
+                                      "model": "m-plan", "code_model": "m-code"}])
+        self.assertEqual(self.resolve(p, role="run"), ("or", "m-code"))
+        self.assertEqual(self.resolve(p, role="chat"), ("or", "m-plan"))
+
+    def test_registry_migration(self):
+        from patchgoblin.store import Registry
+        data_dir = os.path.join(self.tmp.name, "legacy")
+        os.makedirs(data_dir)
+        path = os.path.join(data_dir, "projects.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"projects": [{"id": "a", "provider": "claude", "model": "opus", "extra": 1},
+                                    {"id": "b", "provider": "codex", "plan_model": "p", "code_model": "c"}]}, fh)
+        Registry(data_dir)
+        a, b = Registry(data_dir).list()
+        self.assertEqual({k: a.get(k) for k in ("plan_model", "code_model", "chat_model", "extra")},
+                         {"plan_model": "opus", "code_model": "opus", "chat_model": "", "extra": 1})
+        self.assertNotIn("model", a)
+        self.assertEqual(b, {"id": "b", "provider": "codex", "plan_model": "p", "code_model": "c"})
+        with open(path + ".bak", encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["projects"][0]["model"], "opus")
+        before = os.path.getmtime(path)
+        time.sleep(0.05)
+        Registry(data_dir)
+        self.assertEqual(os.path.getmtime(path), before)
+
+    def test_project_routes(self):
+        p = self.add_project(plan_model=" opus ", code_model="sonnet ", chat_model="")
+        self.assertEqual((p["plan_model"], p["code_model"], p["chat_model"]), ("opus", "sonnet", ""))
+        self.assertNotIn("model", p)
+        url = f"/api/projects/{p['id']}"
+        p = self.client.patch(url, headers=H, json={"chat_model": " haiku", "code_model": ""}).get_json()
+        self.assertEqual((p["plan_model"], p["code_model"], p["chat_model"]), ("opus", "", "haiku"))
+        p = self.client.patch(url, headers=H, json={"model": "legacy"}).get_json()
+        self.assertEqual(p["plan_model"], "legacy")
+        self.assertEqual(self.client.patch(url, headers=H, json={"plan_model": 3}).status_code, 400)
+
+    def test_task_models_edit_and_batch(self):
+        pid = self.add_project()["id"]
+        a, b, c = (self.post_task(pid, t)["id"] for t in ("a", "b", "c"))
+        # An old task without the model keys can still be edited.
+        path = os.path.join(self.proj_dir, ".patchgoblin", "tasks.json")
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        for t in doc["tasks"]:
+            t.pop("plan_model"), t.pop("code_model")
+        doc["tasks"][2]["status"] = "running"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        store = self.app.config["STORE"]
+        store.forget(pid)
+        self.app.config["ENGINE"].jobs[(pid, c)] = mock.Mock()
+        self.addCleanup(self.app.config["ENGINE"].jobs.pop, (pid, c))
+        res = self.client.patch(f"/api/projects/{pid}/tasks/{a}", headers=H, json={"code_model": " x "})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertEqual((res.get_json()["code_model"], res.get_json().get("plan_model", "")), ("x", ""))
+        self.assertEqual(res.get_json()["history"][-1]["event"], "Edited code_model")
+
+        batch = f"/api/projects/{pid}/tasks/batch"
+        data = self.client.post(batch, headers=H, json={"action": "set_models", "ids": [a, b, c],
+                                                        "plan_model": "opus"}).get_json()
+        self.assertEqual([r["ok"] for r in data["results"]], [True, True, False])
+        by_id = {t["id"]: t for t in data["tasks"]}
+        self.assertEqual((by_id[a]["plan_model"], by_id[a]["code_model"]), ("opus", "x"))
+        self.assertEqual((by_id[b]["plan_model"], by_id[b].get("code_model", "")), ("opus", ""))
+        self.assertNotIn("plan_model", by_id[c])
+        self.assertEqual(by_id[b]["history"][-1]["event"], "Edited models")
+        res = self.client.post(batch, headers=H, json={"action": "set_models", "ids": [a]})
+        self.assertEqual(res.status_code, 400)
+        # Changing the provider clears model overrides chosen for the old one.
+        data = self.client.post(batch, headers=H, json={"action": "set_provider", "ids": [a],
+                                                        "provider": "codex"}).get_json()
+        task = next(t for t in data["tasks"] if t["id"] == a)
+        self.assertEqual((task["provider"], task["plan_model"], task["code_model"]), ("codex", "", ""))
+
+    def test_settings_models_round_trip(self):
+        res = self.client.put("/api/settings", headers=H, json={
+            "commands": {"claude": {"plan_model": " opus ", "code_model": "sonnet"}},
+            "endpoints": [{"name": "OR", "base_url": "http://x/v1", "model": "a", "code_model": " b "}]})
+        data = res.get_json()
+        self.assertEqual(res.status_code, 200, data)
+        self.assertEqual((data["commands"]["claude"]["plan_model"], data["commands"]["claude"]["code_model"]),
+                         ("opus", "sonnet"))
+        self.assertEqual(data["commands"]["codex"]["plan_model"], "")
+        self.assertEqual(data["endpoints"][0]["code_model"], "b")
+        self.assertIn("b", data["models"]["or"])
+        bad = self.client.put("/api/settings", headers=H, json={"commands": {"claude": {"plan_model": 5}}})
+        self.assertEqual(bad.status_code, 400)
+
+    def test_job_log_names_model(self):
+        p = self.add_project(plan_model="opus", code_model="sonnet")
+        job = mock.Mock()
+        with mock.patch("patchgoblin.engine.run_ai", return_value=Outcome(True, "ok")) as run_ai:
+            self.app.config["ENGINE"]._ai(p, {}, "run", "prompt", job)
+            self.app.config["ENGINE"]._ai(p, {}, "plan", "prompt", job, role="chat")
+        self.assertEqual([c.kwargs["model"] for c in run_ai.call_args_list], ["sonnet", "opus"])
+        self.assertIn("run with claude / sonnet in", job.write.call_args_list[0].args[0])
+
+
 if __name__ == "__main__":
     unittest.main()

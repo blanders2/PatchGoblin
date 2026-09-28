@@ -18,7 +18,9 @@ from .store import (CLI_PROVIDERS, MODELS, STATUSES, Registry, Settings, TaskSto
                     find_task, log_event, new_task, now, provider_choices, set_status, tasks_path,
                     valid_provider)
 
-EDITABLE = ("title", "description", "plan", "provider")
+EDITABLE = ("title", "description", "plan", "provider", "plan_model", "code_model")
+MODEL_KEYS = ("plan_model", "code_model")
+PROJECT_MODEL_KEYS = ("plan_model", "code_model", "chat_model")
 LOCKED = ("planning", "running")
 ENDPOINT_ID = re.compile(r"^[a-z0-9_-]{1,32}$")
 MODELS_CACHE_SECONDS = 600
@@ -29,8 +31,30 @@ def model_suggestions(settings: dict) -> dict:
     out = {p: list(MODELS[p]) for p in CLI_PROVIDERS}
     for ep in settings["endpoints"]:
         builtin = list(MODELS["openai"]) if ep["id"] == "openai" else []
-        out[ep["id"]] = list(dict.fromkeys(ep["models"] + ([ep["model"]] if ep["model"] else []) + builtin))
+        own = [m for m in (ep["model"], ep.get("code_model", "")) if m]
+        out[ep["id"]] = list(dict.fromkeys(ep["models"] + own + builtin))
     return out
+
+
+def model_name(value, what: str = "model") -> str:
+    """A model name from a request: a single-line string, stripped ("" for none)."""
+    if value is None:
+        return ""
+    if not isinstance(value, str) or any(c in value for c in "\r\n"):
+        raise ValueError(f"The {what} must be a single-line name.")
+    return value.strip()
+
+
+def clean_commands(commands) -> dict:
+    """Check the CLI settings sent by the Settings form (their model defaults must be names)."""
+    if not isinstance(commands, dict):
+        raise ValueError("commands must be an object.")
+    for cfg in commands.values():
+        if isinstance(cfg, dict):
+            for key in MODEL_KEYS:
+                if key in cfg:
+                    cfg[key] = model_name(cfg[key], "default model")
+    return commands
 
 
 def _slug(name: str) -> str:
@@ -90,6 +114,7 @@ def clean_endpoints(values, saved: list[dict]) -> list[dict]:
             "api_key_env": str(raw.get("api_key_env") or "").strip(),
             "headers": {k.strip(): v.strip() for k, v in headers.items()},
             "model": str(raw.get("model") or "").strip(),
+            "code_model": str(raw.get("code_model") or "").strip(),
             "models": list(dict.fromkeys(m.strip() for m in models if m.strip())),
             "allow_commands": bool(raw.get("allow_commands")),
             "max_steps": max_steps,
@@ -178,6 +203,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     def put_settings():
         data = body()
         allowed = {k: data[k] for k in ("commands", "timeouts") if k in data}
+        if "commands" in allowed:
+            allowed["commands"] = clean_commands(allowed["commands"])
         endpoints = clean_endpoints(data["endpoints"], settings.get()["endpoints"]) if "endpoints" in data else None
         updated = settings.update(allowed)
         if endpoints is not None:
@@ -232,7 +259,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             "ssh_target": (data.get("ssh_target") or "").strip() if location == "ssh" else "",
             "ssh_port": int(data["ssh_port"]) if location == "ssh" and data.get("ssh_port") else None,
             "provider": provider,
-            "model": (data.get("model") or "").strip(),
+            **{k: model_name(data.get(k)) for k in PROJECT_MODEL_KEYS},
         }
         return fields
 
@@ -282,8 +309,11 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             if not valid_provider(settings.get(), data["provider"]):
                 raise ValueError("Unknown provider.")
             fields["provider"] = data["provider"]
-        if "model" in data:
-            fields["model"] = (data["model"] or "").strip()
+        if "model" in data and "plan_model" not in data:  # before planning/coding models
+            fields["plan_model"] = model_name(data["model"])
+        for key in PROJECT_MODEL_KEYS:
+            if key in data:
+                fields[key] = model_name(data[key])
         if "plan_limit" in data:
             fields["plan_limit"] = plan_limit(data["plan_limit"])
         if "rewrite_titles" in data:
@@ -416,8 +446,9 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         provider = data.get("provider") or ""
         if provider and not valid_provider(settings.get(), provider):
             raise ValueError("Unknown provider.")
+        models = {k: model_name(data.get(k)) for k in MODEL_KEYS}
         with store.edit(project) as doc:
-            task = new_task(doc, title, (data.get("description") or "").strip(), provider)
+            task = new_task(doc, title, (data.get("description") or "").strip(), provider, **models)
         return jsonify(task_view(pid, task)), 201
 
     @app.patch("/api/projects/<pid>/tasks/<int:tid>")
@@ -428,7 +459,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             task = find_task(doc, tid) or abort(404)
             if task["status"] in LOCKED:
                 raise ValueError(f"Task is {task['status']}; wait or cancel first.")
-            changed = [k for k in EDITABLE if k in data and data[k] != task[k]]
+            data = {**data, **{k: model_name(data[k]) for k in MODEL_KEYS if k in data}}
+            changed = [k for k in EDITABLE if k in data and data[k] != task.get(k, "")]
             if "provider" in changed and data["provider"] and not valid_provider(settings.get(), data["provider"]):
                 raise ValueError("Unknown provider.")
             if "title" in changed and not str(data["title"]).strip():
@@ -497,7 +529,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         doc = store.read(project, fresh=True)
         return jsonify(task_view(pid, find_task(doc, tid) or abort(404)))
 
-    BATCH_ACTIONS = set(TRANSITIONS) | {"plan", "cancel", "delete", "set_provider"}
+    BATCH_ACTIONS = set(TRANSITIONS) | {"plan", "cancel", "delete", "set_provider", "set_models"}
     MAX_BATCH = 200
 
     @app.post("/api/projects/<pid>/tasks/batch")
@@ -518,6 +550,10 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         provider = data.get("provider") or ""
         if action == "set_provider" and provider and not valid_provider(settings.get(), provider):
             raise ValueError("Unknown provider.")
+        # set_models only touches the keys sent; "" resets a task to the project's model.
+        models = {k: model_name(data[k]) for k in MODEL_KEYS if k in data}
+        if action == "set_models" and not models:
+            raise ValueError("Choose a planning or coding model to set.")
 
         errors: dict[int, str] = {}
 
@@ -548,8 +584,15 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
                         raise ValueError(f"Task is {task['status']}; cancel it first.")
                     elif action == "delete":
                         doc["tasks"].remove(task)
+                    elif action == "set_models":
+                        changed = [k for k, v in models.items() if task.get(k, "") != v]
+                        task.update(models)
+                        if changed:
+                            log_event(task, "Edited models")
                     elif task.get("provider", "") != provider:
+                        # A task's model overrides were chosen for its old provider.
                         task["provider"] = provider
+                        task["plan_model"] = task["code_model"] = ""
                         log_event(task, "Edited provider")
                 each(edit_one)
             if action == "queue" and len(errors) < len(ids):

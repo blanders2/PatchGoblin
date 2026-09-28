@@ -15,7 +15,7 @@ import time
 from . import gitops
 from .hosts import HostError, host_for, kill_tree
 from .providers import Cancelled, Outcome, chat_prompt, plan_prompt, run_ai, run_prompt, split_title
-from .store import find_task, log_event, now, set_status
+from .store import find_task, global_model, log_event, now, set_status
 
 log = logging.getLogger("patchgoblin")
 
@@ -108,14 +108,25 @@ class Engine:
         with self._lock:
             return self._sync_locks.setdefault(pid, threading.RLock())
 
-    def provider_for(self, project: dict, task: dict) -> tuple[str, str]:
+    def provider_for(self, project: dict, task: dict, role: str = "plan") -> tuple[str, str]:
+        """The provider and model for a ``plan``, ``run`` or ``chat`` job.
+
+        The model is the task's override, then the project's (only when the task uses the
+        project's provider), then the Settings default; "" lets the CLI/endpoint choose.
+        """
         provider = task.get("provider") or project.get("provider") or "claude"
-        model = project.get("model", "") if provider == (project.get("provider") or "claude") else ""
+        key = "code_model" if role == "run" else "plan_model"
+        model = task.get(key) or ""
+        if not model and provider == (project.get("provider") or "claude"):
+            model = ((project.get("chat_model") if role == "chat" else "")
+                     or project.get(key) or project.get("model") or "")
+        if not model:
+            model = global_model(self.settings.get(), provider, key)
         return provider, model
 
-    def _ai(self, project, task, mode, prompt, job) -> Outcome:
-        provider, model = self.provider_for(project, task)
-        job.write(f"[{now()}] {mode} with {provider} in {project['path']}\n")
+    def _ai(self, project, task, mode, prompt, job, role=None) -> Outcome:
+        provider, model = self.provider_for(project, task, role or mode)
+        job.write(f"[{now()}] {mode} with {provider}{' / ' + model if model else ''} in {project['path']}\n")
         try:
             return run_ai(provider, mode, prompt, host=host_for(project), project=project,
                           settings=self.settings.get(), model=model, job=job)
@@ -413,7 +424,7 @@ class Engine:
     def _chat(self, project, chat, prompt, job) -> None:
         try:
             try:
-                outcome = self._ai(project, {}, "plan", prompt, job)
+                outcome = self._ai(project, {}, "plan", prompt, job, role="chat")
             except Cancelled:
                 outcome = Outcome(False, error="Reply cancelled.")
             if outcome.ok:

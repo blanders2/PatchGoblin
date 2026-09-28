@@ -40,11 +40,15 @@ DEFAULT_SETTINGS = {
             "run": "claude -p --output-format text --permission-mode acceptEdits "
                    "--allowedTools Read,Glob,Grep,Edit,Write,Bash",
             "model_flag": "--model",
+            "plan_model": "",
+            "code_model": "",
         },
         "codex": {
             "plan": "codex exec --sandbox read-only --color never -",
             "run": "codex exec --sandbox workspace-write --color never -",
             "model_flag": "-m",
+            "plan_model": "",
+            "code_model": "",
         },
     },
     "endpoints": [{
@@ -64,7 +68,8 @@ DEFAULT_ENDPOINT = {
     "api_key": "",
     "api_key_env": "",
     "headers": {},
-    "model": "",
+    "model": "",  # the endpoint's default planning model
+    "code_model": "",  # its default coding model; blank means the same as "model"
     "models": [],
     "allow_commands": False,
     "max_steps": 40,
@@ -92,6 +97,19 @@ def find_endpoint(settings: dict, pid: str) -> dict | None:
 
 def valid_provider(settings: dict, pid) -> bool:
     return isinstance(pid, str) and (pid in CLI_PROVIDERS or find_endpoint(settings, pid) is not None)
+
+
+def global_model(settings: dict, provider: str, key: str) -> str:
+    """The Settings default for a provider's ``plan_model`` or ``code_model`` ("" if none)."""
+    if provider in CLI_PROVIDERS:
+        value = settings.get("commands", {}).get(provider, {}).get(key, "")
+        return value if isinstance(value, str) else ""
+    ep = find_endpoint(settings, provider)
+    if ep is None:
+        return ""
+    if key == "code_model":
+        return ep.get("code_model") or ep.get("model") or ""
+    return ep.get("model") or ""
 
 
 def provider_choices(settings: dict) -> list[dict]:
@@ -144,6 +162,26 @@ class Registry:
 
     def __init__(self, data_dir: str):
         self.file = JsonFile(os.path.join(data_dir, "projects.json"), {"projects": []})
+        with self.file.lock:
+            self._migrate()
+
+    def _migrate(self) -> None:
+        """Split the old single project ``model`` into planning and coding models (once)."""
+        data = self.file.load()
+        changed = False
+        for p in data.get("projects", []):
+            if isinstance(p, dict) and "model" in p and "plan_model" not in p:
+                model = p.pop("model") or ""
+                p["plan_model"] = p["code_model"] = model
+                p.setdefault("chat_model", "")
+                changed = True
+        if not changed:
+            return
+        backup = self.file.path + ".bak"
+        if not os.path.exists(backup):
+            with open(self.file.path, "rb") as src, open(backup, "wb") as dst:
+                dst.write(src.read())
+        self.file.save(data)
 
     def list(self) -> list[dict]:
         return self.file.load()["projects"]
@@ -268,7 +306,8 @@ def find_task(doc: dict, tid: int) -> dict | None:
     return next((t for t in doc["tasks"] if t["id"] == tid), None)
 
 
-def new_task(doc: dict, title: str, description: str = "", provider: str = "") -> dict:
+def new_task(doc: dict, title: str, description: str = "", provider: str = "",
+             plan_model: str = "", code_model: str = "") -> dict:
     ts = now()
     task = {
         "id": doc["next_id"],
@@ -277,6 +316,8 @@ def new_task(doc: dict, title: str, description: str = "", provider: str = "") -
         "plan": "",
         "status": "unplanned",
         "provider": provider,
+        "plan_model": plan_model,
+        "code_model": code_model,
         "created_at": ts,
         "updated_at": ts,
         "queued_at": None,

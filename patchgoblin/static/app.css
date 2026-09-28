@@ -180,8 +180,9 @@ main { flex: 1; min-width: 0; overflow: auto; padding: 18px 22px; }
 }
 .batch-bar[hidden], .batch-bar [hidden] { display: none; }
 .batch-bar label.check { color: var(--text); font-weight: 600; margin-right: 4px; }
-.batch-actions, .batch-provider { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.batch-provider select { width: auto; padding: 2px 6px; font-size: 12.5px; }
+.batch-actions, .batch-provider, .batch-models { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.batch-provider select, .batch-models select { width: auto; padding: 2px 6px; font-size: 12.5px; }
+#c-model { width: auto; max-width: 160px; padding: 2px 6px; font-size: 12.5px; }
 #batch-delete { margin-left: auto; }
 .board { display: block; }
 .column { background: var(--panel-2); border-radius: 10px; padding: 10px; min-height: 120px; }

@@ -97,8 +97,33 @@ and timeout are used). Conversations are kept in memory until PatchGoblin restar
 
 ## AI providers
 
-Choose a default AI for each project and optionally a model. Individual tasks can
-override the default. Commands can be edited under **Settings**.
+Choose a default AI for each project. Individual tasks can override the default.
+Commands can be edited under **Settings**.
+
+### Models
+
+Each project has a **Planning Model** (used to plan tasks), a **Coding Model** (used to
+run them) and an optional **Chat model** (picked in the chat panel; blank means the
+planning model). Each task can override its planning and coding models in the task
+drawer, or for many tasks at once with **Set models** in the batch bar. **Settings** has
+a default planning and coding model for Claude Code, Codex and each endpoint.
+
+The model for a job is the first one set of:
+
+1. the task's own planning/coding model;
+2. the project's model (for chat: chat model, then planning model), but only when the
+   task uses the project's AI;
+3. the Settings default for that AI (an endpoint's coding default falls back to its
+   planning default);
+4. nothing, so the CLI or endpoint picks its own default.
+
+A blank project Coding Model therefore means "the global default", not "same as
+planning". When a task's AI changes, its model overrides are cleared (the task drawer
+keeps any that the new AI also lists).
+
+Projects saved before planning and coding models existed had a single `model`. On first
+start, PatchGoblin copies it into both the planning and coding model and removes the old
+field, after saving a one-time backup to `projects.json.bak` in its data directory.
 
 - **Claude Code** (`claude`) runs in print mode with the prompt on stdin. Planning
   only allows read/search tools. Runs use `--permission-mode acceptEdits` and allow
@@ -125,7 +150,7 @@ Each one shows up by name in every AI dropdown. For each endpoint you set:
   environment. A saved key takes priority. Saved keys are stored in plain text in
   PatchGoblin's own `settings.json` (in its data directory, never in a project) and are
   never sent back to the browser. Leave both empty for keyless local servers;
-- a default model, optional model suggestions, extra HTTP headers, max agent steps and
+- a default planning model and coding model, optional model suggestions, extra HTTP headers, max agent steps and
   whether shell commands are allowed.
 
 The model dropdown combines your suggestions with the server's `/models` list (cached

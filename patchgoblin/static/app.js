@@ -82,7 +82,8 @@ function relTime(iso) {
 }
 
 // Timestamps have one-second resolution, so compare field contents to detect server changes.
-const formStamp = t => JSON.stringify([t.title, t.description, t.provider, t.plan]);
+const formStamp = t => JSON.stringify([t.title, t.description, t.provider, t.plan_model || "",
+  t.code_model || "", t.plan]);
 
 const currentProject = () => state.projects.find(p => p.id === state.pid);
 const openTask = () => state.tasks.find(t => t.id === state.openTid);
@@ -141,8 +142,8 @@ function ensureModels(provider, refresh = false) {
 }
 
 // Fills the select now, then again once the endpoint's live model list arrives.
-async function fillModelSelectLive(select, provider, current, stillValid = () => true) {
-  fillModelSelect(select, provider, current);
+async function fillModelSelectLive(select, provider, current, stillValid = () => true, blankLabel = undefined) {
+  fillModelSelect(select, provider, current, blankLabel);
   if (!isEndpoint(provider) || (modelFetch.has(provider) && !modelLoading.has(provider))) return;
   const job = ensureModels(provider);
   fillModelSelect(select, provider, current);
@@ -150,10 +151,13 @@ async function fillModelSelectLive(select, provider, current, stillValid = () =>
   if (stillValid()) fillModelSelect(select, provider, select.dataset.value);
 }
 
-function fillModelSelect(select, provider, current = "") {
+// The blank option's text says what blank falls back to ("Global default", "Project default"…);
+// it is remembered on the select so later refills keep it.
+function fillModelSelect(select, provider, current = "", blankLabel = select.dataset.blank || "default") {
+  select.dataset.blank = blankLabel;
   const models = [...(MODELS[provider] || [])];
   if (current && !models.includes(current)) models.push(current);
-  select.replaceChildren(el("option", { value: "" }, "default"),
+  select.replaceChildren(el("option", { value: "" }, blankLabel),
     ...models.map(m => el("option", { value: m }, m)),
     modelLoading.has(provider) ? el("option", { value: "", disabled: true }, "Loading models…") : null,
     el("option", { value: CUSTOM_MODEL }, "Custom…"));
@@ -227,8 +231,20 @@ function renderProjectModel() {
   const provider = p.provider || "claude";
   setProviderValue($("#p-provider"), provider);
   $("#p-model-refresh").hidden = !isEndpoint(provider);
-  fillModelSelectLive($("#p-model"), provider, p.model || "",
-    () => currentProject() === p && (p.provider || "claude") === provider);
+  const stillValid = () => currentProject() === p && (p.provider || "claude") === provider;
+  fillModelSelectLive($("#p-plan-model"), provider, p.plan_model || "", stillValid, "Global default");
+  fillModelSelectLive($("#p-code-model"), provider, p.code_model || "", stillValid, "Global default");
+  fillModelSelectLive($("#c-model"), provider, p.chat_model || "", stillValid, "Planning model");
+  fillBatchModel($("#batch-plan-model"), provider);
+  fillBatchModel($("#batch-code-model"), provider);
+  renderChatWhere();
+}
+
+// Refills the project's model selects from MODELS without fetching (after a refresh or provider change).
+function refillProjectModels(p, provider) {
+  fillModelSelect($("#p-plan-model"), provider, p.plan_model || "");
+  fillModelSelect($("#p-code-model"), provider, p.code_model || "");
+  fillModelSelect($("#c-model"), provider, p.chat_model || "");
 }
 
 async function updateProject(fields) {
@@ -346,6 +362,8 @@ function renderCard(t) {
   el("div", { class: "card-title" }, t.title),
   el("div", { class: "card-meta" },
     t.provider && t.provider !== p.provider ? el("span", { class: "chip" }, providerName(t.provider)) : null,
+    t.plan_model ? el("span", { class: "chip", title: "Planning model for this task" }, `plan: ${t.plan_model}`) : null,
+    t.code_model ? el("span", { class: "chip", title: "Coding model for this task" }, `code: ${t.code_model}`) : null,
     hasOpenQuestions(t) ? el("span", { class: "chip question", title: t.questions.join("\n") },
       `? ${t.questions.length} question${t.questions.length === 1 ? "" : "s"}`) : null,
     t.error && t.status !== "failed" ? el("span", { class: "chip warn", title: t.error }, "last attempt failed") : null,
@@ -381,7 +399,7 @@ const BATCH_ACTIONS = [
   { action: "cancel", label: "Cancel", from: ["planning", "running"], cls: "danger" },
 ];
 const NOT_BUSY = ["unplanned", "planned", "queued", "done", "failed"];
-const BATCH_VERB = { delete: "Deleted", set_provider: "Updated", plan: "Started planning",
+const BATCH_VERB = { delete: "Deleted", set_provider: "Updated", set_models: "Updated", plan: "Started planning",
   mark_planned: "Marked planned", queue: "Queued", dequeue: "Removed from queue",
   unplan: "Moved back", reopen: "Reopened", cancel: "Cancelled" };
 
@@ -430,6 +448,8 @@ function renderBatchBar() {
   const editable = eligible(NOT_BUSY).length;
   $(".batch-provider", bar).hidden = !editable;
   $("#batch-provider-btn").textContent = `Set AI (${editable})`;
+  $(".batch-models", bar).hidden = !editable;
+  $("#batch-models-btn").textContent = `Set models (${editable})`;
   const del = $("#batch-delete");
   del.hidden = !editable;
   del.textContent = `Delete (${editable})`;
@@ -437,7 +457,7 @@ function renderBatchBar() {
 
 async function doBatch(action, extra = {}) {
   const label = action === "delete" ? "Delete" : action === "set_provider" ? "Set AI"
-    : BATCH_ACTIONS.find(a => a.action === action).label;
+    : action === "set_models" ? "Set models" : BATCH_ACTIONS.find(a => a.action === action).label;
   const from = BATCH_ACTIONS.find(a => a.action === action)?.from || NOT_BUSY;
   const targets = eligible(from);
   if (!targets.length) return;
@@ -488,6 +508,34 @@ function setupBatchBar() {
   $("#batch-clear").onclick = () => clearSelection();
   $("#batch-delete").onclick = () => doBatch("delete");
   $("#batch-provider-btn").onclick = () => doBatch("set_provider", { provider: $("#batch-provider").value });
+  const batchModels = { plan_model: $("#batch-plan-model"), code_model: $("#batch-code-model") };
+  for (const select of Object.values(batchModels)) {
+    select.onchange = () => {
+      const provider = currentProject().provider || "claude";
+      if (select.value !== CUSTOM_MODEL) { select.dataset.value = select.value; return; }
+      const name = (prompt("Model name:", "") || "").trim();
+      fillBatchModel(select, provider, name || select.dataset.value);
+    };
+  }
+  $("#batch-models-btn").onclick = () => {
+    const extra = {};
+    for (const [key, select] of Object.entries(batchModels)) {
+      if (select.value !== KEEP_MODEL) extra[key] = select.value;
+    }
+    if (!Object.keys(extra).length) { toast("Choose a planning or coding model to set", true); return; }
+    doBatch("set_models", extra);
+  };
+}
+
+// Batch model selects: "unchanged" (not sent), "project default" (clears the override) or a model.
+const KEEP_MODEL = "\u0000keep";
+const KEEP_LABEL = { "batch-plan-model": "Planning: unchanged", "batch-code-model": "Coding: unchanged" };
+
+function fillBatchModel(select, provider, current = KEEP_MODEL) {
+  fillModelSelect(select, provider, current === KEEP_MODEL ? "" : current, "Project default");
+  select.prepend(el("option", { value: KEEP_MODEL }, KEEP_LABEL[select.id]));
+  select.value = current;
+  select.dataset.value = current;
 }
 
 /* ---------------- drawer ---------------- */
@@ -565,11 +613,14 @@ function renderDrawer(fillForm) {
     $("#d-title").value = t.title;
     $("#d-desc").value = t.description || "";
     setProviderValue($("#d-provider"), t.provider || "");
+    fillTaskModels(t.plan_model || "", t.code_model || "");
     $("#d-plan").value = t.plan || "";
     state.formStamp = formStamp(t);
     state.dirty = false;
   }
-  for (const id of ["#d-title", "#d-desc", "#d-provider", "#d-plan"]) $(id).disabled = locked;
+  for (const id of ["#d-title", "#d-desc", "#d-provider", "#d-plan-model", "#d-code-model", "#d-plan"]) {
+    $(id).disabled = locked;
+  }
 
   showError($("#d-error"), t.error);
 
@@ -633,11 +684,25 @@ function renderDrawer(fillForm) {
   if (t.active && !pollLive.timer) pollLive();
 }
 
+// The drawer's model selects list the models of the task's effective provider. Blank falls back
+// to the project's model only when the task uses the project's AI.
+function fillTaskModels(planModel, codeModel) {
+  const p = currentProject();
+  const projectProvider = (p && p.provider) || "claude";
+  const provider = $("#d-provider").value || projectProvider;
+  const blank = provider === projectProvider ? "Project default" : "Global default";
+  const stillValid = () => ($("#d-provider").value || projectProvider) === provider && !$("#drawer").hidden;
+  fillModelSelectLive($("#d-plan-model"), provider, planModel, stillValid, blank);
+  fillModelSelectLive($("#d-code-model"), provider, codeModel, stillValid, blank);
+}
+
 function formFields() {
   return {
     title: $("#d-title").value,
     description: $("#d-desc").value,
     provider: $("#d-provider").value,
+    plan_model: $("#d-plan-model").dataset.value || "",
+    code_model: $("#d-code-model").dataset.value || "",
     plan: $("#d-plan").value,
   };
 }
@@ -744,11 +809,17 @@ async function loadChat() {
   if (chat.active && !$("#chat").hidden) chat.timer = setTimeout(loadChat, 1500);
 }
 
+// Chat uses the project's chat model, else its planning model (else the global default).
+function renderChatWhere() {
+  const p = currentProject();
+  const model = p ? p.chat_model || p.plan_model || "" : "";
+  $("#c-where").textContent = p ? `${p.name} · ${providerName(p.provider || "claude")}${model ? " · " + model : ""}` : "";
+}
+
 function renderChat(data) {
   const log = $("#c-log");
   const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
-  const p = currentProject();
-  $("#c-where").textContent = p ? `${p.name} · ${providerName(p.provider || "claude")}${p.model ? " · " + p.model : ""}` : "";
+  renderChatWhere();
   chat.active = data.active;
   chat.messages = data.messages;
   $("#c-empty").hidden = data.messages.length > 0;
@@ -891,7 +962,9 @@ function setupProjectDialog() {
   const resetBrowser = setupFolderBrowser(form);
   const open = () => {
     form.reset();
-    fillModelSelectLive(form.model, form.provider.value, "", () => dialog.open);
+    for (const select of [form.plan_model, form.code_model]) {
+      fillModelSelectLive(select, form.provider.value, "", () => dialog.open, "Global default");
+    }
     syncLocation();
     showError($("#project-form-error"), "");
     dialog.showModal();
@@ -907,12 +980,16 @@ function setupProjectDialog() {
   $$("input[name=location]", form).forEach(r => { r.onchange = syncLocation; });
   form.provider.onchange = async () => {
     const provider = form.provider.value;
-    const current = form.model.value === CUSTOM_MODEL ? "" : form.model.value;
-    fillModelSelect(form.model, provider, "");
+    const selects = [form.plan_model, form.code_model];
+    const current = selects.map(s => s.dataset.value || "");
+    for (const select of selects) fillModelSelect(select, provider, "");
     await ensureModels(provider);
-    if (form.provider.value === provider) fillModelSelect(form.model, provider, modelFor(provider, current));
+    if (form.provider.value !== provider) return;
+    selects.forEach((select, i) => fillModelSelect(select, provider, modelFor(provider, current[i])));
   };
-  form.model.onchange = () => pickModel(form.model, form.provider.value);
+  for (const select of [form.plan_model, form.code_model]) {
+    select.onchange = () => pickModel(select, form.provider.value);
+  }
   form.ssh_target.addEventListener("change", resetBrowser);
   form.ssh_port.addEventListener("change", resetBrowser);
   form.onsubmit = async ev => {
@@ -939,6 +1016,7 @@ function setupProjectDialog() {
 
 const SETTING_FIELDS = [
   "claude.plan", "claude.run", "codex.plan", "codex.run",
+  "claude.plan_model", "claude.code_model", "codex.plan_model", "codex.code_model",
   "timeouts.plan", "timeouts.run",
 ];
 
@@ -962,6 +1040,7 @@ function endpointBlock(ep = {}) {
   f("api_key_env").value = ep.api_key_env || "";
   f("key_status").textContent = ep.id ? keyStatus(ep) : "";
   f("model").value = ep.model || "";
+  f("code_model").value = ep.code_model || "";
   f("models").value = (ep.models || []).join(" ");
   f("max_steps").value = ep.max_steps || 40;
   f("headers").value = Object.entries(ep.headers || {}).map(([k, v]) => `${k}: ${v}`).join("\n");
@@ -992,6 +1071,7 @@ function readEndpoint(node) {
     api_key_clear: f("api_key_clear").checked,
     api_key_env: f("api_key_env").value.trim(),
     model: f("model").value.trim(),
+    code_model: f("code_model").value.trim(),
     models: f("models").value.split(/[\s,]+/).filter(Boolean),
     max_steps: Number(f("max_steps").value) || 40,
     headers: parseHeaders(f("headers").value),
@@ -1057,7 +1137,7 @@ function setupSettingsDialog() {
         const [obj, key] = settingPath(name, s);
         const input = form.elements[name];
         if (input.type === "checkbox") input.checked = !!obj[key];
-        else input.value = Array.isArray(obj[key]) ? obj[key].join(" ") : obj[key];
+        else input.value = Array.isArray(obj[key]) ? obj[key].join(" ") : obj[key] ?? "";
       }
       $("#endpoint-list").replaceChildren(...s.endpoints.map(endpointBlock));
       showError($("#settings-error"), "");
@@ -1173,27 +1253,36 @@ function init() {
   $("#p-provider").onchange = async e => {
     const p = currentProject();
     const provider = e.target.value;
-    fillModelSelect($("#p-model"), provider, "");
+    for (const id of ["#p-plan-model", "#p-code-model", "#c-model"]) fillModelSelect($(id), provider, "");
     await ensureModels(provider);
-    await updateProject({ provider, model: modelFor(provider, p.model || "") });
+    await updateProject({
+      provider,
+      plan_model: modelFor(provider, p.plan_model || ""),
+      code_model: modelFor(provider, p.code_model || ""),
+      chat_model: modelFor(provider, p.chat_model || ""),
+    });
     if (currentProject() === p) renderProjectModel();
   };
   $("#p-model-refresh").onclick = async () => {
     const p = currentProject();
     const provider = p.provider || "claude";
     const job = ensureModels(provider, true);
-    fillModelSelect($("#p-model"), provider, p.model || "");
+    refillProjectModels(p, provider);
     await job;
     if (currentProject() === p) {
-      fillModelSelect($("#p-model"), provider, p.model || "");
+      refillProjectModels(p, provider);
       toast(modelErrors[provider] ? `Couldn't list models: ${modelErrors[provider]}` : "Model list refreshed",
         !!modelErrors[provider]);
     }
   };
-  $("#p-model").onchange = e => {
-    const model = pickModel(e.target, currentProject().provider || "claude");
-    if (model !== null) updateProject({ model });
-  };
+  for (const [id, key] of [["#p-plan-model", "plan_model"], ["#p-code-model", "code_model"], ["#c-model", "chat_model"]]) {
+    $(id).onchange = async e => {
+      const model = pickModel(e.target, currentProject().provider || "claude");
+      if (model === null) return;
+      await updateProject({ [key]: model });
+      renderChatWhere();
+    };
+  }
   $("#p-plan-limit").onchange = async e => {
     await updateProject({ plan_limit: e.target.value === "" ? 0 : Number(e.target.value) });
     e.target.value = currentProject().plan_limit || "";
@@ -1218,6 +1307,20 @@ function init() {
   };
   for (const id of ["#d-title", "#d-desc", "#d-provider", "#d-plan"]) {
     $(id).addEventListener("input", () => { state.dirty = true; renderEditActions(); });
+  }
+  $("#d-provider").addEventListener("change", () => {
+    // Keep only models the new provider lists; a model name for another AI would fail there.
+    const provider = $("#d-provider").value || currentProject().provider || "claude";
+    fillTaskModels(modelFor(provider, $("#d-plan-model").dataset.value || ""),
+      modelFor(provider, $("#d-code-model").dataset.value || ""));
+  });
+  for (const id of ["#d-plan-model", "#d-code-model"]) {
+    $(id).onchange = e => {
+      const provider = $("#d-provider").value || currentProject().provider || "claude";
+      if (pickModel(e.target, provider) === null) return;
+      state.dirty = true;
+      renderEditActions();
+    };
   }
   $("#d-save-btn").onclick = saveTask;
   $("#d-discard-btn").onclick = () => {
