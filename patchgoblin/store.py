@@ -59,7 +59,21 @@ DEFAULT_SETTINGS = {
         "model": "gpt-5",
     }],
     "timeouts": {"plan": 900, "run": 3600},
+    "automation": {"auto_plan": False, "auto_queue": False},
 }
+
+# Automation modes: a global default in Settings, overridden per project by True/False
+# (None or missing inherits). Each maps to the status of the tasks it acts on when turned on.
+AUTO_MODES = ("auto_plan", "auto_queue")
+AUTO_TARGETS = {"auto_plan": "unplanned", "auto_queue": "planned"}
+
+
+def resolve_auto(project: dict, settings: dict, key: str) -> bool:
+    """A project's effective automation mode: its own True/False, else the global default."""
+    value = project.get(key)
+    if isinstance(value, bool):
+        return value
+    return (settings.get("automation") or {}).get(key) is True
 
 # An OpenAI-compatible Chat Completions endpoint; each one is its own provider, by id.
 DEFAULT_ENDPOINT = {

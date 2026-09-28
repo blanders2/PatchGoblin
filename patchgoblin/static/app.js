@@ -28,6 +28,7 @@ const state = {
   lastSelected: null, // anchor for shift-click range selection
   view: "board", // "board" or "settings" (the full-page Project settings view)
   settingsDirty: false,
+  automation: {}, // the global automation defaults, for the project settings' "Default (…)" labels
 };
 
 function validTab(col) { return Object.values(COLUMN_OF).includes(col) ? col : "unplanned"; }
@@ -293,6 +294,8 @@ function openProjectSettings() {
   form.plan_limit.value = p.plan_limit || "";
   form.rewrite_titles.checked = p.rewrite_titles !== false;
   form.plan_trust.value = TRUST_NAMES[p.plan_trust] ? p.plan_trust : "normal";
+  for (const key of AUTO_MODES) form[key].value = p[key] === true ? "on" : p[key] === false ? "off" : "";
+  renderAutoDefaults();
   form.auto_sync.checked = p.auto_sync === true;
   form.sync_mode.value = SYNC_MODE_NAMES[p.sync_mode] ? p.sync_mode : "ff-only";
   form.remote_url.value = "";
@@ -301,6 +304,23 @@ function openProjectSettings() {
   showError($("#ps-error"), "");
   state.settingsDirty = false;
   loadSettingsRemote(p.id);
+}
+
+const AUTO_MODES = ["auto_plan", "auto_queue"];
+
+// Shows what "Default" means for each automation select, from the global settings.
+function renderAutoDefaults() {
+  const form = settingsForm();
+  for (const key of AUTO_MODES) {
+    form[key].options[0].textContent = `Default (${state.automation[key] ? "On" : "Off"})`;
+  }
+}
+
+async function loadAutomation() {
+  try {
+    state.automation = (await api("GET", "/api/settings")).automation || {};
+    renderAutoDefaults();
+  } catch { /* the labels just say "Default (Off)" */ }
 }
 
 // Only a successfully loaded URL may be sent back, or a failed load could wipe origin on Save.
@@ -352,6 +372,7 @@ async function saveProjectSettings(ev) {
     auto_sync: form.auto_sync.checked,
     sync_mode: form.sync_mode.value,
   };
+  for (const key of AUTO_MODES) fields[key] = { on: true, off: false }[form[key].value] ?? null;
   if (form.dataset.remoteLoaded && form.remote_url.value.trim() !== form.dataset.remoteUrl) {
     fields.remote_url = form.remote_url.value.trim();
   }
@@ -374,6 +395,7 @@ async function saveProjectSettings(ev) {
   }
   toast("Project settings saved");
   closeProjectSettings(true);
+  loadTasks(); // turning an automation mode on may have moved tasks
 }
 
 async function removeProject() {
@@ -1258,7 +1280,7 @@ function setupProjectDialog() {
 const SETTING_FIELDS = [
   "claude.plan", "claude.run", "codex.plan", "codex.run",
   "claude.plan_model", "claude.code_model", "codex.plan_model", "codex.code_model",
-  "timeouts.plan", "timeouts.run",
+  "timeouts.plan", "timeouts.run", "automation.auto_plan", "automation.auto_queue",
 ];
 
 /* ---------------- OpenAI-compatible endpoints ---------------- */
@@ -1387,7 +1409,7 @@ function setupSettingsDialog() {
   };
   form.onsubmit = async ev => {
     ev.preventDefault();
-    const out = { commands: { claude: {}, codex: {} }, timeouts: {},
+    const out = { commands: { claude: {}, codex: {} }, timeouts: {}, automation: {},
       endpoints: $$("#endpoint-list .endpoint").map(readEndpoint) };
     for (const name of SETTING_FIELDS) {
       const [obj, key] = settingPath(name, out);
@@ -1396,9 +1418,13 @@ function setupSettingsDialog() {
         : input.type === "number" ? Number(input.value) : input.value.trim();
     }
     try {
-      applyProviderSettings(await api("PUT", "/api/settings", out));
+      const saved = await api("PUT", "/api/settings", out);
+      applyProviderSettings(saved);
+      state.automation = saved.automation || {};
+      renderAutoDefaults();
       dialog.close();
       toast("Settings saved");
+      loadTasks(); // turning an automation mode on may have moved tasks
     } catch (e) { showError($("#settings-error"), e.message); }
   };
 }
@@ -1482,6 +1508,7 @@ function init() {
   setupBatchBar();
   setupRemoteDialog();
   setupProjectSettings();
+  loadAutomation();
   $("#new-task").onsubmit = createTask;
   $("#commits-btn").onclick = showCommits;
   $("#terminal-btn").onclick = async () => {

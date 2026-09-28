@@ -54,7 +54,7 @@ parallel. Planning jobs start straight away because they don't change files.
 **Project settings.** The **Project settings** button in the project header opens a
 full-page view in place of the board, with every per-project option: **General** (name,
 location and path), **AI** (provider and the planning, coding and chat models),
-**Planning** (plan limit, AI titles, plan trust), **Git** (`origin` URL, auto-sync, sync
+**Planning** (plan limit, AI titles, plan trust), **Automation** (Auto-plan, Auto-queue), **Git** (`origin` URL, auto-sync, sync
 mode) and a **Danger zone** to remove the project (its files, `tasks.json` and git history
 are kept). Changes apply together when you click **Save**; **← Back to board**, Cancel or
 Esc leave without saving (asking first if you edited anything). Settings are stored in
@@ -77,6 +77,22 @@ decisions that are costly or hard to undo; **Normal** (the default) is in betwee
 and High the plan lists the AI's guesses under **## Assumptions** so you can check them.
 Set it in Project settings; a task can override it in its drawer (**Project default**
 uses the project's level).
+
+**Automation.** Two modes move tasks along without clicks. Both are off by default.
+- **Auto-plan** starts AI planning as soon as a task is created.
+- **Auto-queue** queues a task the first time it goes from Unplanned to Planned, through an
+  AI plan or **Mark planned**. A drafted plan waits for your answers, and a re-plan after
+  answering questions, Mark planned from Drafted, or a task you took out of the queue is
+  not auto-queued.
+
+Set the defaults in **Settings → Automation**. Each project can override them in Project
+settings with **On**, **Off** or **Default** (follow Settings). Turning a mode on,
+either way, also applies it right away to the existing tasks it covers: Auto-plan starts
+planning every Unplanned task (the plan limit still applies; with no limit, that is one AI
+job per task at once), and Auto-queue queues every Planned task. Turning it on globally does
+this in every project that uses the default. Each automatic step is written to the task's
+history ("Auto-planned", "Auto-queued"). With both modes on, a task whose plan has no open
+questions goes from creation to an AI run and a commit without you reviewing the plan.
 
 **Batch actions.** Tick the checkbox on each card you want (Shift+click selects a
 range, Space toggles the focused card, Esc clears). A toolbar then shows the actions

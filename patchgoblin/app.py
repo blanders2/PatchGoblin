@@ -14,9 +14,9 @@ from . import gitops
 from .engine import Engine
 from .hosts import HostError, host_for, open_terminal
 from .providers import PLAN_TRUST_LEVELS, endpoint_key, list_models, plan_questions, ready_status
-from .store import (CLI_PROVIDERS, MODELS, STATUSES, Registry, Settings, TaskStore, empty_doc, find_endpoint,
-                    find_task, log_event, new_task, now, provider_choices, set_status, tasks_path,
-                    valid_provider)
+from .store import (AUTO_MODES, CLI_PROVIDERS, MODELS, STATUSES, Registry, Settings, TaskStore, empty_doc,
+                    find_endpoint, find_task, log_event, new_task, now, provider_choices, resolve_auto,
+                    set_status, tasks_path, valid_provider)
 
 EDITABLE = ("title", "description", "plan", "provider", "plan_model", "code_model", "plan_trust")
 MODEL_KEYS = ("plan_model", "code_model")
@@ -55,6 +55,28 @@ def clean_commands(commands) -> dict:
                 if key in cfg:
                     cfg[key] = model_name(cfg[key], "default model")
     return commands
+
+
+def clean_automation(values) -> dict:
+    """The global automation defaults sent by the Settings form: one bool per mode sent."""
+    if not isinstance(values, dict):
+        raise ValueError("automation must be an object.")
+    out = {}
+    for key in AUTO_MODES:
+        if key in values:
+            if not isinstance(values[key], bool):
+                raise ValueError(f"automation.{key} must be true or false.")
+            out[key] = values[key]
+    return out
+
+
+def auto_override(value, key: str) -> bool | None:
+    """A project's automation override: True/False, or None to use the global default."""
+    if value is None or value == "":
+        return None
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be true, false or null (use the default).")
+    return value
 
 
 def _slug(name: str) -> str:
@@ -199,17 +221,38 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     def get_settings():
         return jsonify(settings_view(settings.get()))
 
+    def auto_values() -> dict[str, dict[str, bool]]:
+        """Every project's effective automation modes, by project id."""
+        current = settings.get()
+        return {p["id"]: {k: resolve_auto(p, current, k) for k in AUTO_MODES} for p in registry.list()}
+
+    def apply_turned_on(before: dict[str, dict[str, bool]]) -> None:
+        """Apply each mode that just went from off to on to the project's existing tasks."""
+        after = auto_values()
+        for project in registry.list():
+            old, new = before.get(project["id"], {}), after.get(project["id"], {})
+            flipped = [k for k in AUTO_MODES if new.get(k) and not old.get(k)]
+            if flipped:
+                try:
+                    engine.apply_auto_now(project, flipped)
+                except Exception as exc:
+                    app.logger.warning("Automation for %s failed: %s", project.get("name"), exc)
+
     @app.put("/api/settings")
     def put_settings():
         data = body()
         allowed = {k: data[k] for k in ("commands", "timeouts") if k in data}
         if "commands" in allowed:
             allowed["commands"] = clean_commands(allowed["commands"])
+        if "automation" in data:
+            allowed["automation"] = clean_automation(data["automation"])
         endpoints = clean_endpoints(data["endpoints"], settings.get()["endpoints"]) if "endpoints" in data else None
+        before = auto_values()
         updated = settings.update(allowed)
         if endpoints is not None:
             updated = settings.save_endpoints(endpoints)
             models_cache.clear()
+        apply_turned_on(before)
         return jsonify(settings_view(updated))
 
     # ---- OpenAI-compatible endpoints ---------------------------------------
@@ -326,6 +369,9 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             fields["sync_mode"] = sync_mode(data["sync_mode"])
         if "plan_trust" in data:
             fields["plan_trust"] = plan_trust(data["plan_trust"])
+        for key in AUTO_MODES:
+            if key in data:
+                fields[key] = auto_override(data[key], key)
         remote_url = None
         if "remote_url" in data:
             if not isinstance(data["remote_url"], str):
@@ -337,7 +383,10 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             host = host_for(project)
             if remote_url != gitops.get_remote(host, project["path"]):
                 gitops.set_remote(host, project["path"], remote_url)
-        return jsonify(registry.update(project["id"], fields))
+        before = auto_values()
+        updated = registry.update(project["id"], fields)
+        apply_turned_on(before)
+        return jsonify(updated)
 
     def plan_limit(value) -> int:
         """Max simultaneous planning jobs for a project; 0 means unlimited."""
@@ -472,6 +521,15 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         with store.edit(project) as doc:
             task = new_task(doc, title, (data.get("description") or "").strip(), provider, **models,
                             plan_trust=trust)
+        if engine.auto(pid, "auto_plan"):
+            try:
+                engine.start_planning(project, task["id"], auto=True)
+            except (ValueError, KeyError) as exc:  # creating the task must still succeed
+                with store.edit(project) as doc:
+                    current = find_task(doc, task["id"])
+                    if current is not None:
+                        log_event(current, f"Auto-plan could not start: {exc}")
+            task = find_task(store.read(project, fresh=True), task["id"]) or task
         return jsonify(task_view(pid, task)), 201
 
     @app.patch("/api/projects/<pid>/tasks/<int:tid>")
@@ -517,9 +575,11 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         "reopen": (("done",), "planned", "Reopened"),
     }
 
-    def transition(task: dict, action: str, queued_at: str | None = None) -> None:
+    def transition(pid: str, task: dict, action: str, queued_at: str | None = None) -> bool:
+        """Apply a simple state change; True if the task was queued (by hand or Auto-queue)."""
         allowed, status, message = TRANSITIONS[action]
-        if task["status"] not in allowed:
+        source = task["status"]
+        if source not in allowed:
             raise ValueError(f"Cannot {action.replace('_', ' ')} a task that is {task['status']}.")
         if status == "planned":
             status = ready_status(task.get("plan", ""))
@@ -533,9 +593,14 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         if action == "queue":
             task["queued_at"] = queued_at or now()
         set_status(task, status, message)
+        if action == "queue":
+            return True
+        # Like an AI plan, only a first plan is auto-queued (not one from drafted or failed).
+        return action == "mark_planned" and source == "unplanned" and engine.maybe_auto_queue(pid, task)
 
-    def apply_action(project: dict, tid: int, action: str, data: dict) -> None:
-        """One task's action; raises KeyError for a missing task, ValueError if not allowed."""
+    def apply_action(project: dict, tid: int, action: str, data: dict) -> bool:
+        """One task's action; raises KeyError for a missing task, ValueError if not allowed.
+        Returns True if the task was queued, so the caller kicks the runner."""
         pid = project["id"]
         if action == "plan":
             engine.start_planning(project, tid, data.get("feedback") or "", plan_answers(data.get("answers")))
@@ -547,9 +612,10 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
                 task = find_task(doc, tid)
                 if task is None:
                     raise KeyError(tid)
-                transition(task, action)
+                return transition(pid, task, action)
         else:
             raise ValueError(f"Unknown action {action!r}.")
+        return False
 
     @app.post("/api/projects/<pid>/tasks/<int:tid>/action")
     def task_action(pid, tid):
@@ -557,10 +623,10 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         data = body()
         action = data.get("action")
         try:
-            apply_action(project, tid, action, data)
+            queued = apply_action(project, tid, action, data)
         except KeyError:
             abort(404)
-        if action == "queue":
+        if queued:
             engine.kick(pid)
         doc = store.read(project, fresh=True)
         return jsonify(task_view(pid, find_task(doc, tid) or abort(404)))
@@ -592,6 +658,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             raise ValueError("Choose a planning or coding model to set.")
 
         errors: dict[int, str] = {}
+        queued: list[int] = []
 
         def each(fn) -> None:
             for tid in ids:
@@ -615,7 +682,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
                     if task is None:
                         raise KeyError(tid)
                     if action in TRANSITIONS:
-                        transition(task, action, stamp)
+                        if transition(pid, task, action, stamp):
+                            queued.append(tid)
                     elif task["status"] in LOCKED:
                         raise ValueError(f"Task is {task['status']}; cancel it first.")
                     elif action == "delete":
@@ -631,7 +699,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
                         task["plan_model"] = task["code_model"] = ""
                         log_event(task, "Edited provider")
                 each(edit_one)
-            if action == "queue" and len(errors) < len(ids):
+            if queued:
                 engine.kick(pid)
 
         doc = store.read(project, fresh=True)

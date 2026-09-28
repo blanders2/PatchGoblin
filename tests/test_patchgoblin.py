@@ -543,6 +543,175 @@ class WorkflowTests(AppTestCase):
         self.assertIn("Planning was interrupted", task["error"])
 
 
+class AutomationTests(AppTestCase):
+    def set_global(self, **modes):
+        res = self.client.put("/api/settings", headers=H, json={"automation": modes})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        return res.get_json()["automation"]
+
+    def set_project(self, pid, **fields):
+        res = self.client.patch(f"/api/projects/{pid}", headers=H, json=fields)
+        self.assertEqual(res.status_code, 200, res.get_json())
+        return res.get_json()
+
+    def events(self, task):
+        return [h["event"] for h in task["history"]]
+
+    def hold_runner(self):
+        """Keep queued tasks queued: the runner is never started."""
+        patcher = mock.patch.object(self.app.config["ENGINE"], "kick")
+        self.addCleanup(patcher.stop)
+        return patcher.start()
+
+    def test_settings_round_trip_and_resolution(self):
+        from patchgoblin.store import resolve_auto
+        self.assertEqual(self.client.get("/api/settings").get_json()["automation"],
+                         {"auto_plan": False, "auto_queue": False})
+        self.assertEqual(self.set_global(auto_queue=True), {"auto_plan": False, "auto_queue": True})
+        bad = self.client.put("/api/settings", headers=H, json={"automation": {"auto_plan": "yes"}})
+        self.assertEqual(bad.status_code, 400)
+
+        pid = self.add_project()["id"]
+        for value in (True, False, None):
+            self.assertIs(self.set_project(pid, auto_plan=value)["auto_plan"], value)
+        self.assertIsNone(self.set_project(pid, auto_plan="")["auto_plan"])
+        self.assertEqual(self.client.patch(f"/api/projects/{pid}", headers=H,
+                                           json={"auto_plan": "on"}).status_code, 400)
+        settings = self.app.config["SETTINGS"].get()
+        self.assertTrue(resolve_auto({"auto_queue": None}, settings, "auto_queue"))
+        self.assertFalse(resolve_auto({"auto_queue": False}, settings, "auto_queue"))
+        self.assertFalse(resolve_auto({}, settings, "auto_plan"))
+
+    def test_auto_plan_on_create(self):
+        pid = self.add_project()["id"]
+        tid = self.post_task(pid, "Stays put")["id"]
+        self.set_project(pid, auto_plan=False)
+        time.sleep(0.3)
+        self.assertEqual(self.wait_for(pid, tid, {"unplanned"})["status"], "unplanned")
+
+        self.set_project(pid, auto_plan=True)
+        self.wait_for(pid, tid, {"planned"})  # turning it on planned the existing task
+        created = self.post_task(pid, "ASK me things")
+        self.assertEqual(created["status"], "planning")
+        self.assertIn("Auto-planned: AI planning started", self.events(created))
+        self.assertEqual(self.wait_for(pid, created["id"], {"drafted"})["status"], "drafted")
+
+    def test_auto_plan_respects_plan_limit(self):
+        engine = self.app.config["ENGINE"]
+        pid = self.add_project()["id"]
+        self.set_project(pid, plan_limit=1)
+        active, peak, lock = [0], [0], threading.Lock()
+        original = engine._ai
+
+        def slow_ai(*args, **kwargs):
+            with lock:
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+            try:
+                time.sleep(0.3)
+                return original(*args, **kwargs)
+            finally:
+                with lock:
+                    active[0] -= 1
+
+        with mock.patch.object(engine, "_ai", slow_ai):
+            ids = [self.post_task(pid, f"Task {n}")["id"] for n in range(3)]
+            self.set_global(auto_plan=True)  # the tasks were created with it off
+            for tid in ids:
+                self.wait_for(pid, tid, {"planned"})
+        self.assertEqual(peak[0], 1)
+
+    def test_auto_queue_first_plan_only(self):
+        kick = self.hold_runner()
+        pid = self.add_project()["id"]
+        self.set_project(pid, auto_queue=True)
+
+        tid = self.post_task(pid, "Create output file")["id"]
+        self.assertEqual(self.action(pid, tid, "plan").status_code, 200)
+        task = self.wait_for(pid, tid, {"queued"})
+        self.assertIn("Auto-queued", self.events(task))
+        self.assertTrue(task["queued_at"])
+        self.assertTrue(kick.called)
+        # Taken out of the queue, it stays planned.
+        self.assertEqual(self.action(pid, tid, "dequeue").get_json()["status"], "planned")
+
+        asking = self.post_task(pid, "ASK me things")["id"]
+        self.action(pid, asking, "plan")
+        task = self.wait_for(pid, asking, {"drafted"})
+        self.action(pid, asking, "plan", answers=[{"question": task["questions"][1]["text"], "answer": "Yes"}])
+        self.assertEqual(self.wait_for(pid, asking, {"planned"})["status"], "planned")
+
+        manual = self.post_task(pid, "By hand")["id"]
+        self.client.patch(f"/api/projects/{pid}/tasks/{manual}", headers=H, json={"plan": "do it"})
+        self.assertEqual(self.action(pid, manual, "mark_planned").get_json()["status"], "queued")
+
+        drafted = self.post_task(pid, "Drafted by hand")["id"]
+        self.client.patch(f"/api/projects/{pid}/tasks/{drafted}", headers=H, json={"plan": ASKING_PLAN})
+        self.assertEqual(self.action(pid, drafted, "mark_planned").get_json()["status"], "drafted")
+        self.client.patch(f"/api/projects/{pid}/tasks/{drafted}", headers=H, json={"plan": "done asking"})
+        self.assertEqual(self.action(pid, drafted, "mark_planned").get_json()["status"], "planned")
+
+        batch = self.post_task(pid, "Batch")["id"]
+        res = self.client.post(f"/api/projects/{pid}/tasks/batch", headers=H,
+                               json={"action": "mark_planned", "ids": [batch]})
+        self.assertEqual(next(t for t in res.get_json()["tasks"] if t["id"] == batch)["status"], "queued")
+
+    def test_enable_applies_to_existing(self):
+        self.hold_runner()
+        pid = self.add_project()["id"]
+        planned = self.post_task(pid, "Planned")["id"]
+        self.client.patch(f"/api/projects/{pid}/tasks/{planned}", headers=H, json={"plan": "do it"})
+        self.action(pid, planned, "mark_planned")
+        unplanned = self.post_task(pid, "Unplanned")["id"]
+
+        self.set_project(pid, auto_queue=True)
+        task = self.wait_for(pid, planned, {"queued"}, timeout=5)
+        self.assertIn("Auto-queued", self.events(task))
+        self.assertEqual(self.wait_for(pid, unplanned, {"unplanned"})["status"], "unplanned")
+
+        self.set_project(pid, auto_plan=True)
+        task = self.wait_for(pid, unplanned, {"queued"})  # planned, then auto-queued
+        self.assertIn("Auto-planned: AI planning started", self.events(task))
+
+        # Re-sending an unchanged value does nothing.
+        self.action(pid, planned, "dequeue")
+        self.set_project(pid, auto_queue=True, auto_plan=True)
+        time.sleep(0.5)
+        self.assertEqual(self.wait_for(pid, planned, {"planned"})["status"], "planned")
+
+    def test_global_enable_skips_explicit_off(self):
+        self.hold_runner()
+        inherit = self.add_project()["id"]
+        self.proj_dir = os.path.join(self.tmp.name, "proj2")
+        off = self.add_project()["id"]
+        self.set_project(off, auto_queue=False)
+        ids = {}
+        for pid in (inherit, off):
+            ids[pid] = self.post_task(pid, "Planned")["id"]
+            self.client.patch(f"/api/projects/{pid}/tasks/{ids[pid]}", headers=H, json={"plan": "do it"})
+            self.action(pid, ids[pid], "mark_planned")
+
+        self.set_global(auto_queue=True)
+        self.wait_for(inherit, ids[inherit], {"queued"}, timeout=5)
+        time.sleep(0.5)
+        self.assertEqual(self.wait_for(off, ids[off], {"planned"})["status"], "planned")
+
+        # Back to the default: it is now on for this project, so its planned task is queued.
+        self.set_project(off, auto_queue=None)
+        self.wait_for(off, ids[off], {"queued"}, timeout=5)
+
+    def test_full_chain(self):
+        pid = self.add_project()["id"]
+        self.set_global(auto_plan=True, auto_queue=True)
+        tid = self.post_task(pid, "Create output file")["id"]
+        task = self.wait_for(pid, tid, {"done", "failed"})
+        self.assertEqual(task["status"], "done", task["error"])
+        self.assertTrue(task["commit"])
+        self.assertTrue(os.path.exists(os.path.join(self.proj_dir, "agent_output.txt")))
+        events = self.events(task)
+        self.assertLess(events.index("Auto-planned: AI planning started"), events.index("Auto-queued"))
+
+
 def git(path, *args, check=True):
     return subprocess.run(["git", "-c", "user.name=T", "-c", "user.email=t@example.com", *args],
                           cwd=path, capture_output=True, text=True, check=check).stdout.strip()

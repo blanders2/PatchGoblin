@@ -16,7 +16,7 @@ from . import gitops
 from .hosts import HostError, host_for, kill_tree
 from .providers import (Cancelled, Outcome, chat_prompt, plan_prompt, plan_questions, ready_status, run_ai,
                         resolve_trust, run_prompt, split_title)
-from .store import DOC_VERSION, find_task, global_model, log_event, now, set_status
+from .store import DOC_VERSION, find_task, global_model, log_event, now, resolve_auto, set_status
 
 log = logging.getLogger("patchgoblin")
 
@@ -182,7 +182,7 @@ class Engine:
 
     # ---- planning --------------------------------------------------------
     def start_planning(self, project: dict, tid: int, feedback: str = "",
-                       answers: list[dict] | None = None) -> None:
+                       answers: list[dict] | None = None, auto: bool = False) -> None:
         pid = project["id"]
         job = Job("plan")
         try:
@@ -201,7 +201,7 @@ class Engine:
                 task["error"] = ""
                 extras = [name for name, given in (("answers", answers), ("feedback", feedback.strip()))
                           if given]
-                set_status(task, "planning",
+                set_status(task, "planning", "Auto-planned: AI planning started" if auto else
                            "AI planning started" + (" with " + "/".join(extras) if extras else ""))
                 snapshot = dict(task)
         except BaseException:
@@ -216,6 +216,46 @@ class Engine:
             return max(0, int((self.registry.get(pid) or {}).get("plan_limit") or 0))
         except (TypeError, ValueError):
             return 0
+
+    # ---- automation --------------------------------------------------------
+    def auto(self, pid: str, key: str) -> bool:
+        """The project's effective automation mode, read fresh (never from a job's snapshot)."""
+        return resolve_auto(self.registry.get(pid) or {}, self.settings.get(), key)
+
+    def maybe_auto_queue(self, pid: str, task: dict) -> bool:
+        """Queue a just-planned task if Auto-queue is on. Call inside ``store.edit``; the
+        caller kicks the runner after leaving it."""
+        if task["status"] != "planned" or not self.auto(pid, "auto_queue"):
+            return False
+        task["queued_at"] = now()
+        set_status(task, "queued", "Auto-queued")
+        return True
+
+    def apply_auto_now(self, project: dict, keys) -> None:
+        """A mode was just turned on: apply it to the project's existing tasks, in the background."""
+        keys = set(keys)
+        if keys:
+            threading.Thread(target=self._apply_auto, args=(project, keys),
+                             name=f"pg-auto-{project['id']}", daemon=True).start()
+
+    def _apply_auto(self, project: dict, keys: set) -> None:
+        pid = project["id"]
+        try:
+            if "auto_queue" in keys:
+                with self.store.edit(project) as doc:
+                    queued = [t for t in doc["tasks"] if self.maybe_auto_queue(pid, t)]
+                if queued:
+                    self.kick(pid)
+            if "auto_plan" in keys:
+                ids = [t["id"] for t in self.store.read(project, fresh=True)["tasks"]
+                       if t["status"] == "unplanned"]
+                for tid in ids:
+                    try:  # planning threads wait for a slot, so plan_limit still applies
+                        self.start_planning(project, tid, auto=True)
+                    except (ValueError, KeyError) as exc:
+                        log.warning("Auto-plan of %s#%s did not start: %s", pid, tid, exc)
+        except Exception as exc:
+            log.warning("Automation for project %s failed: %s", project.get("name"), exc)
 
     def _acquire_plan_slot(self, pid: str, job: Job) -> None:
         """Wait until the project has a free planning slot; raise Cancelled if cancelled first."""
@@ -252,6 +292,9 @@ class Engine:
                     self._release_plan_slot(pid)
             except Cancelled:
                 outcome = Outcome(False, error="Planning cancelled.")
+            # Only a task's first plan is auto-queued, not a re-plan with answers or feedback.
+            first_plan = task.get("prev_status") == "unplanned" and not answers and not feedback.strip()
+            queued = False
             with self.store.edit(project) as doc:
                 current = find_task(doc, tid)
                 if current is None:
@@ -270,10 +313,14 @@ class Engine:
                                    f"AI plan drafted ({n} open question{'s' if n != 1 else ''})")
                     else:
                         set_status(current, "planned", "AI plan ready")
+                        if first_plan:
+                            queued = self.maybe_auto_queue(pid, current)
                 else:
                     current["error"] = outcome.error
                     set_status(current, current.get("prev_status") or "unplanned",
                                "AI planning failed" if not job.cancelled else "Planning cancelled")
+            if queued:
+                self.kick(pid)
         except Exception:
             log.exception("Could not record planning result for %s#%s", pid, tid)
         finally:
