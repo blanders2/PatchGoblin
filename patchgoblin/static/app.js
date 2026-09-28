@@ -615,6 +615,12 @@ function init() {
   setupSettingsDialog();
   $("#new-task").onsubmit = createTask;
   $("#commits-btn").onclick = showCommits;
+  $("#terminal-btn").onclick = async () => {
+    try {
+      await api("POST", `/api/projects/${state.pid}/terminal`);
+      toast("Terminal opened");
+    } catch (e) { toast(e.message, true); }
+  };
   for (const btn of $$(".queue-tab")) btn.onclick = () => selectTab(btn.dataset.col);
   $(".queue-tabs").onkeydown = onTabKeydown;
   $("#p-provider").onchange = e => updateProject({ provider: e.target.value });

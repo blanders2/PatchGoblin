@@ -9,7 +9,7 @@ from flask import Flask, abort, jsonify, render_template, request
 
 from . import gitops
 from .engine import Engine
-from .hosts import HostError, host_for
+from .hosts import HostError, host_for, open_terminal
 from .store import (PROVIDERS, STATUSES, Registry, Settings, TaskStore, empty_doc, find_task,
                     log_event, new_task, now, set_status, tasks_path)
 
@@ -160,6 +160,11 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     def commits(pid):
         project = project_or_404(pid)
         return jsonify(commits=gitops.recent_commits(host_for(project), project["path"]))
+
+    @app.post("/api/projects/<pid>/terminal")
+    def terminal(pid):
+        open_terminal(project_or_404(pid))
+        return jsonify(ok=True)
 
     # ---- tasks --------------------------------------------------------------
     @app.get("/api/projects/<pid>/tasks")

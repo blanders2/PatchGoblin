@@ -10,7 +10,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from patchgoblin import create_app  # noqa: E402
-from patchgoblin.hosts import HostError, LocalHost, SSHHost  # noqa: E402
+from patchgoblin.hosts import HostError, LocalHost, SSHHost, terminal_command  # noqa: E402
 from patchgoblin.providers import OpenAIAgent, ProjectFiles  # noqa: E402
 
 FAKE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_agent.py")
@@ -111,6 +111,18 @@ class ProjectTests(AppTestCase):
                                json={"path": self.proj_dir})
         self.assertEqual(res.status_code, 403)
 
+    def test_open_terminal(self):
+        project = self.add_project()
+        url = f"/api/projects/{project['id']}/terminal"
+        with mock.patch("patchgoblin.hosts.subprocess.Popen") as popen:
+            res = self.client.post(url, headers=H)
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertEqual(popen.call_count, 1)
+        argv, kwargs = popen.call_args[0][0], popen.call_args[1]
+        self.assertTrue(self.proj_dir in argv or kwargs["cwd"] == self.proj_dir, (argv, kwargs))
+        self.assertEqual(self.client.post(url).status_code, 403)
+        self.assertEqual(self.client.post("/api/projects/nope/terminal", headers=H).status_code, 404)
+
     def test_index_has_queue_tabs(self):
         html = self.client.get("/").get_data(as_text=True)
         for col in ("unplanned", "planned", "queue", "finished"):
@@ -200,6 +212,26 @@ class HostTests(unittest.TestCase):
         self.assertEqual(argv[-2], "me@box")
         self.assertEqual(argv[-1], "cd '/srv/my app' && claude -p 'it'\"'\"'s'")
         self.assertIn("BatchMode=yes", argv)
+
+    def test_terminal_commands(self):
+        local, ssh = LocalHost(), SSHHost("me@box", 2222)
+        have = lambda names: (lambda n: n if n in names else None)  # noqa: E731
+        self.assertEqual(terminal_command(local, "C:\\a b", "win32", have({"wt"})),
+                         (["wt", "-d", "C:\\a b"], None))
+        self.assertEqual(terminal_command(local, "C:\\a", "win32", have(set())),
+                         (["powershell.exe", "-NoExit"], "C:\\a"))
+        argv, cwd = terminal_command(ssh, "/srv/my app", "win32", have({"wt"}))
+        self.assertEqual(argv[:6], ["wt", "ssh", "-t", "-p", "2222", "me@box"])
+        self.assertIn("cd '/srv/my app'", argv[6])
+        self.assertIsNone(cwd)
+        self.assertEqual(terminal_command(local, "/a", "darwin", have(set()))[0],
+                         ["open", "-a", "Terminal", "/a"])
+        self.assertIn("ssh -t -p 2222 me@box", terminal_command(ssh, "/a", "darwin", have(set()))[0][2])
+        self.assertEqual(terminal_command(local, "/a", "linux", have({"xterm"})), (["xterm"], "/a"))
+        argv, cwd = terminal_command(ssh, "/a", "linux", have({"gnome-terminal", "xterm"}))
+        self.assertEqual(argv[:3], ["gnome-terminal", "--", "ssh"])
+        with self.assertRaises(HostError):
+            terminal_command(local, "/a", "linux", have(set()))
 
     def test_ssh_list_dirs_parses_find_output(self):
         host = SSHHost("me@box")

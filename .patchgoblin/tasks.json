@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "next_id": 7,
+  "next_id": 9,
   "tasks": [
     {
       "id": 1,
@@ -108,20 +108,36 @@
       "title": "add a link to open a terminal in the project directory",
       "description": "add a link to open a terminal in the project directory",
       "plan": "",
-      "status": "unplanned",
+      "status": "done",
       "provider": "",
       "created_at": "2026-09-28T01:12:00+00:00",
-      "updated_at": "2026-09-28T01:12:00+00:00",
-      "queued_at": null,
-      "started_at": null,
-      "finished_at": null,
-      "output": "",
+      "updated_at": "2026-09-28T01:36:11+00:00",
+      "queued_at": "2026-09-28T01:34:51+00:00",
+      "started_at": "2026-09-28T01:34:51+00:00",
+      "finished_at": "2026-09-28T01:36:11+00:00",
+      "output": "I added a **Terminal** button to the project header, next to **Commits**. Clicking it opens a terminal window in the project's directory. I only tested this with mocked commands, so I haven't seen a terminal window actually open, on Windows or anywhere else.\n\n**What it opens:**\n- **Windows:** Windows Terminal (`wt -d <path>`) if it's installed. Otherwise a new PowerShell window started in the project folder.\n- **macOS:** the Terminal app.\n- **Linux:** the first terminal program it finds: `x-terminal-emulator`, gnome-terminal, konsole, xfce4-terminal, kitty, alacritty, then xterm.\n- **SSH projects:** a terminal on this computer that runs `ssh -t [-p port] target` and lands in the project directory on the remote host.\n\n**Changes:**\n- `patchgoblin/hosts.py`: new functions `terminal_command()`, which picks the command to run for each platform, and `open_terminal()`, which checks the local folder exists and starts the terminal in its own window. SSH projects also get a method that builds the ssh command.\n- `patchgoblin/app.py`: new endpoint `POST /api/projects/<pid>/terminal`. It uses the app's existing request checks, so it has the same local-only and required-header protection as the other write requests.\n- `index.html` and `app.js`: the button calls that endpoint and shows a toast saying the terminal opened, or the error if it failed.\n\n**Testing:** I added two tests. One checks the command chosen for each platform, including SSH, paths with spaces, and the error when Linux has no terminal. The other calls the endpoint with process launching mocked out, and checks the folder passed and the 403 and 404 responses. All 19 tests pass. It's worth clicking the button once on your machine to confirm a window opens.",
       "error": "",
       "commit": "",
       "history": [
         {
           "at": "2026-09-28T01:12:00+00:00",
           "event": "Created"
+        },
+        {
+          "at": "2026-09-28T01:34:50+00:00",
+          "event": "Marked planned"
+        },
+        {
+          "at": "2026-09-28T01:34:51+00:00",
+          "event": "Queued for AI"
+        },
+        {
+          "at": "2026-09-28T01:34:51+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-09-28T01:36:11+00:00",
+          "event": "AI run finished"
         }
       ]
     },
@@ -152,10 +168,10 @@
       "title": "should do better at plan help.",
       "description": "should do better at plan help. it seems like questions are hard to answer and notice and the save, queue is hard to understand and would be easy to mis-click",
       "plan": "",
-      "status": "unplanned",
+      "status": "planning",
       "provider": "",
       "created_at": "2026-09-28T01:25:34+00:00",
-      "updated_at": "2026-09-28T01:25:34+00:00",
+      "updated_at": "2026-09-28T01:35:07+00:00",
       "queued_at": null,
       "started_at": null,
       "finished_at": null,
@@ -166,8 +182,13 @@
         {
           "at": "2026-09-28T01:25:34+00:00",
           "event": "Created"
+        },
+        {
+          "at": "2026-09-28T01:35:07+00:00",
+          "event": "AI planning started"
         }
-      ]
+      ],
+      "prev_status": "unplanned"
     },
     {
       "id": 6,
@@ -177,13 +198,13 @@
       "status": "done",
       "provider": "",
       "created_at": "2026-09-28T01:28:56+00:00",
-      "updated_at": "2026-09-28T01:30:02+00:00",
+      "updated_at": "2026-09-28T01:30:03+00:00",
       "queued_at": "2026-09-28T01:29:09+00:00",
       "started_at": "2026-09-28T01:29:09+00:00",
       "finished_at": "2026-09-28T01:30:02+00:00",
       "output": "Tasks now show as a vertical list with one task per row. I only changed `patchgoblin/static/app.css`; the tests pass, but I haven't looked at it in a browser.\n\n**What changed**\n- **List instead of grid:** the task container used to be a grid of cards at least 260px wide. It's now a single column.\n- **One-row layout:** each task sits on one line: `#id`, then the title, then any chips (provider, commit, last attempt failed), then the status badge at the far right. The title takes up the spare width. Long titles still wrap to a second line rather than being cut off.\n- **No markup changes:** the page and JavaScript are untouched. The row order comes from CSS alone.\n- **Empty chip area:** it's hidden when a task has no chips, so it doesn't leave a gap. This only works if the chip area is truly empty in the page, which I haven't checked.\n\n**How I checked it:** the unit tests pass (17 tests, run with unittest because pytest isn't installed). They don't cover the layout, so it's still worth opening the board once to check the rows look right.",
       "error": "",
-      "commit": "",
+      "commit": "539570272dc1383040b060542512ede0dcf481e9",
       "history": [
         {
           "at": "2026-09-28T01:28:56+00:00",
@@ -204,6 +225,54 @@
         {
           "at": "2026-09-28T01:30:02+00:00",
           "event": "AI run finished"
+        },
+        {
+          "at": "2026-09-28T01:30:03+00:00",
+          "event": "Committed 539570272d"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "add option to sync up with a remote git repository.",
+      "description": "add option to sync up with a remote git repository.",
+      "plan": "",
+      "status": "unplanned",
+      "provider": "",
+      "created_at": "2026-09-28T01:33:11+00:00",
+      "updated_at": "2026-09-28T01:33:11+00:00",
+      "queued_at": null,
+      "started_at": null,
+      "finished_at": null,
+      "output": "",
+      "error": "",
+      "commit": "",
+      "history": [
+        {
+          "at": "2026-09-28T01:33:11+00:00",
+          "event": "Created"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "add ability to chat with ai in the context of the project directory in the webpage",
+      "description": "",
+      "plan": "",
+      "status": "unplanned",
+      "provider": "",
+      "created_at": "2026-09-28T01:34:25+00:00",
+      "updated_at": "2026-09-28T01:34:25+00:00",
+      "queued_at": null,
+      "started_at": null,
+      "finished_at": null,
+      "output": "",
+      "error": "",
+      "commit": "",
+      "history": [
+        {
+          "at": "2026-09-28T01:34:25+00:00",
+          "event": "Created"
         }
       ]
     }

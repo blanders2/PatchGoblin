@@ -15,6 +15,7 @@ import shutil
 import signal
 import string
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -301,6 +302,74 @@ class SSHHost:
                   on_output: OutputFn = None, on_start: StartFn = None) -> Result:
         script = self._login(f"cd {shlex.quote(cwd)} && {command}")
         return self._exec(script, timeout=timeout, on_output=on_output, on_start=on_start)
+
+
+    def shell_argv(self, path: str) -> list[str]:
+        """ssh command for an interactive login shell in ``path`` (for a terminal window)."""
+        argv = [self.ssh_bin, "-t"]
+        if self.port:
+            argv += ["-p", str(self.port)]
+        return argv + [self.target, f'cd {shlex.quote(path)} && exec "${{SHELL:-/bin/sh}}" -l']
+
+
+_LINUX_TERMINALS = (
+    # (binary, flags before the command to run inside it)
+    ("x-terminal-emulator", ["-e"]),
+    ("gnome-terminal", ["--"]),
+    ("konsole", ["-e"]),
+    ("xfce4-terminal", ["-x"]),
+    ("kitty", []),
+    ("alacritty", ["-e"]),
+    ("xterm", ["-e"]),
+)
+
+
+def terminal_command(host, path: str, platform: str = sys.platform,
+                     which: Callable[[str], Optional[str]] = shutil.which) -> tuple[list[str], Optional[str]]:
+    """Argv and working directory that open a new terminal window on this computer.
+
+    Local projects get a shell in ``path``; SSH projects get a local terminal running
+    ssh that lands in ``path`` on the remote host.
+    """
+    inner = host.shell_argv(path) if host.kind == "ssh" else None
+    cwd = path if inner is None else None
+    if platform == "win32":
+        if which("wt"):
+            # Windows Terminal treats ";" as a command separator, so escape it.
+            if inner is None:
+                return ["wt", "-d", path.replace(";", "\\;")], None
+            return ["wt", *[a.replace(";", "\\;") for a in inner]], None
+        return inner or ["powershell.exe", "-NoExit"], cwd
+    if platform == "darwin":
+        if inner is None:
+            return ["open", "-a", "Terminal", path], None
+        script = shlex.join(inner).replace("\\", "\\\\").replace('"', '\\"')
+        return ["osascript", "-e", f'tell application "Terminal" to do script "{script}"',
+                "-e", 'tell application "Terminal" to activate'], None
+    for name, flags in _LINUX_TERMINALS:
+        if which(name):
+            return [name, *(flags + inner if inner else [])], cwd
+    raise HostError("No terminal emulator found (tried " + ", ".join(n for n, _ in _LINUX_TERMINALS) + ").")
+
+
+def open_terminal(project: dict) -> None:
+    """Open a terminal window on this computer in the project's directory."""
+    host = host_for(project)
+    path = project["path"]
+    if host.kind == "local" and not host.is_dir(path):
+        raise HostError(f"Directory does not exist: {path}")
+    argv, cwd = terminal_command(host, path)
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+    else:
+        kwargs["start_new_session"] = True
+    exe = shutil.which(argv[0]) or argv[0]
+    try:
+        subprocess.Popen([exe, *argv[1:]], cwd=cwd, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs)
+    except OSError as exc:
+        raise HostError(f"Could not open a terminal: {exc}") from exc
 
 
 def host_for(project: dict):
