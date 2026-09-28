@@ -10,7 +10,7 @@ from flask import Flask, abort, jsonify, render_template, request
 from . import gitops
 from .engine import Engine
 from .hosts import HostError, host_for, open_terminal
-from .store import (PROVIDERS, STATUSES, Registry, Settings, TaskStore, empty_doc, find_task,
+from .store import (MODELS, PROVIDERS, STATUSES, Registry, Settings, TaskStore, empty_doc, find_task,
                     log_event, new_task, now, set_status, tasks_path)
 
 EDITABLE = ("title", "description", "plan", "provider")
@@ -64,7 +64,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     # ---- pages --------------------------------------------------------------
     @app.get("/")
     def index():
-        return render_template("index.html", statuses=STATUSES, providers=PROVIDERS)
+        return render_template("index.html", statuses=STATUSES, providers=PROVIDERS, models=MODELS)
 
     # ---- settings -----------------------------------------------------------
     @app.get("/api/settings")

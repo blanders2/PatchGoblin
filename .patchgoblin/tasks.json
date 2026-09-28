@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "next_id": 9,
+  "next_id": 10,
   "tasks": [
     {
       "id": 1,
@@ -80,12 +80,12 @@
     {
       "id": 2,
       "title": "anything I do to one task I should be able to do as a batch",
-      "description": "anything I do to one task I should be able to do as a selectable batch",
-      "plan": "",
-      "status": "unplanned",
+      "description": "Batch modes",
+      "plan": "I would like many tasks to have batch modes to speed up implementation. The things I can think of (please suggest more if it would help) planning should have the ability to run on multiple, push to AI que should have multiple, push to planned.",
+      "status": "planning",
       "provider": "",
       "created_at": "2026-09-28T01:10:52+00:00",
-      "updated_at": "2026-09-28T01:11:10+00:00",
+      "updated_at": "2026-09-28T01:45:25+00:00",
       "queued_at": null,
       "started_at": null,
       "finished_at": null,
@@ -100,8 +100,17 @@
         {
           "at": "2026-09-28T01:11:10+00:00",
           "event": "Edited description"
+        },
+        {
+          "at": "2026-09-28T01:41:41+00:00",
+          "event": "Edited description, plan"
+        },
+        {
+          "at": "2026-09-28T01:45:25+00:00",
+          "event": "AI planning started"
         }
-      ]
+      ],
+      "prev_status": "unplanned"
     },
     {
       "id": 3,
@@ -148,35 +157,48 @@
     {
       "id": 4,
       "title": "add a project configuration to auto rewrite the task name when using ai to plan",
-      "description": "add a project configuration to auto rewrite the task name when using ai to plan, default to yes",
-      "plan": "",
-      "status": "unplanned",
+      "description": "add a project configuration to auto rewrite the task name when Moving to planned, default to yes",
+      "plan": "# Plan for task #4: optionally rewrite the task title when the AI finishes planning\n\n## Summary\nAdd a per-project boolean, `rewrite_titles`, to the project records in the registry (`projects.json`). It defaults to on: a project without the field is treated as `True`. When it's on, `plan_prompt` asks the AI to start its reply with one line, `Title: <concise title>`, followed by the plan. When a plan succeeds, `Engine._plan` removes that line from the output, stores the rest as the plan, and replaces the task title if the new one is non-empty and different. It also adds a history entry recording the old title. If the AI leaves out the line, the plan is stored unchanged and the title stays as it is. The setting is a checkbox in the project controls bar, saved through the existing `PATCH /api/projects/<pid>` route. Only AI planning is affected. The manual `mark_planned` action has no AI involved and keeps the title. Task titles can't be edited while a task is `planning` (`LOCKED`), so the rename can't overwrite an edit the user made in the meantime.\n\n## Steps\n1. **`patchgoblin/providers.py`**\n   - Add a `TITLE_INSTRUCTIONS` constant, e.g.: *\"Start your reply with a single line `Title: <a concise, specific task title in the imperative, under 80 characters>`, then a blank line, then the plan.\"*\n   - Change the signature to `plan_prompt(task, feedback=\"\", rewrite_title=False)`. When `rewrite_title` is true, add `TITLE_INSTRUCTIONS` right after `PLAN_INSTRUCTIONS`.\n   - Add `split_title(text: str) -> tuple[str, str]`, returning `(title, plan)`:\n     - Look at the first non-empty line and match it case-insensitively against something like `^\\s*[#>*_\\s]*title\\s*[:\\-]\\s*(.+?)\\s*[*_]*\\s*$`, so small markdown variations like `**Title:** \u2026` or `# Title: \u2026` still match.\n     - Remove surrounding quotes and backticks from the title, collapse whitespace, and cap it at about 120 characters.\n     - Return `(\"\", text)` if there's no match or the title comes out empty.\n2. **`patchgoblin/engine.py`**\n   - Import `split_title`.\n   - In `_plan`, read the setting once with `rewrite = project.get(\"rewrite_titles\", True)` and pass it to `plan_prompt(task, feedback, rewrite_title=rewrite)`.\n   - In the `outcome.ok` branch, when `rewrite` is on, call `title, plan = split_title(outcome.text)`. Set `current[\"plan\"] = plan.strip() or outcome.text`.\n   - If `title` is non-empty and different from `current[\"title\"]`, set the new title and call `log_event(current, f\"Title rewritten by AI (was: {old})\")` before `set_status(... \"planned\" ...)`.\n   - Replanning with feedback goes through `_plan` too, so revised plans also get a refreshed title.\n3. **`patchgoblin/app.py`**, in `update_project`: accept `\"rewrite_titles\"` as `fields[\"rewrite_titles\"] = bool(data[\"rewrite_titles\"])`.\n   - Optionally, `project_fields` could also accept it so the Add Project dialog can set it. I'd skip that, since the default covers it.\n4. **`patchgoblin/templates/index.html`**: in `.project-controls`, next to the Model input, add `<label title=\"When the AI plans a task, let it rewrite the task title\"><input type=\"checkbox\" id=\"p-rewrite-titles\"> AI titles</label>`.\n5. **`patchgoblin/static/app.js`**:\n   - In the project-select function (around line 119), add `$(\"#p-rewrite-titles\").checked = p.rewrite_titles !== false;`.\n   - Next to the other handlers (around line 711), add `$(\"#p-rewrite-titles\").onchange = e => updateProject({ rewrite_titles: e.target.checked });`.\n6. **`patchgoblin/static/app.css`**: if needed, a small style so the checkbox label lines up with the other controls.\n7. **`tests/fake_agent.py`**: when `mode == \"plan\"` and the prompt contains `\"Title: <\"` (the instruction marker), print `Title: Create agent output file` and a blank line before the existing steps.\n8. **`README.md`**: add a short note on the per-project \"AI titles\" option and that it's on by default.\n\n## Verification\n- **Update `test_plan_queue_run_commit`:**\n  - After planning, check that `task[\"title\"] == \"Create agent output file\"`.\n  - Check that `task[\"plan\"]` doesn't start with `Title:` and still contains \"Step one\".\n  - Check that the history includes the \"Title rewritten\" event.\n  - Change the commit-message assertion to `PatchGoblin: task #1 Create agent output file`.\n- **New test `test_plan_keeps_title_when_disabled`:** PATCH the project with `{\"rewrite_titles\": false}`, plan a task, and check that the title is unchanged and the prompt the fake agent received had no title instruction. The fake agent won't print a `Title:` line, so the plan must not contain one.\n- **Unit tests for `split_title`:**\n  - plain `Title: X`\n  - `**Title:** X`\n  - leading blank lines\n  - no title line (returns `(\"\", text)` unchanged)\n  - an empty title\n  - a very long title (gets capped)\n- **Unit test for `plan_prompt`:** the instruction is included only when `rewrite_title=True`.\n- Run `python -m unittest discover tests` (or `pytest`).\n- Manual check: start the app, toggle the checkbox, reload to confirm it stays set, plan a task with Claude and confirm the title changes and the history entry shows up. Then turn it off, replan, and confirm the title stays.\n\n## Open questions and risks\n- **Scope:** I read \"Moving to planned\" as meaning only AI planning, since there's no AI to write a title when a task is marked planned manually. Should replanning with feedback also rewrite the title? This plan says yes, because it uses the same code path.\n- **Losing the user's wording:** the old title is kept in the history event, but there's no one-click undo. The user can edit the title back afterwards.\n- **Unreliable output:** the AI (especially codex or openai) may add text before the `Title:` line or format it oddly. Parsing only the first non-empty line is deliberately conservative. If it doesn't match, the title is left alone and nothing breaks.\n- **Where the setting lives:** it's stored in the local registry, not in the project's `.patchgoblin/tasks.json`, which matches `provider` and `model`. If it should travel with the repository instead, it would go at the top level of `tasks.json`.",
+      "status": "planned",
       "provider": "",
       "created_at": "2026-09-28T01:14:00+00:00",
-      "updated_at": "2026-09-28T01:14:00+00:00",
+      "updated_at": "2026-09-28T01:45:24+00:00",
       "queued_at": null,
       "started_at": null,
       "finished_at": null,
-      "output": "",
+      "output": "[2026-09-28T01:44:26+00:00] plan with claude in g:\\My Drive\\Projects\\PatchGoblin\n$ claude -p --output-format text --allowedTools Read,Glob,Grep --disallowedTools Edit,Write,NotebookEdit,Bash\n# Plan for task #4: optionally rewrite the task title when the AI finishes planning\n\n## Summary\nAdd a per-project boolean, `rewrite_titles`, to the project records in the registry (`projects.json`). It defaults to on: a project without the field is treated as `True`. When it's on, `plan_prompt` asks the AI to start its reply with one line, `Title: <concise title>`, followed by the plan. When a plan succeeds, `Engine._plan` removes that line from the output, stores the rest as the plan, and replaces the task title if the new one is non-empty and different. It also adds a history entry recording the old title. If the AI leaves out the line, the plan is stored unchanged and the title stays as it is. The setting is a checkbox in the project controls bar, saved through the existing `PATCH /api/projects/<pid>` route. Only AI planning is affected. The manual `mark_planned` action has no AI involved and keeps the title. Task titles can't be edited while a task is `planning` (`LOCKED`), so the rename can't overwrite an edit the user made in the meantime.\n\n## Steps\n1. **`patchgoblin/providers.py`**\n   - Add a `TITLE_INSTRUCTIONS` constant, e.g.: *\"Start your reply with a single line `Title: <a concise, specific task title in the imperative, under 80 characters>`, then a blank line, then the plan.\"*\n   - Change the signature to `plan_prompt(task, feedback=\"\", rewrite_title=False)`. When `rewrite_title` is true, add `TITLE_INSTRUCTIONS` right after `PLAN_INSTRUCTIONS`.\n   - Add `split_title(text: str) -> tuple[str, str]`, returning `(title, plan)`:\n     - Look at the first non-empty line and match it case-insensitively against something like `^\\s*[#>*_\\s]*title\\s*[:\\-]\\s*(.+?)\\s*[*_]*\\s*$`, so small markdown variations like `**Title:** \u2026` or `# Title: \u2026` still match.\n     - Remove surrounding quotes and backticks from the title, collapse whitespace, and cap it at about 120 characters.\n     - Return `(\"\", text)` if there's no match or the title comes out empty.\n2. **`patchgoblin/engine.py`**\n   - Import `split_title`.\n   - In `_plan`, read the setting once with `rewrite = project.get(\"rewrite_titles\", True)` and pass it to `plan_prompt(task, feedback, rewrite_title=rewrite)`.\n   - In the `outcome.ok` branch, when `rewrite` is on, call `title, plan = split_title(outcome.text)`. Set `current[\"plan\"] = plan.strip() or outcome.text`.\n   - If `title` is non-empty and different from `current[\"title\"]`, set the new title and call `log_event(current, f\"Title rewritten by AI (was: {old})\")` before `set_status(... \"planned\" ...)`.\n   - Replanning with feedback goes through `_plan` too, so revised plans also get a refreshed title.\n3. **`patchgoblin/app.py`**, in `update_project`: accept `\"rewrite_titles\"` as `fields[\"rewrite_titles\"] = bool(data[\"rewrite_titles\"])`.\n   - Optionally, `project_fields` could also accept it so the Add Project dialog can set it. I'd skip that, since the default covers it.\n4. **`patchgoblin/templates/index.html`**: in `.project-controls`, next to the Model input, add `<label title=\"When the AI plans a task, let it rewrite the task title\"><input type=\"checkbox\" id=\"p-rewrite-titles\"> AI titles</label>`.\n5. **`patchgoblin/static/app.js`**:\n   - In the project-select function (around line 119), add `$(\"#p-rewrite-titles\").checked = p.rewrite_titles !== false;`.\n   - Next to the other handlers (around line 711), add `$(\"#p-rewrite-titles\").onchange = e => updateProject({ rewrite_titles: e.target.checked });`.\n6. **`patchgoblin/static/app.css`**: if needed, a small style so the checkbox label lines up with the other controls.\n7. **`tests/fake_agent.py`**: when `mode == \"plan\"` and the prompt contains `\"Title: <\"` (the instruction marker), print `Title: Create agent output file` and a blank line before the existing steps.\n8. **`README.md`**: add a short note on the per-project \"AI titles\" option and that it's on by default.\n\n## Verification\n- **Update `test_plan_queue_run_commit`:**\n  - After planning, check that `task[\"title\"] == \"Create agent output file\"`.\n  - Check that `task[\"plan\"]` doesn't start with `Title:` and still contains \"Step one\".\n  - Check that the history includes the \"Title rewritten\" event.\n  - Change the commit-message assertion to `PatchGoblin: task #1 Create agent output file`.\n- **New test `test_plan_keeps_title_when_disabled`:** PATCH the project with `{\"rewrite_titles\": false}`, plan a task, and check that the title is unchanged and the prompt the fake agent received had no title instruction. The fake agent won't print a `Title:` line, so the plan must not contain one.\n- **Unit tests for `split_title`:**\n  - plain `Title: X`\n  - `**Title:** X`\n  - leading blank lines\n  - no title line (returns `(\"\", text)` unchanged)\n  - an empty title\n  - a very long title (gets capped)\n- **Unit test for `plan_prompt`:** the instruction is included only when `rewrite_title=True`.\n- Run `python -m unittest discover tests` (or `pytest`).\n- Manual check: start the app, toggle the checkbox, reload to confirm it stays set, plan a task with Claude and confirm the title changes and the history entry shows up. Then turn it off, replan, and confirm the title stays.\n\n## Open questions and risks\n- **Scope:** I read \"Moving to planned\" as meaning only AI planning, since there's no AI to write a title when a task is marked planned manually. Should replanning with feedback also rewrite the title? This plan says yes, because it uses the same code path.\n- **Losing the user's wording:** the old title is kept in the history event, but there's no one-click undo. The user can edit the title back afterwards.\n- **Unreliable output:** the AI (especially codex or openai) may add text before the `Title:` line or format it oddly. Parsing only the first non-empty line is deliberately conservative. If it doesn't match, the title is left alone and nothing breaks.\n- **Where the setting lives:** it's stored in the local registry, not in the project's `.patchgoblin/tasks.json`, which matches `provider` and `model`. If it should travel with the repository instead, it would go at the top level of `tasks.json`.\n",
       "error": "",
       "commit": "",
       "history": [
         {
           "at": "2026-09-28T01:14:00+00:00",
           "event": "Created"
+        },
+        {
+          "at": "2026-09-28T01:44:02+00:00",
+          "event": "Edited description"
+        },
+        {
+          "at": "2026-09-28T01:44:26+00:00",
+          "event": "AI planning started"
+        },
+        {
+          "at": "2026-09-28T01:45:24+00:00",
+          "event": "AI plan ready"
         }
-      ]
+      ],
+      "prev_status": "unplanned"
     },
     {
       "id": 5,
       "title": "should do better at plan help.",
       "description": "should do better at plan help. it seems like questions are hard to answer and notice and the save, queue is hard to understand and would be easy to mis-click",
       "plan": "## Plan: make plan questions easy to spot and answer, and make Save/Queue hard to mis-click\n\n**Summary.** Today the planner's questions sit at the bottom of the free-text plan under \"open questions or risks\", so they're easy to miss. The only way to reply is the general \"Feedback for AI planning\" box. In the drawer, Save sits right next to Queue for AI and Delete, and all three look much the same (`renderDrawer` in `app.js`). The fix has two parts. First, ask the planner to put its questions in a fixed `## Questions for you` section. The server reads that section out of the plan, and the UI shows the questions in a highlighted panel above the plan, each with its own answer box and one \"Answer & refine plan\" button. Cards also get a \"N questions\" badge so they stand out on the board. Second, split the drawer buttons into separate groups. Save only appears when there are unsaved edits, and it moves next to the form. Workflow buttons get clearer labels and hover text, and Delete moves away from the main buttons. Queueing a task that still has unanswered questions asks for confirmation first.\n\n### Steps\n\n1. **`patchgoblin/providers.py` \u2013 planner prompt.** Change `PLAN_INSTRUCTIONS` so the last two bullets become:\n   - `## Risks`: things the implementer should watch for.\n   - `## Questions for you`: a numbered list of decisions only the user can make. Each question fits on one line. If there are none, the section says `None.`\n\n   Don't change the summary, steps or verification bullets.\n\n2. **`providers.py` \u2013 new `plan_questions(plan: str) -> list[str]`.** It finds a heading matching `^#{1,6}\\s*(open\\s+)?questions\\b` (case-insensitive) and collects the numbered or bulleted items up to the next heading. Wrapped continuation lines join onto the item above. Items like \"None\" are dropped. It is a pure function, so it's easy to test, and it also reads plans made before this change that use an \"Open questions\" heading.\n\n3. **`providers.py` \u2013 `plan_prompt(task, feedback=\"\", answers=None)`.** When `answers` (a list of `{question, answer}` pairs) is given, add a `## Answers to your questions` section listing each Q and A. Skip blank answers. Then tell the planner to fold the answers into a complete revised plan and to repeat only questions that are still open. Keep the existing feedback section.\n\n4. **`patchgoblin/app.py` \u2013 `task_view`.** Add `\"questions\": plan_questions(task.get(\"plan\", \"\"))`. Working this out from the plan on every request keeps it correct after manual edits, with nothing extra saved in tasks.json. In `task_action`, pass `data.get(\"answers\")` into `engine.start_planning`, after checking that it's a list of dicts with string fields.\n\n5. **`patchgoblin/engine.py` \u2013 `start_planning` / `_plan`.** Accept `answers` and pass it on to `plan_prompt`. The history message becomes \"AI planning started with answers/feedback\" when either one is present.\n\n6. **`patchgoblin/templates/index.html` \u2013 drawer layout.**\n   - Add a `<section id=\"d-questions\" class=\"questions\" hidden>` above the Plan label. It holds a heading (\"The AI has questions for you\"), an `<ol id=\"d-question-list\">` and a primary \"Answer & refine plan\" button.\n   - Put the Plan textarea inside a `<details open>`-style block, or give it a smaller default `rows`, so the questions show without scrolling.\n   - Split `#d-actions` into three rows:\n     - `#d-edit-actions`, right under the form fields: \"Save changes\" and \"Discard\".\n     - `#d-flow-actions`: the workflow buttons.\n     - `#d-danger-actions`: Delete, pushed right, or into the drawer header.\n   - Rename the feedback label to \"Other feedback for the AI (optional)\".\n\n7. **`patchgoblin/static/app.js`.**\n   - **`renderDrawer`:** fill `#d-question-list` from `t.questions`. Each item shows the question text plus a one-line textarea (`data-q` index). Show the panel only when `canPlan && t.questions.length`. Keep typed answers across the 3-second poll re-renders: only rebuild when the questions change, using a stamp like `formStamp`.\n   - **New `answerQuestions()`:** collect the answers and call `doAction(\"plan\", { answers })`. If no answer is filled in, show a toast and stop.\n   - **`doAction(action, extra)`:** it already takes the `extra` argument, but the current code doesn't use it. Merge `extra` into `body`, and clear the answer boxes after a successful plan.\n   - **Buttons:**\n     - Show Save only when `state.dirty`. The `input` listeners call a light `renderEditActions()` so the button appears as soon as the user types, plus an \"Unsaved changes\" hint.\n     - Relabel \"Queue for AI\" to \"Queue to run\", with the hover text \"The AI will implement this plan and commit the result\".\n     - Change \"Mark planned\" to \"Mark planned (skip AI)\".\n     - If `t.questions.length` > 0, queueing asks `confirm(\"The plan still has N unanswered questions. Queue anyway?\")`.\n     - Delete stays behind its existing confirm, but moves out of the main button row.\n   - **`renderCard`:** add a `chip` reading `? N questions` when `t.questions.length` is above 0 and the task is `planned`/`unplanned`/`failed`.\n   - **Ctrl+S:** keep it, since saving through it is intentional.\n\n8. **`patchgoblin/static/app.css`.**\n   - Style `.questions` with an accent border and background so it stands out, plus a `.chip.question` colour.\n   - Separate the edit, workflow and delete rows with spacing or a divider, and align the danger row to the right.\n\n### Verification\n- **Unit tests** in `tests/test_patchgoblin.py`:\n  - `plan_questions`: covers the new heading, the older \"Open questions\" heading, \"None.\", wrapped items, and no section at all.\n  - `plan_prompt` with answers: the section is included and blank answers are skipped.\n  - API: `GET /tasks` returns `questions` for a task whose plan contains the section, and `POST .../action {\"action\":\"plan\",\"answers\":[...]}` is accepted (use `tests/fake_agent.py` and extend it to print a plan with questions). Also check that badly formed `answers` returns 400.\n- **Existing tests:** run the whole suite with `python -m pytest` or `uv run pytest`; `test_plan_queue_run_commit` and `test_manual_plan_and_failed_run` should still pass.\n- **Manual check in the running app (`run.py`):**\n  1. Plan a task and check that the questions panel and the card badge appear.\n  2. Type an answer, wait more than 3 seconds for the poll refresh, and check the answer is still there.\n  3. Click \"Answer & refine plan\" and check the prompt in the live output includes the answers.\n  4. Check that Save only appears after editing.\n  5. Check that queueing with open questions asks for confirmation.\n  6. Check that Delete is visually separate from the other buttons.\n\n### Open questions and risks\n- **Output format.** Models may not follow the section format exactly. The parser should be lenient, and if it finds nothing the plan still displays as it does now.\n- **Manual plans.** If the user writes their own plan with a \"Questions\" heading, it will trigger the panel. That's probably what they'd want.\n- **Blocking the queue.** Should unanswered questions block queueing outright? This plan only asks for confirmation.\n- **Save placement.** Is hiding Save until there are edits enough, or should the form save automatically when the drawer closes, removing the button entirely? This plan keeps a Save button to limit the scope.\n- **Queue auto-save.** Queueing already saves pending edits automatically. That will now be visible as \"Save & queue\" behaviour, so the button label or hover text should say so.",
-      "status": "planned",
+      "status": "queued",
       "provider": "",
       "created_at": "2026-09-28T01:25:34+00:00",
-      "updated_at": "2026-09-28T01:36:19+00:00",
-      "queued_at": null,
+      "updated_at": "2026-09-28T01:44:52+00:00",
+      "queued_at": "2026-09-28T01:44:52+00:00",
       "started_at": null,
       "finished_at": null,
       "output": "[2026-09-28T01:35:07+00:00] plan with claude in g:\\My Drive\\Projects\\PatchGoblin\n$ claude -p --output-format text --allowedTools Read,Glob,Grep --disallowedTools Edit,Write,NotebookEdit,Bash\n## Plan: make plan questions easy to spot and answer, and make Save/Queue hard to mis-click\n\n**Summary.** Today the planner's questions sit at the bottom of the free-text plan under \"open questions or risks\", so they're easy to miss. The only way to reply is the general \"Feedback for AI planning\" box. In the drawer, Save sits right next to Queue for AI and Delete, and all three look much the same (`renderDrawer` in `app.js`). The fix has two parts. First, ask the planner to put its questions in a fixed `## Questions for you` section. The server reads that section out of the plan, and the UI shows the questions in a highlighted panel above the plan, each with its own answer box and one \"Answer & refine plan\" button. Cards also get a \"N questions\" badge so they stand out on the board. Second, split the drawer buttons into separate groups. Save only appears when there are unsaved edits, and it moves next to the form. Workflow buttons get clearer labels and hover text, and Delete moves away from the main buttons. Queueing a task that still has unanswered questions asks for confirmation first.\n\n### Steps\n\n1. **`patchgoblin/providers.py` \u2013 planner prompt.** Change `PLAN_INSTRUCTIONS` so the last two bullets become:\n   - `## Risks`: things the implementer should watch for.\n   - `## Questions for you`: a numbered list of decisions only the user can make. Each question fits on one line. If there are none, the section says `None.`\n\n   Don't change the summary, steps or verification bullets.\n\n2. **`providers.py` \u2013 new `plan_questions(plan: str) -> list[str]`.** It finds a heading matching `^#{1,6}\\s*(open\\s+)?questions\\b` (case-insensitive) and collects the numbered or bulleted items up to the next heading. Wrapped continuation lines join onto the item above. Items like \"None\" are dropped. It is a pure function, so it's easy to test, and it also reads plans made before this change that use an \"Open questions\" heading.\n\n3. **`providers.py` \u2013 `plan_prompt(task, feedback=\"\", answers=None)`.** When `answers` (a list of `{question, answer}` pairs) is given, add a `## Answers to your questions` section listing each Q and A. Skip blank answers. Then tell the planner to fold the answers into a complete revised plan and to repeat only questions that are still open. Keep the existing feedback section.\n\n4. **`patchgoblin/app.py` \u2013 `task_view`.** Add `\"questions\": plan_questions(task.get(\"plan\", \"\"))`. Working this out from the plan on every request keeps it correct after manual edits, with nothing extra saved in tasks.json. In `task_action`, pass `data.get(\"answers\")` into `engine.start_planning`, after checking that it's a list of dicts with string fields.\n\n5. **`patchgoblin/engine.py` \u2013 `start_planning` / `_plan`.** Accept `answers` and pass it on to `plan_prompt`. The history message becomes \"AI planning started with answers/feedback\" when either one is present.\n\n6. **`patchgoblin/templates/index.html` \u2013 drawer layout.**\n   - Add a `<section id=\"d-questions\" class=\"questions\" hidden>` above the Plan label. It holds a heading (\"The AI has questions for you\"), an `<ol id=\"d-question-list\">` and a primary \"Answer & refine plan\" button.\n   - Put the Plan textarea inside a `<details open>`-style block, or give it a smaller default `rows`, so the questions show without scrolling.\n   - Split `#d-actions` into three rows:\n     - `#d-edit-actions`, right under the form fields: \"Save changes\" and \"Discard\".\n     - `#d-flow-actions`: the workflow buttons.\n     - `#d-danger-actions`: Delete, pushed right, or into the drawer header.\n   - Rename the feedback label to \"Other feedback for the AI (optional)\".\n\n7. **`patchgoblin/static/app.js`.**\n   - **`renderDrawer`:** fill `#d-question-list` from `t.questions`. Each item shows the question text plus a one-line textarea (`data-q` index). Show the panel only when `canPlan && t.questions.length`. Keep typed answers across the 3-second poll re-renders: only rebuild when the questions change, using a stamp like `formStamp`.\n   - **New `answerQuestions()`:** collect the answers and call `doAction(\"plan\", { answers })`. If no answer is filled in, show a toast and stop.\n   - **`doAction(action, extra)`:** it already takes the `extra` argument, but the current code doesn't use it. Merge `extra` into `body`, and clear the answer boxes after a successful plan.\n   - **Buttons:**\n     - Show Save only when `state.dirty`. The `input` listeners call a light `renderEditActions()` so the button appears as soon as the user types, plus an \"Unsaved changes\" hint.\n     - Relabel \"Queue for AI\" to \"Queue to run\", with the hover text \"The AI will implement this plan and commit the result\".\n     - Change \"Mark planned\" to \"Mark planned (skip AI)\".\n     - If `t.questions.length` > 0, queueing asks `confirm(\"The plan still has N unanswered questions. Queue anyway?\")`.\n     - Delete stays behind its existing confirm, but moves out of the main button row.\n   - **`renderCard`:** add a `chip` reading `? N questions` when `t.questions.length` is above 0 and the task is `planned`/`unplanned`/`failed`.\n   - **Ctrl+S:** keep it, since saving through it is intentional.\n\n8. **`patchgoblin/static/app.css`.**\n   - Style `.questions` with an accent border and background so it stands out, plus a `.chip.question` colour.\n   - Separate the edit, workflow and delete rows with spacing or a divider, and align the danger row to the right.\n\n### Verification\n- **Unit tests** in `tests/test_patchgoblin.py`:\n  - `plan_questions`: covers the new heading, the older \"Open questions\" heading, \"None.\", wrapped items, and no section at all.\n  - `plan_prompt` with answers: the section is included and blank answers are skipped.\n  - API: `GET /tasks` returns `questions` for a task whose plan contains the section, and `POST .../action {\"action\":\"plan\",\"answers\":[...]}` is accepted (use `tests/fake_agent.py` and extend it to print a plan with questions). Also check that badly formed `answers` returns 400.\n- **Existing tests:** run the whole suite with `python -m pytest` or `uv run pytest`; `test_plan_queue_run_commit` and `test_manual_plan_and_failed_run` should still pass.\n- **Manual check in the running app (`run.py`):**\n  1. Plan a task and check that the questions panel and the card badge appear.\n  2. Type an answer, wait more than 3 seconds for the poll refresh, and check the answer is still there.\n  3. Click \"Answer & refine plan\" and check the prompt in the live output includes the answers.\n  4. Check that Save only appears after editing.\n  5. Check that queueing with open questions asks for confirmation.\n  6. Check that Delete is visually separate from the other buttons.\n\n### Open questions and risks\n- **Output format.** Models may not follow the section format exactly. The parser should be lenient, and if it finds nothing the plan still displays as it does now.\n- **Manual plans.** If the user writes their own plan with a \"Questions\" heading, it will trigger the panel. That's probably what they'd want.\n- **Blocking the queue.** Should unanswered questions block queueing outright? This plan only asks for confirmation.\n- **Save placement.** Is hiding Save until there are edits enough, or should the form save automatically when the drawer closes, removing the button entirely? This plan keeps a Save button to limit the scope.\n- **Queue auto-save.** Queueing already saves pending edits automatically. That will now be visible as \"Save & queue\" behaviour, so the button label or hover text should say so.\n",
@@ -194,6 +216,10 @@
         {
           "at": "2026-09-28T01:36:19+00:00",
           "event": "AI plan ready"
+        },
+        {
+          "at": "2026-09-28T01:44:52+00:00",
+          "event": "Queued for AI"
         }
       ],
       "prev_status": "unplanned"
@@ -245,10 +271,10 @@
       "title": "add option to sync up with a remote git repository.",
       "description": "add option to sync up with a remote git repository.",
       "plan": "",
-      "status": "unplanned",
+      "status": "planning",
       "provider": "",
       "created_at": "2026-09-28T01:33:11+00:00",
-      "updated_at": "2026-09-28T01:33:11+00:00",
+      "updated_at": "2026-09-28T01:45:38+00:00",
       "queued_at": null,
       "started_at": null,
       "finished_at": null,
@@ -259,8 +285,13 @@
         {
           "at": "2026-09-28T01:33:11+00:00",
           "event": "Created"
+        },
+        {
+          "at": "2026-09-28T01:45:38+00:00",
+          "event": "AI planning started"
         }
-      ]
+      ],
+      "prev_status": "unplanned"
     },
     {
       "id": 8,
@@ -270,13 +301,13 @@
       "status": "done",
       "provider": "",
       "created_at": "2026-09-28T01:34:25+00:00",
-      "updated_at": "2026-09-28T01:39:48+00:00",
+      "updated_at": "2026-09-28T01:39:50+00:00",
       "queued_at": "2026-09-28T01:37:10+00:00",
       "started_at": "2026-09-28T01:37:10+00:00",
       "finished_at": "2026-09-28T01:39:48+00:00",
       "output": "I added a **Chat** button to each project. It opens a side panel where you can talk to the project's AI, and the AI runs in the project directory (over SSH for remote projects). The tests pass, but I haven't tried the chat panel in a browser, so the page itself is untested.\n\n**How chat works**\n- **Read-only:** it uses the same command and timeout as planning, and the prompt tells the AI not to create, modify or delete files. It uses the project's AI and model.\n- **Memory:** each prompt includes the conversation so far, dropping the oldest messages once it passes about 40,000 characters. Conversations are kept in memory only: they aren't written to `.patchgoblin/` and are lost when PatchGoblin restarts.\n\n**Changes**\n- **Backend:** `patchgoblin/providers.py` builds the chat prompt, and `patchgoblin/engine.py` holds each project's conversation and runs one reply at a time in the background. You can't clear a conversation, or remove its project, while a reply is still coming.\n- **API (`patchgoblin/app.py`):** four new routes let the page read the conversation (including live output), send a message, cancel a reply, and clear the conversation.\n- **Page (`index.html`, `app.js`, `app.css`):**\n  - Messages appear as bubbles, errors are shown in red, and the AI's output streams live while it works. There are Send, Cancel and Clear buttons.\n  - Enter sends and Shift+Enter adds a new line.\n  - Only one side panel is open at a time: opening chat closes the task panel, and opening a task closes chat. Esc or \u2715 closes chat, and switching projects loads that project's conversation.\n- **README:** added a short \"Chat\" section.\n\n**Testing**\n- I added two tests. One sends messages to a fake stand-in for the AI and checks the reply, error handling, that no files were written, cancel, clear, and the security checks. The other checks that long history gets trimmed.\n- All 21 tests pass, and the page script passes a syntax check (`node --check`).",
       "error": "",
-      "commit": "",
+      "commit": "da30831b7f97b1b3a8ba3b7c6127802cb24231ef",
       "history": [
         {
           "at": "2026-09-28T01:34:25+00:00",
@@ -296,6 +327,48 @@
         },
         {
           "at": "2026-09-28T01:39:48+00:00",
+          "event": "AI run finished"
+        },
+        {
+          "at": "2026-09-28T01:39:50+00:00",
+          "event": "Committed da30831b7f"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "model should have a drop down select",
+      "description": "",
+      "plan": "",
+      "status": "done",
+      "provider": "",
+      "created_at": "2026-09-28T01:42:49+00:00",
+      "updated_at": "2026-09-28T01:46:22+00:00",
+      "queued_at": "2026-09-28T01:44:45+00:00",
+      "started_at": "2026-09-28T01:44:45+00:00",
+      "finished_at": "2026-09-28T01:46:22+00:00",
+      "output": "The Model field is now a dropdown, both in the project header and in the Add project dialog. The JS passes a syntax check, the 21 unit tests pass, and I confirmed the page renders with the model list. I haven't clicked through the dropdowns in a real browser.\n\n**How it works**\n- Each AI has its own list of suggested models, defined in `MODELS` in `patchgoblin/store.py`:\n  - claude: `opus`, `sonnet`, `haiku`, plus the full Claude model IDs\n  - codex: `gpt-5-codex`, `gpt-5`, `gpt-5-mini`\n  - openai: `gpt-5`, `gpt-5-mini`, `gpt-5-nano`, `gpt-4.1`\n- The dropdown shows \"default\" (no model), the models for the chosen AI, and \"Custom\u2026\". Custom asks for a name; cancelling puts back the previous choice. A project's existing model that isn't on the list still shows up as an option, so it isn't lost.\n- **Behaviour change:** switching a project's AI now clears its model if the new AI doesn't list it, so it doesn't send, say, `opus` to OpenAI. This also clears a custom model on every AI switch, even if you meant to keep it. The Add project dialog does the same.\n\n**Code changes**\n- `patchgoblin/app.py` passes the list to the page.\n- `index.html` swaps the two text boxes for dropdowns.\n- `app.js` fills them and handles \"Custom\u2026\".\n\n**Worth checking**\n- The suggested model names are my best guesses. Check that the claude and codex command-line tools accept them, and edit the list if not.\n- I left the \"Default model\" box in Settings as a text field, to keep this change small.\n\n`pytest` isn't installed in the project's virtual environment, so I ran the tests with `unittest` instead.",
+      "error": "",
+      "commit": "",
+      "history": [
+        {
+          "at": "2026-09-28T01:42:49+00:00",
+          "event": "Created"
+        },
+        {
+          "at": "2026-09-28T01:42:55+00:00",
+          "event": "Marked planned"
+        },
+        {
+          "at": "2026-09-28T01:44:45+00:00",
+          "event": "Queued for AI"
+        },
+        {
+          "at": "2026-09-28T01:44:45+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-09-28T01:46:22+00:00",
           "event": "AI run finished"
         }
       ]

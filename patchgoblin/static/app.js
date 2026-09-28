@@ -84,6 +84,37 @@ const formStamp = t => JSON.stringify([t.title, t.description, t.provider, t.pla
 const currentProject = () => state.projects.find(p => p.id === state.pid);
 const openTask = () => state.tasks.find(t => t.id === state.openTid);
 
+/* ---------------- model dropdowns ---------------- */
+
+const MODELS = JSON.parse(document.body.dataset.models || "{}");
+const CUSTOM_MODEL = "\u0000custom";
+
+function fillModelSelect(select, provider, current = "") {
+  const models = [...(MODELS[provider] || [])];
+  if (current && !models.includes(current)) models.push(current);
+  select.replaceChildren(el("option", { value: "" }, "default"),
+    ...models.map(m => el("option", { value: m }, m)),
+    el("option", { value: CUSTOM_MODEL }, "Custom…"));
+  select.value = current;
+  select.dataset.value = current;
+}
+
+// Resolves the select's new value, asking for a name when "Custom…" is picked.
+// Returns null (and restores the previous choice) if the prompt is cancelled.
+function pickModel(select, provider) {
+  if (select.value !== CUSTOM_MODEL) {
+    select.dataset.value = select.value;
+    return select.value;
+  }
+  const name = (prompt("Model name:", select.dataset.value) || "").trim();
+  if (!name) { select.value = select.dataset.value; return null; }
+  fillModelSelect(select, provider, name);
+  return name;
+}
+
+// A model belongs to its provider, so drop it when switching to a provider that doesn't list it.
+const modelFor = (provider, model) => ((MODELS[provider] || []).includes(model) ? model : "");
+
 /* ---------------- projects ---------------- */
 
 async function loadProjects() {
@@ -117,7 +148,7 @@ async function selectProject(pid) {
   $("#p-where").textContent = p.location === "ssh"
     ? `${p.ssh_target}${p.ssh_port ? ":" + p.ssh_port : ""}:${p.path}` : p.path;
   $("#p-provider").value = p.provider || "claude";
-  $("#p-model").value = p.model || "";
+  fillModelSelect($("#p-model"), p.provider || "claude", p.model || "");
   state.tasks = [];
   renderBoard();
   loadChat();
@@ -596,6 +627,7 @@ function setupProjectDialog() {
   const resetBrowser = setupFolderBrowser(form);
   const open = () => {
     form.reset();
+    fillModelSelect(form.model, form.provider.value);
     syncLocation();
     showError($("#project-form-error"), "");
     dialog.showModal();
@@ -609,6 +641,9 @@ function setupProjectDialog() {
   $("#add-project-btn").onclick = open;
   $("#empty-add-btn").onclick = open;
   $$("input[name=location]", form).forEach(r => { r.onchange = syncLocation; });
+  form.provider.onchange = () =>
+    fillModelSelect(form.model, form.provider.value, modelFor(form.provider.value, form.model.value));
+  form.model.onchange = () => pickModel(form.model, form.provider.value);
   form.ssh_target.addEventListener("change", resetBrowser);
   form.ssh_port.addEventListener("change", resetBrowser);
   form.onsubmit = async ev => {
@@ -708,8 +743,16 @@ function init() {
   };
   for (const btn of $$(".queue-tab")) btn.onclick = () => selectTab(btn.dataset.col);
   $(".queue-tabs").onkeydown = onTabKeydown;
-  $("#p-provider").onchange = e => updateProject({ provider: e.target.value });
-  $("#p-model").onchange = e => updateProject({ model: e.target.value });
+  $("#p-provider").onchange = async e => {
+    const p = currentProject();
+    const provider = e.target.value;
+    await updateProject({ provider, model: modelFor(provider, p.model || "") });
+    fillModelSelect($("#p-model"), p.provider || "claude", p.model || "");
+  };
+  $("#p-model").onchange = e => {
+    const model = pickModel(e.target, currentProject().provider || "claude");
+    if (model !== null) updateProject({ model });
+  };
   $("#remove-project-btn").onclick = async () => {
     const p = currentProject();
     if (!p || !confirm(`Remove "${p.name}" from PatchGoblin? Files, tasks.json and git history are kept.`)) return;

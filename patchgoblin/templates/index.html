@@ -7,7 +7,7 @@
   <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
 </head>
-<body>
+<body data-models="{{ models|tojson|forceescape }}">
 <header class="topbar">
   <div class="brand"><img src="{{ url_for('static', filename='favicon.svg') }}" alt=""> PatchGoblin</div>
   <button class="ghost" id="settings-btn">Settings</button>
@@ -43,7 +43,7 @@
               {% for p in providers %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
             </select>
           </label>
-          <label>Model <input id="p-model" placeholder="default" size="12"></label>
+          <label>Model <select id="p-model"></select></label>
           <button class="ghost" id="chat-btn" title="Ask the AI about this project (read-only)">Chat</button>
           <button class="ghost" id="terminal-btn" title="Open a terminal in the project directory">Terminal</button>
           <button class="ghost" id="commits-btn">Commits</button>
@@ -177,7 +177,7 @@
       <label>Default AI
         <select name="provider">{% for p in providers %}<option value="{{ p }}">{{ p }}</option>{% endfor %}</select>
       </label>
-      <label class="grow">Model <input name="model" placeholder="optional"></label>
+      <label class="grow">Model <select name="model"></select></label>
     </div>
     <label class="check"><input type="checkbox" name="create" checked> Create the directory if it doesn't exist</label>
     <p class="muted small">A git repository is initialized in the directory if it isn't already a repo root.</p>

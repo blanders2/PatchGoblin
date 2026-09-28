@@ -20,6 +20,13 @@ from .hosts import host_for
 
 STATUSES = ("unplanned", "planning", "planned", "queued", "running", "done", "failed")
 PROVIDERS = ("claude", "codex", "openai")
+# Suggestions for the model dropdowns; any other model name can still be entered as "Custom…".
+MODELS = {
+    "claude": ("opus", "sonnet", "haiku", "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5",
+               "claude-haiku-4-5"),
+    "codex": ("gpt-5-codex", "gpt-5", "gpt-5-mini"),
+    "openai": ("gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1"),
+}
 TASKS_DIR = ".patchgoblin"
 TASKS_FILE = "tasks.json"
 
