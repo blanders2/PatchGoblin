@@ -16,6 +16,7 @@ from patchgoblin.providers import OpenAIAgent, Outcome, ProjectFiles  # noqa: E4
 
 FAKE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_agent.py")
 H = {"X-PatchGoblin": "1"}
+ASKING_PLAN = "## Steps\n1. do it\n\n## Questions for you\n1. Which colour?\n"
 
 
 def git_log(path):
@@ -126,7 +127,7 @@ class ProjectTests(AppTestCase):
 
     def test_index_has_queue_tabs(self):
         html = self.client.get("/").get_data(as_text=True)
-        for col in ("unplanned", "planned", "queue", "finished"):
+        for col in ("unplanned", "drafted", "planned", "queue", "finished"):
             self.assertIn(f'role="tab" id="tab-{col}" data-col="{col}"', html)
             self.assertIn(f'id="col-{col}" data-col="{col}" role="tabpanel" aria-labelledby="tab-{col}"', html)
 
@@ -192,8 +193,9 @@ class WorkflowTests(AppTestCase):
         pid = self.add_project()["id"]
         tid = self.post_task(pid, "ASK me things")["id"]
         self.assertEqual(self.action(pid, tid, "plan").status_code, 200)
-        task = self.wait_for(pid, tid, {"planned"})
+        task = self.wait_for(pid, tid, {"drafted"})
         self.assertEqual(task["questions"], ["Which colour should the output be?", "Should it log?"])
+        self.assertEqual(task["history"][-1]["event"], "AI plan drafted (2 open questions)")
 
         bad = self.action(pid, tid, "plan", answers="blue")
         self.assertEqual(bad.status_code, 400)
@@ -209,6 +211,118 @@ class WorkflowTests(AppTestCase):
         self.assertIn("A: blue", task["plan"])
         self.assertNotIn("Should it log", task["plan"])
         self.assertEqual(task["questions"], [])
+
+    def patch_plan(self, pid, tid, plan):
+        res = self.client.patch(f"/api/projects/{pid}/tasks/{tid}", headers=H, json={"plan": plan})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        return res.get_json()
+
+    def test_transitions_from_drafted(self):
+        pid = self.add_project()["id"]
+        engine = self.app.config["ENGINE"]
+        tid = self.post_task(pid, "t")["id"]
+        self.patch_plan(pid, tid, ASKING_PLAN)
+        self.assertEqual(self.action(pid, tid, "mark_planned").get_json()["status"], "drafted")
+
+        res = self.action(pid, tid, "mark_planned")
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("open questions", res.get_json()["error"])
+        self.assertEqual(self.action(pid, tid, "unplan").get_json()["status"], "unplanned")
+        self.assertEqual(self.action(pid, tid, "mark_planned").get_json()["status"], "drafted")
+        with mock.patch.object(engine, "kick"):
+            self.assertEqual(self.action(pid, tid, "queue").get_json()["status"], "queued")
+        # Removing it from the queue lands back in Drafted while the questions remain.
+        self.assertEqual(self.action(pid, tid, "dequeue").get_json()["status"], "drafted")
+
+        self.slow_ai(0.1)
+        self.assertEqual(self.action(pid, tid, "plan").status_code, 200)
+        self.assertEqual(self.wait_for(pid, tid, {"planned"})["plan"], "plan text")
+
+    def test_edit_then_mark(self):
+        pid = self.add_project()["id"]
+        tid = self.post_task(pid, "t")["id"]
+        self.patch_plan(pid, tid, ASKING_PLAN)
+        self.action(pid, tid, "mark_planned")
+        # Saving never changes the status; the buttons do.
+        self.assertEqual(self.patch_plan(pid, tid, "## Steps\n1. do it\n\n## Questions for you\nNone.")["status"],
+                         "drafted")
+        self.assertEqual(self.action(pid, tid, "mark_planned").get_json()["status"], "planned")
+        res = self.action(pid, tid, "mark_drafted")
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("no open questions", res.get_json()["error"])
+        self.assertEqual(self.patch_plan(pid, tid, ASKING_PLAN)["status"], "planned")
+        tasks = self.client.get(f"/api/projects/{pid}/tasks").get_json()["tasks"]
+        self.assertEqual(tasks[0]["status"], "planned")  # reconcile leaves hand-added questions alone
+        task = self.action(pid, tid, "mark_drafted").get_json()
+        self.assertEqual(task["status"], "drafted")
+        self.assertEqual(task["history"][-1]["event"], "Moved to drafted")
+
+    def test_batch_mark_planned_and_drafted(self):
+        pid = self.add_project()["id"]
+        a, b, c = (self.post_task(pid, t)["id"] for t in ("a", "b", "c"))
+        self.patch_plan(pid, b, ASKING_PLAN)
+        data = self.batch(pid, "mark_planned", [a, b, c]).get_json()
+        self.assertTrue(all(r["ok"] for r in data["results"]))
+        by_id = {t["id"]: t for t in data["tasks"]}
+        self.assertEqual([by_id[i]["status"] for i in (a, b, c)], ["planned", "drafted", "planned"])
+        self.assertEqual(by_id[b]["history"][-1]["event"], "Marked planned (plan has open questions)")
+
+        self.patch_plan(pid, c, ASKING_PLAN)
+        data = self.batch(pid, "mark_drafted", [a, b, c]).get_json()
+        results = {r["id"]: r for r in data["results"]}
+        self.assertIn("no open questions", results[a]["error"])
+        self.assertIn("drafted", results[b]["error"])
+        self.assertTrue(results[c]["ok"])
+        data = self.batch(pid, "mark_planned", [b, c]).get_json()
+        self.assertEqual([r["ok"] for r in data["results"]], [False, False])
+        self.assertIn("open questions", data["results"][0]["error"])
+
+    def test_batch_plan_drafted_or_planned(self):
+        pid = self.add_project()["id"]
+        engine = self.app.config["ENGINE"]
+        ids = [self.post_task(pid, t)["id"] for t in ("ask 1", "plain", "ask 2")]
+
+        def fake(project, task, mode, prompt, job):
+            if task["title"].startswith("ask"):
+                return Outcome(True, text=ASKING_PLAN)
+            return Outcome(True, text="## Steps\n1. go\n\n## Questions for you\nNone.")
+        with mock.patch.object(engine, "_ai", side_effect=fake):
+            self.batch(pid, "plan", ids)
+            statuses = [self.wait_for(pid, tid, {"drafted", "planned"})["status"] for tid in ids]
+        self.assertEqual(statuses, ["drafted", "planned", "drafted"])
+
+    def test_old_planned_tasks_with_questions_become_drafted(self):
+        pid = self.add_project()["id"]
+        a, b = (self.post_task(pid, t)["id"] for t in ("a", "b"))
+        engine, store = self.app.config["ENGINE"], self.app.config["STORE"]
+        path = os.path.join(self.proj_dir, ".patchgoblin", "tasks.json")
+
+        def seed(version, plans):
+            with open(path, encoding="utf-8") as fh:
+                doc = json.load(fh)
+            doc["version"] = version
+            for task, plan in zip(doc["tasks"], plans):
+                task["status"], task["plan"] = "planned", plan
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(doc, fh)
+            store.forget(pid)
+            return os.stat(path).st_mtime_ns
+
+        project = self.app.config["REGISTRY"].get(pid)
+        stamp = seed(1, ["plain plan", "plain plan"])
+        engine.reconcile(project)
+        self.assertEqual(os.stat(path).st_mtime_ns, stamp)  # nothing to migrate: not rewritten
+
+        seed(1, [ASKING_PLAN, "plain plan"])
+        engine.reconcile(project)
+        doc = store.read(project, fresh=True)
+        self.assertEqual([t["status"] for t in doc["tasks"]], ["drafted", "planned"])
+        self.assertEqual(doc["tasks"][0]["history"][-1]["event"], "Plan has open questions")
+        self.assertEqual(doc["version"], 2)
+
+        stamp = seed(2, [ASKING_PLAN, ASKING_PLAN])
+        engine.reconcile(project)  # already migrated: planned tasks keep their questions
+        self.assertEqual(os.stat(path).st_mtime_ns, stamp)
 
     def test_queue_and_dequeue(self):
         pid = self.add_project()["id"]
@@ -380,6 +494,16 @@ class WorkflowTests(AppTestCase):
         self.app.config["STORE"].forget(pid)
         task = self.wait_for(pid, tid, {"failed"}, timeout=5)
         self.assertIn("interrupted", task["error"])
+
+        # An interrupted re-plan of a drafted task goes back to Drafted.
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        doc["tasks"][0].update(status="planning", prev_status="drafted", plan=ASKING_PLAN)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        self.app.config["STORE"].forget(pid)
+        task = self.wait_for(pid, tid, {"drafted"}, timeout=5)
+        self.assertIn("Planning was interrupted", task["error"])
 
 
 def git(path, *args, check=True):

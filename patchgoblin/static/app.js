@@ -4,15 +4,15 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 const STATUS_LABEL = {
-  unplanned: "Unplanned", planning: "Planning…", planned: "Planned", queued: "Queued",
+  unplanned: "Unplanned", planning: "Planning…", drafted: "Drafted", planned: "Planned", queued: "Queued",
   running: "Running…", done: "Done", failed: "Failed",
 };
 const COLUMN_OF = {
-  unplanned: "unplanned", planning: "unplanned", planned: "planned",
+  unplanned: "unplanned", planning: "unplanned", drafted: "drafted", planned: "planned",
   queued: "queue", running: "queue", done: "finished", failed: "finished",
 };
 // Not locked by the AI and not finished; mirrors LOCKED in app.py.
-const ACTIONABLE = new Set(["unplanned", "planned", "queued", "failed"]);
+const ACTIONABLE = new Set(["unplanned", "drafted", "planned", "queued", "failed"]);
 const BUSY = new Set(["planning", "running"]);
 
 const state = {
@@ -333,7 +333,7 @@ function onTabKeydown(e) {
 }
 
 // Statuses in which the plan can still be refined, so its questions still matter.
-const PLANNABLE = new Set(["unplanned", "planned", "failed"]);
+const PLANNABLE = new Set(["unplanned", "drafted", "planned", "failed"]);
 const hasOpenQuestions = t => PLANNABLE.has(t.status) && (t.questions || []).length > 0;
 
 function renderCard(t) {
@@ -388,24 +388,26 @@ async function createTask(ev) {
 
 /* ---------------- batch actions ---------------- */
 
-// Mirrors the drawer's per-status buttons and TRANSITIONS in app.py.
+// Mirrors the drawer's per-status buttons and TRANSITIONS in app.py. An optional `when`
+// narrows the eligible tasks further.
 const BATCH_ACTIONS = [
-  { action: "plan", label: "Plan with AI", from: ["unplanned", "planned", "failed"] },
-  { action: "mark_planned", label: "Mark planned", from: ["unplanned", "failed"] },
-  { action: "queue", label: "Queue for AI", from: ["planned", "failed"] },
+  { action: "plan", label: "Plan with AI", from: ["unplanned", "drafted", "planned", "failed"] },
+  { action: "mark_planned", label: "Mark planned", from: ["unplanned", "drafted", "failed"] },
+  { action: "mark_drafted", label: "Move to drafted", from: ["planned"], when: hasOpenQuestions },
+  { action: "queue", label: "Queue for AI", from: ["drafted", "planned", "failed"] },
   { action: "dequeue", label: "Remove from queue", from: ["queued"] },
-  { action: "unplan", label: "Back to unplanned", from: ["planned"] },
+  { action: "unplan", label: "Back to unplanned", from: ["drafted", "planned"] },
   { action: "reopen", label: "Reopen", from: ["done"] },
   { action: "cancel", label: "Cancel", from: ["planning", "running"], cls: "danger" },
 ];
-const NOT_BUSY = ["unplanned", "planned", "queued", "done", "failed"];
+const NOT_BUSY = ["unplanned", "drafted", "planned", "queued", "done", "failed"];
 const BATCH_VERB = { delete: "Deleted", set_provider: "Updated", set_models: "Updated", plan: "Started planning",
-  mark_planned: "Marked planned", queue: "Queued", dequeue: "Removed from queue",
+  mark_planned: "Marked planned", mark_drafted: "Moved to drafted", queue: "Queued", dequeue: "Removed from queue",
   unplan: "Moved back", reopen: "Reopened", cancel: "Cancelled" };
 
 const tabTasks = () => sortTasks(state.tab, state.tasks.filter(t => COLUMN_OF[t.status] === state.tab));
 const selectedTasks = () => state.tasks.filter(t => state.selected.has(t.id));
-const eligible = from => selectedTasks().filter(t => from.includes(t.status));
+const eligible = (from, when) => selectedTasks().filter(t => from.includes(t.status) && (!when || when(t)));
 
 function clearSelection(render = true) {
   state.selected.clear();
@@ -441,7 +443,7 @@ function renderBatchBar() {
   all.title = all.checked ? "Select none" : "Select all in this tab";
 
   $("#batch-actions").replaceChildren(...BATCH_ACTIONS.map(a => {
-    const count = eligible(a.from).length;
+    const count = eligible(a.from, a.when).length;
     return count ? actionButton(`${a.label} (${count})`, () => doBatch(a.action), `small ${a.cls || ""}`) : null;
   }).filter(Boolean));
 
@@ -458,8 +460,8 @@ function renderBatchBar() {
 async function doBatch(action, extra = {}) {
   const label = action === "delete" ? "Delete" : action === "set_provider" ? "Set AI"
     : action === "set_models" ? "Set models" : BATCH_ACTIONS.find(a => a.action === action).label;
-  const from = BATCH_ACTIONS.find(a => a.action === action)?.from || NOT_BUSY;
-  const targets = eligible(from);
+  const spec = BATCH_ACTIONS.find(a => a.action === action);
+  const targets = eligible(spec?.from || NOT_BUSY, spec?.when);
   if (!targets.length) return;
   const n = targets.length;
   const many = `${n} task${n === 1 ? "" : "s"}`;
@@ -646,9 +648,23 @@ function renderDrawer(fillForm) {
     case "planning":
       A.push(actionButton("Cancel planning", act("cancel"), "danger"));
       break;
+    case "drafted":
+      // Answering the questions (above) is the main way forward.
+      A.push(actionButton(planLabel, act("plan"), "ghost", planTip));
+      A.push(actionButton("Mark planned", act("mark_planned"), "ghost",
+        "Accept the plan once its questions are removed. Unsaved edits are saved first."));
+      A.push(actionButton("Queue anyway", act("queue"), "ghost", queueTip));
+      A.push(actionButton("Back to unplanned", act("unplan"), "ghost"));
+      A.push(el("span", { class: "muted small" },
+        "Answer the questions, or delete them from the plan, save, and click Mark planned."));
+      break;
     case "planned":
       A.push(actionButton("Queue to run", act("queue"), asking ? "" : "primary", queueTip));
       A.push(actionButton(planLabel, act("plan"), "ghost", planTip));
+      if (asking) {
+        A.push(actionButton("Move to drafted", act("mark_drafted"), "ghost",
+          "The plan has open questions; park it in Drafted until they're answered"));
+      }
       A.push(actionButton("Back to unplanned", act("unplan"), "ghost"));
       break;
     case "queued":

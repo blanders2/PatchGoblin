@@ -40,6 +40,7 @@ committed along with it.
 | --- | --- |
 | Unplanned | New task. Edit it, ask the AI to plan it, or mark it planned yourself. |
 | Planning… | The AI is investigating the project (read-only) and writing a plan. |
+| Drafted | AI plan has open questions; answer them (or remove them and click Mark planned) to reach Planned. A planned task with hand-added questions can be moved back with Move to drafted. |
 | Planned | Has a plan (AI-drafted or yours). You can edit it, refine it with AI feedback, or queue it. |
 | Queued | Waiting for the AI to implement it. |
 | Running… | The AI is working in the project directory. Live output is shown in the task panel. |
@@ -63,7 +64,7 @@ own titles. Marking a task planned by hand never changes its title.
 
 **Batch actions.** Tick the checkbox on each card you want (Shift+click selects a
 range, Space toggles the focused card, Esc clears). A toolbar then shows the actions
-that apply to the ticked tasks: Plan with AI, Mark planned, Queue for AI, Remove from
+that apply to the ticked tasks: Plan with AI, Mark planned, Move to drafted, Queue for AI, Remove from
 queue, Back to unplanned, Reopen, Cancel, Set AI and Delete. The same rules apply as for
 a single task. Tasks that don't qualify are skipped and listed in the result message,
 and the rest still go through. Batch-queued tasks run in id order. Selections stay

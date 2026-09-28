@@ -116,6 +116,11 @@ def plan_questions(plan: str) -> list[str]:
     return [q for q in items if q and not _NONE.match(q)]
 
 
+def ready_status(plan: str) -> str:
+    """Where a task with this plan belongs once it is ready: 'drafted' while it has open questions."""
+    return "drafted" if plan_questions(plan or "") else "planned"
+
+
 def plan_prompt(task: dict, feedback: str = "", answers: list[dict] | None = None,
                 rewrite_title: bool = False) -> str:
     instructions = PLAN_INSTRUCTIONS + (TITLE_INSTRUCTIONS if rewrite_title else "")

@@ -13,7 +13,7 @@ from flask import Flask, abort, jsonify, render_template, request
 from . import gitops
 from .engine import Engine
 from .hosts import HostError, host_for, open_terminal
-from .providers import endpoint_key, list_models, plan_questions
+from .providers import endpoint_key, list_models, plan_questions, ready_status
 from .store import (CLI_PROVIDERS, MODELS, STATUSES, Registry, Settings, TaskStore, empty_doc, find_endpoint,
                     find_task, log_event, new_task, now, provider_choices, set_status, tasks_path,
                     valid_provider)
@@ -481,11 +481,13 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             doc["tasks"].remove(task)
         return jsonify(ok=True)
 
-    # Simple state changes: action -> (allowed from, new status, history message)
+    # Simple state changes: action -> (allowed from, new status, history message).
+    # A "planned" target lands in "drafted" instead while the plan has open questions.
     TRANSITIONS = {
-        "mark_planned": (("unplanned", "failed"), "planned", "Marked planned"),
-        "unplan": (("planned",), "unplanned", "Moved back to unplanned"),
-        "queue": (("planned", "failed"), "queued", "Queued for AI"),
+        "mark_planned": (("unplanned", "failed", "drafted"), "planned", "Marked planned"),
+        "mark_drafted": (("planned",), "drafted", "Moved to drafted"),
+        "unplan": (("planned", "drafted"), "unplanned", "Moved back to unplanned"),
+        "queue": (("planned", "drafted", "failed"), "queued", "Queued for AI"),
         "dequeue": (("queued",), "planned", "Removed from queue"),
         "reopen": (("done",), "planned", "Reopened"),
     }
@@ -494,6 +496,15 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         allowed, status, message = TRANSITIONS[action]
         if task["status"] not in allowed:
             raise ValueError(f"Cannot {action.replace('_', ' ')} a task that is {task['status']}.")
+        if status == "planned":
+            status = ready_status(task.get("plan", ""))
+            if status == "drafted":
+                if task["status"] == "drafted":
+                    raise ValueError("Plan still has open questions; "
+                                     "answer them or remove them from the plan first.")
+                message += " (plan has open questions)"
+        elif action == "mark_drafted" and not plan_questions(task.get("plan", "")):
+            raise ValueError("Plan has no open questions; nothing to draft.")
         if action == "queue":
             task["queued_at"] = queued_at or now()
         set_status(task, status, message)

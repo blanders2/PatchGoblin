@@ -14,8 +14,9 @@ import time
 
 from . import gitops
 from .hosts import HostError, host_for, kill_tree
-from .providers import Cancelled, Outcome, chat_prompt, plan_prompt, run_ai, run_prompt, split_title
-from .store import find_task, global_model, log_event, now, set_status
+from .providers import (Cancelled, Outcome, chat_prompt, plan_prompt, plan_questions, ready_status, run_ai,
+                        run_prompt, split_title)
+from .store import DOC_VERSION, find_task, global_model, log_event, now, set_status
 
 log = logging.getLogger("patchgoblin")
 
@@ -138,15 +139,27 @@ class Engine:
 
     # ---- startup / consistency ------------------------------------------
     def reconcile(self, project: dict) -> None:
-        """Tasks left 'planning'/'running' by a previous server process are interrupted."""
+        """Tasks left 'planning'/'running' by a previous server process are interrupted.
+
+        Also moves 'planned' tasks whose plan has open questions to 'drafted', once, in a
+        tasks.json saved before that status existed (including one pulled in by git sync).
+        Later, a planned task may keep hand-added questions until "Move to drafted".
+        """
         pid = project["id"]
         doc = self.store.read(project)
         stale = [t["id"] for t in doc["tasks"]
                  if t["status"] in ("planning", "running") and (pid, t["id"]) not in self.jobs]
-        if not stale:
+        drafts = [t["id"] for t in doc["tasks"]
+                  if (doc.get("version") or 1) < DOC_VERSION
+                  and t["status"] == "planned" and plan_questions(t.get("plan", ""))]
+        if not stale and not drafts:
             return
         with self.store.edit(project) as doc:
             for task in doc["tasks"]:
+                if task["id"] in drafts and task["status"] == "planned" \
+                        and plan_questions(task.get("plan", "")):
+                    set_status(task, "drafted", "Plan has open questions")
+                    continue
                 if task["id"] in stale and (pid, task["id"]) not in self.jobs \
                         and task["status"] in ("planning", "running"):
                     if task["status"] == "planning":
@@ -179,7 +192,7 @@ class Engine:
                 task = find_task(doc, tid)
                 if task is None:
                     raise KeyError(tid)
-                if task["status"] not in ("unplanned", "planned", "failed"):
+                if task["status"] not in ("unplanned", "drafted", "planned", "failed"):
                     raise ValueError(f"Cannot plan a task that is {task['status']}.")
                 if (pid, tid) in self.jobs:
                     raise ValueError("This task already has a job running.")
@@ -250,7 +263,12 @@ class Engine:
                         old, current["title"] = current["title"], title
                         log_event(current, f"Title rewritten by AI (was: {old})")
                     current["error"] = ""
-                    set_status(current, "planned", "AI plan ready")
+                    n = len(plan_questions(current["plan"]))
+                    if ready_status(current["plan"]) == "drafted":
+                        set_status(current, "drafted",
+                                   f"AI plan drafted ({n} open question{'s' if n != 1 else ''})")
+                    else:
+                        set_status(current, "planned", "AI plan ready")
                 else:
                     current["error"] = outcome.error
                     set_status(current, current.get("prev_status") or "unplanned",

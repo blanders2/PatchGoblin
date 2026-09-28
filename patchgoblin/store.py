@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from .hosts import host_for
 
-STATUSES = ("unplanned", "planning", "planned", "queued", "running", "done", "failed")
+STATUSES = ("unplanned", "planning", "drafted", "planned", "queued", "running", "done", "failed")
 CLI_PROVIDERS = ("claude", "codex")
 CLI_NAMES = {"claude": "Claude Code", "codex": "Codex"}
 # Suggestions for the model dropdowns; any other model name can still be entered as "Custom…".
@@ -246,8 +246,13 @@ class Settings:
         return self.get()
 
 
+# tasks.json format. 2: the 'drafted' status exists (version-1 files are migrated by
+# Engine.reconcile; every write stamps the current version).
+DOC_VERSION = 2
+
+
 def empty_doc() -> dict:
-    return {"version": 1, "next_id": 1, "tasks": []}
+    return {"version": DOC_VERSION, "next_id": 1, "tasks": []}
 
 
 def tasks_path(project: dict, host=None) -> str:
@@ -283,6 +288,7 @@ class TaskStore:
             return copy.deepcopy(doc)
 
     def write(self, project: dict, doc: dict) -> None:
+        doc["version"] = max(doc.get("version") or 1, DOC_VERSION)
         host_for(project).write_text(tasks_path(project), json.dumps(doc, indent=2) + "\n")
         self._cache[project["id"]] = (time.monotonic(), copy.deepcopy(doc))
 
