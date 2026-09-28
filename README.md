@@ -51,22 +51,31 @@ Planning and implementation both run **in the project's directory, on the projec
 host**. Each project runs one task at a time, in queue order. Different projects run in
 parallel. Planning jobs start straight away because they don't change files.
 
+**Project settings.** The **Project settings** button in the project header opens a
+full-page view in place of the board, with every per-project option: **General** (name,
+location and path), **AI** (provider and the planning, coding and chat models),
+**Planning** (plan limit, AI titles, plan trust), **Git** (`origin` URL, auto-sync, sync
+mode) and a **Danger zone** to remove the project (its files, `tasks.json` and git history
+are kept). Changes apply together when you click **Save**; **← Back to board**, Cancel or
+Esc leave without saving (asking first if you edited anything). Settings are stored in
+PatchGoblin's local `projects.json`.
+
 **Plan limit.** By default there's no limit on how many planning jobs a project runs
 at once, and each job is a separate AI process. If batch planning hits your provider's
-rate limits, set **Plan limit** in the project bar. Extra tasks then show as Planning…
+rate limits, set **Plan limit** in Project settings. Extra tasks then show as Planning…
 and wait for a free slot. Leave it blank for unlimited. Lowering the limit doesn't stop
 jobs that are already running.
 
 **AI titles.** When the AI plans a task (including replanning), it also suggests a
 concise title, which replaces the task's title. The old title is kept in the task's
-history. This is on by default. Untick **AI titles** in the project bar to keep your
+history. This is on by default. Untick the AI titles option in Project settings to keep your
 own titles. Marking a task planned by hand never changes its title.
 
 **Plan trust.** Sets how much the AI may assume when planning. **Low** asks about
 anything ambiguous instead of guessing; **High** makes its own calls and asks only about
 decisions that are costly or hard to undo; **Normal** (the default) is in between. At Low
 and High the plan lists the AI's guesses under **## Assumptions** so you can check them.
-Set it in the project bar; a task can override it in its drawer (**Project default**
+Set it in Project settings; a task can override it in its drawer (**Project default**
 uses the project's level).
 
 **Batch actions.** Tick the checkbox on each card you want (Shift+click selects a
@@ -85,19 +94,20 @@ identity if it's set, otherwise `PatchGoblin <patchgoblin@localhost>`. Failed ru
 leave their changes uncommitted so you can inspect them. The **Commits** button shows
 recent history.
 
-**Remote sync.** The **Sync** button sets the project's `origin` URL and syncs with it.
+**Remote sync.** Set the project's `origin` URL and sync mode in Project settings; the
+**Sync** button then syncs with it, always using the saved mode.
 A sync commits any uncommitted changes (including `tasks.json`) as `checkpoint before
 sync`, fetches `origin`, brings in its commits for the current branch, then pushes
-(`push -u`, so the branch tracks `origin`). Choose **Fast-forward only** (the default;
+(`push -u`, so the branch tracks `origin`). The mode is **Fast-forward only** (the default;
 diverged history is refused) or **Rebase** (your commits are replayed on top of
 origin's). No merge commits are ever made, and a conflicting rebase is aborted, so the
 repository is never left mid-merge. Sync is refused while any AI job or chat is running
-in the project. Tick **Auto-sync** on a project (off by default) to sync after every
+in the project. Tick **Auto-sync** in Project settings (off by default) to sync after every
 successful task commit; if that sync fails, the task stays done and the failure is
 written to its history. Credentials come from your own git setup (SSH keys and agent,
 or a credential manager); prompts are turned off, so missing credentials fail at once
 instead of hanging. For SSH projects the remote is reached from the SSH host. A URL
-with an embedded token is stored in `.git/config` and shown in the dialog.
+with an embedded token is stored in `.git/config` and shown in Project settings and the Sync dialog.
 
 **Chat.** The **Chat** button opens a conversation with the project's AI, running in
 the project directory with the same read-only access as planning (the planning command
@@ -111,8 +121,8 @@ Commands can be edited under **Settings**.
 ### Models
 
 Each project has a **Planning Model** (used to plan tasks), a **Coding Model** (used to
-run them) and an optional **Chat model** (picked in the chat panel; blank means the
-planning model). Each task can override its planning and coding models in the task
+run them) and an optional **Chat model** (blank means the planning model), all set in
+Project settings; the chat panel's model picker is a quick override that saves at once. Each task can override its planning and coding models in the task
 drawer, or for many tasks at once with **Set models** in the batch bar. **Settings** has
 a default planning and coding model for Claude Code, Codex and each endpoint.
 

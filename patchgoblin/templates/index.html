@@ -45,36 +45,11 @@
           <div class="muted mono" id="p-where"></div>
         </div>
         <div class="project-controls">
-          <label>AI
-            <select id="p-provider" class="provider-select">
-              {% for p in providers %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
-            </select>
-          </label>
-          <label title="Used to plan tasks, and for chat unless chat has its own model">Planning Model <select id="p-plan-model"></select></label>
-          <label title="Used when the AI runs (codes) a task">Coding Model <select id="p-code-model"></select></label>
-          <button type="button" class="ghost small" id="p-model-refresh" title="Reload the model lists from the API" hidden>↻</button>
-          <label>Plan limit
-            <input id="p-plan-limit" type="number" min="0" step="1" placeholder="∞"
-                   title="Max simultaneous planning jobs (blank = unlimited). Each job is one AI CLI process.">
-          </label>
-          <label class="check" title="When the AI plans a task, let it rewrite the task title">
-            <input type="checkbox" id="p-rewrite-titles"> AI titles
-          </label>
-          <label title="How much the AI may assume when planning: higher trust = more assumptions, fewer questions">Plan trust
-            <select id="p-plan-trust">
-              <option value="low">Low (ask more)</option>
-              <option value="normal">Normal</option>
-              <option value="high">High (assume more)</option>
-            </select>
-          </label>
-          <label class="check" title="After each successful task commit, pull and push to origin">
-            <input type="checkbox" id="p-auto-sync"> Auto-sync
-          </label>
           <button class="ghost" id="chat-btn" title="Ask the AI about this project (read-only)">Chat</button>
           <button class="ghost" id="terminal-btn" title="Open a terminal in the project directory">Terminal</button>
           <button class="ghost" id="commits-btn">Commits</button>
           <button class="ghost" id="sync-btn" title="Pull from and push to the origin git remote">Sync</button>
-          <button class="ghost danger" id="remove-project-btn" title="Unregister (files are kept)">Remove</button>
+          <button class="ghost" id="project-settings-btn" title="AI, planning and git options for this project">Project settings</button>
         </div>
       </div>
       <div id="p-error" class="error" hidden></div>
@@ -115,6 +90,79 @@
         <div class="column" id="col-{{ col }}" data-col="{{ col }}" role="tabpanel" aria-labelledby="tab-{{ col }}"><div class="cards"></div></div>
         {% endfor %}
       </div>
+    </section>
+
+    <section id="project-settings-view" hidden>
+      <div class="ps-head">
+        <button type="button" class="ghost" id="ps-back-btn">← Back to board</button>
+        <h1>Settings — <span id="ps-name"></span></h1>
+      </div>
+      <form id="project-settings-form">
+        <fieldset>
+          <legend>General</legend>
+          <label>Name <input name="name" required autocomplete="off"></label>
+          <div class="muted mono small" id="ps-where"></div>
+        </fieldset>
+        <fieldset>
+          <legend>AI</legend>
+          <div class="row">
+            <label>AI
+              <select name="provider" class="provider-select">
+                {% for p in providers %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+              </select>
+            </label>
+            <button type="button" class="ghost small" id="ps-model-refresh" title="Reload the model lists from the API" hidden>↻</button>
+          </div>
+          <div class="row">
+            <label class="grow" title="Used to plan tasks, and for chat unless chat has its own model">Planning model <select name="plan_model"></select></label>
+            <label class="grow" title="Used when the AI runs (codes) a task">Coding model <select name="code_model"></select></label>
+            <label class="grow" title="Used by the project chat; blank uses the planning model">Chat model <select name="chat_model"></select></label>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>Planning</legend>
+          <label>Plan limit
+            <input name="plan_limit" type="number" min="0" step="1" placeholder="∞"
+                   title="Max simultaneous planning jobs (blank = unlimited). Each job is one AI CLI process.">
+          </label>
+          <label class="check" title="When the AI plans a task, let it rewrite the task title">
+            <input type="checkbox" name="rewrite_titles"> Let the AI rewrite task titles when planning
+          </label>
+          <label title="How much the AI may assume when planning: higher trust = more assumptions, fewer questions">Plan trust
+            <select name="plan_trust">
+              <option value="low">Low (ask more)</option>
+              <option value="normal">Normal</option>
+              <option value="high">High (assume more)</option>
+            </select>
+          </label>
+        </fieldset>
+        <fieldset>
+          <legend>Git</legend>
+          <label>Remote URL (origin)
+            <input name="remote_url" placeholder="git@github.com:me/repo.git or https://…" autocomplete="off">
+          </label>
+          <p class="muted small" id="ps-remote-status"></p>
+          <label class="check" title="After each successful task commit, pull and push to origin">
+            <input type="checkbox" name="auto_sync"> Auto-sync after each task commit
+          </label>
+          <label>Sync mode
+            <select name="sync_mode">
+              <option value="ff-only">Fast-forward only</option>
+              <option value="rebase">Rebase local commits</option>
+            </select>
+          </label>
+        </fieldset>
+        <fieldset class="danger-zone">
+          <legend>Danger zone</legend>
+          <button type="button" class="ghost danger" id="ps-remove-btn">Remove project…</button>
+          <span class="muted small">Files, tasks.json and git history are kept.</span>
+        </fieldset>
+        <div id="ps-error" class="error" hidden></div>
+        <div class="actions right ps-actions">
+          <button type="button" class="ghost" id="ps-cancel-btn">Cancel</button>
+          <button type="submit" id="ps-save-btn">Save</button>
+        </div>
+      </form>
     </section>
   </main>
 </div>
@@ -271,19 +319,9 @@
 <dialog id="remote-dialog">
   <h2>Sync with remote</h2>
   <div class="remote-body">
-    <div class="row">
-      <label class="grow">Remote URL (origin)
-        <input id="r-url" placeholder="git@github.com:me/repo.git or https://…" autocomplete="off">
-      </label>
-      <button type="button" id="r-save-btn">Save</button>
-    </div>
     <p id="r-status" class="muted small remote-status"></p>
-    <label>Mode
-      <select id="r-mode">
-        <option value="ff-only">Fast-forward only</option>
-        <option value="rebase">Rebase local commits</option>
-      </select>
-    </label>
+    <p class="small">Mode: <span id="r-mode-text"></span> · Remote and mode are set in
+      <button type="button" class="link" id="r-open-settings">Project settings</button></p>
     <label class="check"><input type="checkbox" id="r-push" checked> Push after pull</label>
     <p class="muted small">Uncommitted changes are committed first. Conflicts or diverged history abort the sync; no merge commits are made.</p>
     <pre id="r-log" class="remote-log" hidden></pre>

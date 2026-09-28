@@ -732,6 +732,64 @@ class RemoteTests(AppTestCase):
         res = self.client.patch(f"/api/projects/{pid}", headers=H, json={"sync_mode": "merge"})
         self.assertEqual(res.status_code, 400)
 
+    def test_update_project_all_settings_at_once(self):
+        pid = self.add_project()["id"]
+        fields = {"name": "Renamed", "provider": "codex", "plan_model": "p1", "code_model": "c1",
+                  "chat_model": "ch1", "plan_limit": 2, "rewrite_titles": False, "plan_trust": "high",
+                  "auto_sync": True, "sync_mode": "rebase"}
+        res = self.client.patch(f"/api/projects/{pid}", headers=H, json={**fields, "remote_url": self.bare})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        for key, value in fields.items():
+            self.assertEqual(res.get_json()[key], value, key)
+        with open(os.path.join(self.tmp.name, "data", "projects.json"), encoding="utf-8") as fh:
+            saved = next(p for p in json.load(fh)["projects"] if p["id"] == pid)
+        for key, value in fields.items():
+            self.assertEqual(saved[key], value, key)
+        self.assertEqual(self.client.get(f"/api/projects/{pid}/remote").get_json()["url"], self.bare)
+
+    def test_update_project_validates_before_changing_anything(self):
+        pid = self.add_project()["id"]
+        name = self.client.get("/api/projects").get_json()["projects"][0]["name"]
+        res = self.client.patch(f"/api/projects/{pid}", headers=H, json={"name": "New", "plan_limit": -1})
+        self.assertEqual(res.status_code, 400)
+        for bad in ("", "  ", 123, None):
+            res = self.client.patch(f"/api/projects/{pid}", headers=H, json={"name": bad})
+            self.assertEqual(res.status_code, 400, bad)
+        self.assertEqual(self.client.get("/api/projects").get_json()["projects"][0]["name"], name)
+        # A bad field alongside a remote URL leaves origin unset.
+        res = self.client.patch(f"/api/projects/{pid}", headers=H,
+                                json={"remote_url": self.bare, "sync_mode": "merge"})
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(git(self.proj_dir, "remote"), "")
+        res = self.client.patch(f"/api/projects/{pid}", headers=H, json={"remote_url": 5})
+        self.assertEqual(res.status_code, 400)
+
+    def test_update_project_remote_url(self):
+        pid = self.add_project()["id"]
+        res = self.client.patch(f"/api/projects/{pid}", headers=H, json={"remote_url": f"  {self.bare} "})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertEqual(git(self.proj_dir, "remote", "get-url", "origin"), self.bare)
+        # An unchanged URL doesn't touch git; a blank one removes origin.
+        with mock.patch("patchgoblin.gitops.set_remote") as set_remote:
+            self.client.patch(f"/api/projects/{pid}", headers=H, json={"remote_url": self.bare})
+        set_remote.assert_not_called()
+        self.client.patch(f"/api/projects/{pid}", headers=H, json={"remote_url": ""})
+        self.assertEqual(git(self.proj_dir, "remote"), "")
+        # A rejected URL leaves projects.json untouched.
+        res = self.client.patch(f"/api/projects/{pid}", headers=H,
+                                json={"remote_url": "--upload-pack=x", "name": "Nope"})
+        self.assertEqual(res.status_code, 400)
+        self.assertNotEqual(self.client.get("/api/projects").get_json()["projects"][0]["name"], "Nope")
+
+    def test_sync_without_mode_uses_saved_mode(self):
+        pid, _ = self.setup_remote()
+        self.client.patch(f"/api/projects/{pid}", headers=H, json={"sync_mode": "rebase"})
+        engine = self.app.config["ENGINE"]
+        with mock.patch.object(engine, "sync", return_value={"url": self.bare, "log": []}) as sync:
+            self.assertEqual(self.sync(pid, push=False).status_code, 200)
+        self.assertEqual(sync.call_args.args[1], "rebase")
+        self.assertIs(sync.call_args.kwargs["push"], False)
+
     def test_ssh_run_env_is_quoted(self):
         host = SSHHost("me@box")
         with mock.patch("patchgoblin.hosts.communicate") as comm:

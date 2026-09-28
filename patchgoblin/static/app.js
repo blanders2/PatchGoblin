@@ -26,6 +26,8 @@ const state = {
   dirty: false,
   selected: new Set(), // task ids ticked for batch actions; always within the current tab
   lastSelected: null, // anchor for shift-click range selection
+  view: "board", // "board" or "settings" (the full-page Project settings view)
+  settingsDirty: false,
 };
 
 function validTab(col) { return Object.values(COLUMN_OF).includes(col) ? col : "unplanned"; }
@@ -200,11 +202,15 @@ function renderProjects() {
   }, el("div", { class: "p-title" }, p.name),
      el("div", { class: "p-sub" }, p.location === "ssh" ? `ssh · ${p.ssh_target}` : "local"))));
   const has = state.projects.length > 0;
+  if (!has) state.view = "board";
   $("#empty-state").hidden = has;
-  $("#project-view").hidden = !has;
+  $("#project-view").hidden = !has || state.view !== "board";
+  $("#project-settings-view").hidden = !has || state.view !== "settings";
 }
 
 async function selectProject(pid) {
+  // Switching projects leaves settings for the new project's board; refreshes of the same pid don't.
+  if (state.view === "settings" && pid !== state.pid && !closeProjectSettings()) return;
   if (pid !== state.pid) closeDrawer();
   if (pid !== state.pid) clearSelection(false);
   state.pid = pid;
@@ -216,10 +222,7 @@ async function selectProject(pid) {
   $("#p-where").textContent = p.location === "ssh"
     ? `${p.ssh_target}${p.ssh_port ? ":" + p.ssh_port : ""}:${p.path}` : p.path;
   renderProjectModel();
-  $("#p-plan-limit").value = p.plan_limit || "";
-  $("#p-rewrite-titles").checked = p.rewrite_titles !== false;
   renderProjectTrust();
-  $("#p-auto-sync").checked = p.auto_sync === true;
   state.tasks = [];
   renderBoard();
   loadChat();
@@ -230,11 +233,7 @@ function renderProjectModel() {
   const p = currentProject();
   if (!p) return;
   const provider = p.provider || "claude";
-  setProviderValue($("#p-provider"), provider);
-  $("#p-model-refresh").hidden = !isEndpoint(provider);
   const stillValid = () => currentProject() === p && (p.provider || "claude") === provider;
-  fillModelSelectLive($("#p-plan-model"), provider, p.plan_model || "", stillValid, "Global default");
-  fillModelSelectLive($("#p-code-model"), provider, p.code_model || "", stillValid, "Global default");
   fillModelSelectLive($("#c-model"), provider, p.chat_model || "", stillValid, "Planning model");
   fillBatchModel($("#batch-plan-model"), provider);
   fillBatchModel($("#batch-code-model"), provider);
@@ -243,20 +242,12 @@ function renderProjectModel() {
 
 const TRUST_NAMES = { low: "Low", normal: "Normal", high: "High" };
 
-// The project's plan trust select, and the level a task's "Project default" resolves to.
+// The level a task's "Project default" plan trust resolves to.
 function renderProjectTrust() {
   const p = currentProject();
   if (!p) return;
   const level = TRUST_NAMES[p.plan_trust] ? p.plan_trust : "normal";
-  $("#p-plan-trust").value = level;
   $("#d-plan-trust").options[0].textContent = `Project default (${TRUST_NAMES[level]})`;
-}
-
-// Refills the project's model selects from MODELS without fetching (after a refresh or provider change).
-function refillProjectModels(p, provider) {
-  fillModelSelect($("#p-plan-model"), provider, p.plan_model || "");
-  fillModelSelect($("#p-code-model"), provider, p.code_model || "");
-  fillModelSelect($("#c-model"), provider, p.chat_model || "");
 }
 
 async function updateProject(fields) {
@@ -266,6 +257,172 @@ async function updateProject(fields) {
     Object.assign(p, updated);
     toast("Project updated");
   } catch (e) { toast(e.message, true); }
+}
+
+/* ---------------- project settings view ---------------- */
+
+const SYNC_MODE_NAMES = { "ff-only": "Fast-forward only", rebase: "Rebase" };
+const settingsForm = () => $("#project-settings-form");
+const settingsModelSelects = form => [form.plan_model, form.code_model, form.chat_model];
+
+function openProjectSettings() {
+  const p = currentProject();
+  if (!p || !closeDrawer()) return;
+  closeChat();
+  clearSelection();
+  state.view = "settings";
+  renderProjects();
+
+  const form = settingsForm();
+  const provider = p.provider || "claude";
+  form.dataset.pid = p.id;
+  delete form.dataset.remoteLoaded;
+  delete form.dataset.remoteUrl;
+  $("#ps-name").textContent = p.name;
+  form.elements.name.value = p.name;
+  $("#ps-where").textContent = p.location === "ssh"
+    ? `SSH · ${p.ssh_target}${p.ssh_port ? ":" + p.ssh_port : ""} · ${p.path}` : `Local · ${p.path}`;
+  setProviderValue(form.provider, provider);
+  $("#ps-model-refresh").hidden = !isEndpoint(provider);
+  // A late model list must not refill the selects once the form shows another provider or project.
+  const stillValid = () => state.view === "settings" && form.dataset.pid === p.id
+    && form.provider.value === provider;
+  fillModelSelectLive(form.plan_model, provider, p.plan_model || "", stillValid, "Global default");
+  fillModelSelectLive(form.code_model, provider, p.code_model || "", stillValid, "Global default");
+  fillModelSelectLive(form.chat_model, provider, p.chat_model || "", stillValid, "Planning model");
+  form.plan_limit.value = p.plan_limit || "";
+  form.rewrite_titles.checked = p.rewrite_titles !== false;
+  form.plan_trust.value = TRUST_NAMES[p.plan_trust] ? p.plan_trust : "normal";
+  form.auto_sync.checked = p.auto_sync === true;
+  form.sync_mode.value = SYNC_MODE_NAMES[p.sync_mode] ? p.sync_mode : "ff-only";
+  form.remote_url.value = "";
+  form.remote_url.disabled = true;
+  $("#ps-remote-status").textContent = "Loading…";
+  showError($("#ps-error"), "");
+  state.settingsDirty = false;
+  loadSettingsRemote(p.id);
+}
+
+// Only a successfully loaded URL may be sent back, or a failed load could wipe origin on Save.
+async function loadSettingsRemote(pid) {
+  const form = settingsForm();
+  const current = () => state.view === "settings" && form.dataset.pid === pid;
+  try {
+    const r = await api("GET", `/api/projects/${pid}/remote`);
+    if (!current()) return;
+    form.remote_url.value = r.url || "";
+    form.dataset.remoteUrl = r.url || "";
+    form.dataset.remoteLoaded = "1";
+    form.remote_url.disabled = false;
+    $("#ps-remote-status").textContent = r.url
+      ? `Branch ${r.branch || "(detached)"}${r.upstream ? ` · tracking ${r.upstream}` : ""}` : "no remote set";
+  } catch (e) {
+    if (current()) $("#ps-remote-status").textContent = `Couldn't load the remote: ${e.message}`;
+  }
+}
+
+function closeProjectSettings(force = false) {
+  if (state.view !== "settings") return true;
+  if (!force && state.settingsDirty && !confirm("Discard unsaved project settings?")) return false;
+  state.view = "board";
+  state.settingsDirty = false;
+  renderProjects();
+  return true;
+}
+
+// Refills the form's model selects for `provider` without fetching; `values` are the models to show.
+function refillSettingsModels(form, provider, values) {
+  settingsModelSelects(form).forEach((select, i) => fillModelSelect(select, provider, values[i]));
+}
+
+async function saveProjectSettings(ev) {
+  ev.preventDefault();
+  const form = settingsForm();
+  const p = state.projects.find(x => x.id === form.dataset.pid);
+  if (!p) return;
+  const fields = {
+    name: form.elements.name.value,
+    provider: form.provider.value,
+    plan_model: form.plan_model.dataset.value || "",
+    code_model: form.code_model.dataset.value || "",
+    chat_model: form.chat_model.dataset.value || "",
+    plan_limit: form.plan_limit.value === "" ? 0 : Number(form.plan_limit.value),
+    rewrite_titles: form.rewrite_titles.checked,
+    plan_trust: form.plan_trust.value,
+    auto_sync: form.auto_sync.checked,
+    sync_mode: form.sync_mode.value,
+  };
+  if (form.dataset.remoteLoaded && form.remote_url.value.trim() !== form.dataset.remoteUrl) {
+    fields.remote_url = form.remote_url.value.trim();
+  }
+  const btn = $("#ps-save-btn");
+  btn.disabled = true;
+  showError($("#ps-error"), "");
+  try {
+    Object.assign(p, await api("PATCH", `/api/projects/${p.id}`, fields));
+  } catch (e) {
+    showError($("#ps-error"), e.message);
+    return;
+  } finally {
+    btn.disabled = false;
+  }
+  renderProjects();
+  if (currentProject() === p) {
+    $("#p-name").textContent = p.name;
+    renderProjectModel();
+    renderProjectTrust();
+  }
+  toast("Project settings saved");
+  closeProjectSettings(true);
+}
+
+async function removeProject() {
+  const p = currentProject();
+  if (!p || !confirm(`Remove "${p.name}" from PatchGoblin? Files, tasks.json and git history are kept.`)) return;
+  try {
+    await api("DELETE", `/api/projects/${p.id}`);
+    state.view = "board";
+    state.settingsDirty = false;
+    state.pid = null;
+    closeDrawer();
+    await loadProjects();
+  } catch (e) { toast(e.message, true); }
+}
+
+function setupProjectSettings() {
+  const form = settingsForm();
+  const markDirty = () => { state.settingsDirty = true; };
+  form.addEventListener("input", markDirty);
+  form.addEventListener("change", markDirty);
+  const chosen = () => settingsModelSelects(form).map(s => s.dataset.value || "");
+  form.provider.addEventListener("change", async () => {
+    // A model belongs to its provider, so keep only those the new provider lists.
+    const provider = form.provider.value;
+    const before = chosen();
+    const keep = () => before.map(m => modelFor(provider, m));
+    $("#ps-model-refresh").hidden = !isEndpoint(provider);
+    refillSettingsModels(form, provider, keep());
+    await ensureModels(provider);
+    if (form.provider.value === provider && state.view === "settings") refillSettingsModels(form, provider, keep());
+  });
+  $("#ps-model-refresh").onclick = async () => {
+    const provider = form.provider.value;
+    const job = ensureModels(provider, true);
+    refillSettingsModels(form, provider, chosen());
+    await job;
+    if (form.provider.value !== provider || state.view !== "settings") return;
+    refillSettingsModels(form, provider, chosen());
+    toast(modelErrors[provider] ? `Couldn't list models: ${modelErrors[provider]}` : "Model list refreshed",
+      !!modelErrors[provider]);
+  };
+  for (const select of settingsModelSelects(form)) {
+    select.addEventListener("change", () => pickModel(select, form.provider.value));
+  }
+  form.onsubmit = saveProjectSettings;
+  $("#project-settings-btn").onclick = openProjectSettings;
+  $("#ps-back-btn").onclick = () => closeProjectSettings();
+  $("#ps-cancel-btn").onclick = () => closeProjectSettings();
+  $("#ps-remove-btn").onclick = removeProject;
 }
 
 /* ---------------- tasks & board ---------------- */
@@ -1086,6 +1243,7 @@ function setupProjectDialog() {
       const project = await api("POST", "/api/projects", f);
       dialog.close();
       state.projects.push(project);
+      renderProjects();
       await selectProject(project.id);
       toast(`Added ${project.name}`);
     } catch (e) {
@@ -1258,10 +1416,12 @@ async function showCommits() {
   } catch (e) { list.replaceChildren(el("li", { class: "error" }, e.message)); }
 }
 
+let remoteUrl = ""; // origin's URL as last shown in the Sync dialog
+
 function renderRemote(r) {
-  $("#r-url").value = r.url || "";
-  $("#r-mode").value = r.sync_mode || "ff-only";
-  const parts = [r.branch ? `Branch ${r.branch}` : "Detached HEAD"];
+  remoteUrl = r.url || "";
+  $("#r-mode-text").textContent = SYNC_MODE_NAMES[r.sync_mode] || SYNC_MODE_NAMES["ff-only"];
+  const parts = [r.url ? `origin ${r.url}` : "", r.branch ? `Branch ${r.branch}` : "Detached HEAD"].filter(Boolean);
   if (r.upstream) parts.push(`tracking ${r.upstream}`, `${r.ahead} ahead, ${r.behind} behind`);
   else if (r.url) parts.push(`not pushed yet (${r.ahead} local commit${r.ahead === 1 ? "" : "s"})`);
   else parts.push("no remote set");
@@ -1274,6 +1434,9 @@ async function showRemote() {
   showError($("#r-error"), "");
   $("#r-log").hidden = true;
   $("#r-status").textContent = "Loading…";
+  const p = currentProject();
+  $("#r-mode-text").textContent = SYNC_MODE_NAMES[p && p.sync_mode] || SYNC_MODE_NAMES["ff-only"];
+  $("#r-sync-btn").disabled = true;
   $("#remote-dialog").showModal();
   try {
     renderRemote(await api("GET", `/api/projects/${state.pid}/remote`));
@@ -1282,15 +1445,10 @@ async function showRemote() {
 
 function setupRemoteDialog() {
   $("#sync-btn").onclick = showRemote;
-  $("#r-save-btn").onclick = async () => {
-    showError($("#r-error"), "");
-    try {
-      renderRemote(await api("PUT", `/api/projects/${state.pid}/remote`, { url: $("#r-url").value }));
-      toast("Remote saved");
-    } catch (e) { showError($("#r-error"), e.message); }
+  $("#r-open-settings").onclick = () => {
+    $("#remote-dialog").close();
+    openProjectSettings();
   };
-  $("#r-url").onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); $("#r-save-btn").click(); } };
-  $("#r-mode").onchange = e => updateProject({ sync_mode: e.target.value });
   $("#r-sync-btn").onclick = async () => {
     const btn = $("#r-sync-btn");
     showError($("#r-error"), "");
@@ -1298,8 +1456,8 @@ function setupRemoteDialog() {
     btn.disabled = true;
     btn.textContent = "Syncing…";
     try {
-      const r = await api("POST", `/api/projects/${state.pid}/remote/sync`,
-        { mode: $("#r-mode").value, push: $("#r-push").checked });
+      // The server syncs with the project's saved mode.
+      const r = await api("POST", `/api/projects/${state.pid}/remote/sync`, { push: $("#r-push").checked });
       renderRemote(r);
       $("#r-log").textContent = r.log.join("\n");
       $("#r-log").hidden = false;
@@ -1309,7 +1467,7 @@ function setupRemoteDialog() {
       toast(e.message, true);
     } finally {
       btn.textContent = "Sync now";
-      btn.disabled = !$("#r-url").value.trim();
+      btn.disabled = !remoteUrl;
       loadTasks();
     }
   };
@@ -1323,6 +1481,7 @@ function init() {
   setupChat();
   setupBatchBar();
   setupRemoteDialog();
+  setupProjectSettings();
   $("#new-task").onsubmit = createTask;
   $("#commits-btn").onclick = showCommits;
   $("#terminal-btn").onclick = async () => {
@@ -1333,64 +1492,12 @@ function init() {
   };
   for (const btn of $$(".queue-tab")) btn.onclick = () => selectTab(btn.dataset.col);
   $(".queue-tabs").onkeydown = onTabKeydown;
-  $("#p-provider").onchange = async e => {
-    const p = currentProject();
-    const provider = e.target.value;
-    for (const id of ["#p-plan-model", "#p-code-model", "#c-model"]) fillModelSelect($(id), provider, "");
-    await ensureModels(provider);
-    await updateProject({
-      provider,
-      plan_model: modelFor(provider, p.plan_model || ""),
-      code_model: modelFor(provider, p.code_model || ""),
-      chat_model: modelFor(provider, p.chat_model || ""),
-    });
-    if (currentProject() === p) renderProjectModel();
-  };
-  $("#p-model-refresh").onclick = async () => {
-    const p = currentProject();
-    const provider = p.provider || "claude";
-    const job = ensureModels(provider, true);
-    refillProjectModels(p, provider);
-    await job;
-    if (currentProject() === p) {
-      refillProjectModels(p, provider);
-      toast(modelErrors[provider] ? `Couldn't list models: ${modelErrors[provider]}` : "Model list refreshed",
-        !!modelErrors[provider]);
-    }
-  };
-  for (const [id, key] of [["#p-plan-model", "plan_model"], ["#p-code-model", "code_model"], ["#c-model", "chat_model"]]) {
-    $(id).onchange = async e => {
-      const model = pickModel(e.target, currentProject().provider || "claude");
-      if (model === null) return;
-      await updateProject({ [key]: model });
-      renderChatWhere();
-    };
-  }
-  $("#p-plan-limit").onchange = async e => {
-    await updateProject({ plan_limit: e.target.value === "" ? 0 : Number(e.target.value) });
-    e.target.value = currentProject().plan_limit || "";
-  };
-  $("#p-rewrite-titles").onchange = async e => {
-    await updateProject({ rewrite_titles: e.target.checked });
-    e.target.checked = currentProject().rewrite_titles !== false;
-  };
-  $("#p-plan-trust").onchange = async e => {
-    await updateProject({ plan_trust: e.target.value });
-    renderProjectTrust();
-  };
-  $("#p-auto-sync").onchange = async e => {
-    await updateProject({ auto_sync: e.target.checked });
-    e.target.checked = currentProject().auto_sync === true;
-  };
-  $("#remove-project-btn").onclick = async () => {
-    const p = currentProject();
-    if (!p || !confirm(`Remove "${p.name}" from PatchGoblin? Files, tasks.json and git history are kept.`)) return;
-    try {
-      await api("DELETE", `/api/projects/${p.id}`);
-      state.pid = null;
-      closeDrawer();
-      await loadProjects();
-    } catch (e) { toast(e.message, true); }
+  // The chat drawer's model is a quick override that saves immediately.
+  $("#c-model").onchange = async e => {
+    const model = pickModel(e.target, currentProject().provider || "claude");
+    if (model === null) return;
+    await updateProject({ chat_model: model });
+    renderChatWhere();
   };
   for (const id of ["#d-title", "#d-desc", "#d-provider", "#d-plan-trust", "#d-plan"]) {
     $(id).addEventListener("input", () => { state.dirty = true; renderEditActions(); });
@@ -1442,13 +1549,19 @@ function init() {
     if (!chatPanel.hidden && isOutside(chatPanel, e.target) && !e.target.closest("#chat-btn")) closeChat();
   });
   document.addEventListener("keydown", e => {
+    // Esc closes an open dialog or drawer first; only then does it leave Project settings.
+    if (e.key === "Escape" && state.view === "settings" && $("#drawer").hidden && $("#chat").hidden
+        && !document.querySelector("dialog[open]")) {
+      closeProjectSettings();
+      return;
+    }
     if (e.key === "Escape" && $("#drawer").hidden && $("#chat").hidden && state.selected.size
         && !document.querySelector("dialog[open]")) clearSelection();
     if (e.key === "Escape" && !$("#drawer").hidden && !document.querySelector("dialog[open]")) closeDrawer();
     if (e.key === "Escape" && !$("#chat").hidden && !document.querySelector("dialog[open]")) closeChat();
     if ((e.ctrlKey || e.metaKey) && e.key === "s" && !$("#drawer").hidden) { e.preventDefault(); saveTask(); }
   });
-  window.addEventListener("beforeunload", e => { if (state.dirty) e.preventDefault(); });
+  window.addEventListener("beforeunload", e => { if (state.dirty || state.settingsDirty) e.preventDefault(); });
 
   loadProjects().catch(e => toast(e.message, true));
   setInterval(() => { if (!document.hidden) loadTasks(); }, 3000);

@@ -147,9 +147,29 @@ main { flex: 1; min-width: 0; overflow: auto; padding: 18px 22px; }
 .project-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }
 .project-head .muted { word-break: break-all; }
 .project-controls { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
-.project-controls select, .project-controls input { width: auto; }
-.project-controls #p-plan-limit { width: 6.5em; }
-.project-controls label.check { align-self: center; }
+
+/* ---- project settings (replaces the board) ---- */
+#project-settings-view { max-width: 760px; }
+#project-settings-view[hidden] { display: none; }
+.ps-head { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; flex-wrap: wrap; }
+#project-settings-form { display: flex; flex-direction: column; gap: 16px; }
+#project-settings-form select, #project-settings-form input[name="plan_limit"] { width: auto; min-width: 10em; }
+#project-settings-form input[name="plan_limit"] { min-width: 0; width: 6.5em; }
+#project-settings-form input[name="name"], #project-settings-form input[name="remote_url"] { max-width: 520px; }
+#project-settings-form fieldset > label:not(.check) { align-items: flex-start; }
+#project-settings-form .row label select { width: 100%; }
+#ps-where { word-break: break-all; }
+#ps-remote-status { margin: -2px 0 0; }
+.danger-zone { border-color: var(--line); border-top: 2px solid var(--danger); flex-direction: row; align-items: center; gap: 12px; }
+.danger-zone legend { color: var(--danger); }
+.ps-actions {
+  position: sticky; bottom: -18px; margin-top: 0; padding: 10px 0 14px;
+  background: var(--bg); border-top: 1px solid var(--line);
+}
+button.link {
+  background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; font-size: inherit;
+}
+button.link:hover { filter: none; }
 
 .new-task { display: flex; gap: 8px; margin: 12px 0 16px; }
 .new-task #nt-title { flex: 2; }
@@ -344,7 +364,7 @@ legend { padding: 0 4px; font-weight: 600; }
 .endpoint-list { display: flex; flex-direction: column; gap: 10px; }
 .endpoint { border: 1px dashed var(--line); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
 .endpoint .actions { align-items: center; }
-.endpoint [hidden], #p-model-refresh[hidden] { display: none; }
+.endpoint [hidden], #ps-model-refresh[hidden] { display: none; }
 #add-endpoint-btn { align-self: flex-start; }
 .field { display: flex; flex-direction: column; gap: 4px; }
 .path-row { display: flex; gap: 8px; }

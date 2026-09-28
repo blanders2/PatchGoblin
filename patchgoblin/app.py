@@ -303,7 +303,9 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         project = project_or_404(pid)
         data = body()
         fields = {}
-        if "name" in data and data["name"].strip():
+        if "name" in data:
+            if not isinstance(data["name"], str) or not data["name"].strip():
+                raise ValueError("Project name can't be blank.")
             fields["name"] = data["name"].strip()
         if "provider" in data:
             if not valid_provider(settings.get(), data["provider"]):
@@ -324,6 +326,17 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             fields["sync_mode"] = sync_mode(data["sync_mode"])
         if "plan_trust" in data:
             fields["plan_trust"] = plan_trust(data["plan_trust"])
+        remote_url = None
+        if "remote_url" in data:
+            if not isinstance(data["remote_url"], str):
+                raise ValueError("Remote URL must be a string.")
+            remote_url = data["remote_url"].strip()
+        # Everything is validated above, so a bad field changes nothing; the remote is set
+        # before saving so a git failure leaves projects.json untouched.
+        if remote_url is not None:
+            host = host_for(project)
+            if remote_url != gitops.get_remote(host, project["path"]):
+                gitops.set_remote(host, project["path"], remote_url)
         return jsonify(registry.update(project["id"], fields))
 
     def plan_limit(value) -> int:
