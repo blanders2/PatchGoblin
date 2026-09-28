@@ -161,6 +161,10 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             fields["plan_limit"] = plan_limit(data["plan_limit"])
         if "rewrite_titles" in data:
             fields["rewrite_titles"] = bool(data["rewrite_titles"])
+        if "auto_sync" in data:
+            fields["auto_sync"] = bool(data["auto_sync"])
+        if "sync_mode" in data:
+            fields["sync_mode"] = sync_mode(data["sync_mode"])
         return jsonify(registry.update(project["id"], fields))
 
     def plan_limit(value) -> int:
@@ -177,10 +181,15 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             raise ValueError("Plan limit must be a whole number ≥ 0.")
         return limit
 
+    def sync_mode(value) -> str:
+        if value not in gitops.SYNC_MODES:
+            raise ValueError("Sync mode must be one of: " + ", ".join(gitops.SYNC_MODES) + ".")
+        return value
+
     @app.delete("/api/projects/<pid>")
     def remove_project(pid):
         project_or_404(pid)
-        if any(key[0] == pid for key in engine.jobs) or engine.chat(pid).job is not None:
+        if engine.busy(pid):
             raise ValueError("Wait for this project's AI jobs to finish first.")
         registry.remove(pid)
         store.forget(pid)
@@ -191,6 +200,35 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     def commits(pid):
         project = project_or_404(pid)
         return jsonify(commits=gitops.recent_commits(host_for(project), project["path"]))
+
+    def remote_view(project: dict, status: dict) -> dict:
+        return {**status, "auto_sync": project.get("auto_sync") is True,
+                "sync_mode": project.get("sync_mode") or "ff-only"}
+
+    @app.get("/api/projects/<pid>/remote")
+    def get_remote(pid):
+        project = project_or_404(pid)
+        return jsonify(remote_view(project, gitops.remote_status(host_for(project), project["path"])))
+
+    @app.put("/api/projects/<pid>/remote")
+    def put_remote(pid):
+        project = project_or_404(pid)
+        url = body().get("url") or ""
+        if not isinstance(url, str):
+            raise ValueError("url must be a string.")
+        host = host_for(project)
+        gitops.set_remote(host, project["path"], url)
+        return jsonify(remote_view(project, gitops.remote_status(host, project["path"])))
+
+    @app.post("/api/projects/<pid>/remote/sync")
+    def sync_remote(pid):
+        project = project_or_404(pid)
+        data = body()
+        mode = sync_mode(data.get("mode") or project.get("sync_mode") or "ff-only")
+        if engine.busy(pid) or any(t["status"] in LOCKED for t in store.read(project, fresh=True)["tasks"]):
+            raise ValueError("Wait for this project's AI jobs to finish before syncing.")
+        result = engine.sync(project, mode, push=data.get("push", True) is not False)
+        return jsonify(remote_view(project, result))
 
     @app.post("/api/projects/<pid>/terminal")
     def terminal(pid):

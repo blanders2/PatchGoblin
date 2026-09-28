@@ -91,10 +91,22 @@ class Engine:
         # project's plan_limit can change at runtime and 0 means "no limit".
         self._plan_gate = threading.Condition()
         self._planners: dict[str, int] = {}
+        # Held by a project's runner while it claims and runs a task, and by git sync, so a
+        # manual sync never changes the working tree under a running task. Re-entrant so
+        # auto-sync can run inside the task's own run.
+        self._sync_locks: dict[str, threading.RLock] = {}
 
     # ---- helpers -------------------------------------------------------
     def job(self, pid: str, tid: int) -> Job | None:
         return self.jobs.get((pid, tid))
+
+    def busy(self, pid: str) -> bool:
+        """True while any AI job (planning, run or chat) is active for the project."""
+        return any(key[0] == pid for key in list(self.jobs)) or self.chat(pid).job is not None
+
+    def _sync_lock(self, pid: str) -> threading.RLock:
+        with self._lock:
+            return self._sync_locks.setdefault(pid, threading.RLock())
 
     def provider_for(self, project: dict, task: dict) -> tuple[str, str]:
         provider = task.get("provider") or project.get("provider") or "claude"
@@ -250,13 +262,15 @@ class Engine:
     def _runner(self, pid: str) -> None:
         while True:
             claimed = None
-            try:
-                project = self.registry.get(pid)
-                claimed = self._claim(project) if project else None
-            except Exception as exc:
-                log.warning("Queue for project %s unavailable: %s", pid, exc)
+            with self._sync_lock(pid):  # waits for a manual sync to finish before claiming
+                try:
+                    project = self.registry.get(pid)
+                    claimed = self._claim(project) if project else None
+                except Exception as exc:
+                    log.warning("Queue for project %s unavailable: %s", pid, exc)
+                if claimed:
+                    self._execute(project, *claimed)
             if claimed:
-                self._execute(project, *claimed)
                 continue
             with self._lock:
                 if pid in self._pending:
@@ -323,6 +337,8 @@ class Engine:
                     if current is not None:
                         current["commit"] = commit
                         log_event(current, f"Committed {commit[:10]}" if commit else "No file changes to commit")
+                if project.get("auto_sync") is True:
+                    self._auto_sync(project, tid, job)
         except Exception as exc:
             log.exception("Run of %s#%s failed", pid, tid)
             try:
@@ -336,6 +352,45 @@ class Engine:
                 log.exception("Could not record failure for %s#%s", pid, tid)
         finally:
             self.jobs.pop((pid, tid), None)
+
+    # ---- remote sync -----------------------------------------------------
+    def sync(self, project: dict, mode: str, push: bool = True, checkpoint: bool = True) -> dict:
+        """Manual sync with origin. The caller checks that no AI job is active."""
+        pid = project["id"]
+        lock = self._sync_lock(pid)
+        if not lock.acquire(blocking=False):
+            raise ValueError("A sync or task run is already in progress for this project.")
+        try:
+            return gitops.sync(host_for(project), project["path"], mode=mode, push=push,
+                               checkpoint=checkpoint, guard=self.store.lock(pid))
+        finally:
+            self.store.forget(pid)  # a pull may have replaced tasks.json
+            lock.release()
+
+    def _auto_sync(self, project: dict, tid: int, job: Job) -> None:
+        """Sync after a task's commit. Failures are logged on the task, never fail it."""
+        pid = project["id"]
+        host, path = host_for(project), project["path"]
+        try:
+            if not gitops.get_remote(host, path):
+                return
+            job.write(f"[{now()}] Auto-sync with origin\n")
+            # Recording the commit hash left tasks.json changed; commit it before pulling.
+            with self._sync_lock(pid):
+                result = gitops.sync(host, path, mode=project.get("sync_mode") or "ff-only", push=True,
+                                     message=f"PatchGoblin: record task #{tid} result",
+                                     guard=self.store.lock(pid))
+            job.write("".join(f"  {line}\n" for line in result["log"]))
+            event = "Synced with origin"
+        except (HostError, ValueError) as exc:
+            job.write(f"Auto-sync failed: {exc}\n")
+            event = f"Auto-sync failed: {exc}"
+        finally:
+            self.store.forget(pid)
+        with self.store.edit(project) as doc:
+            current = find_task(doc, tid)
+            if current is not None:
+                log_event(current, event)
 
     # ---- chat ------------------------------------------------------------
     def chat(self, pid: str) -> Chat:

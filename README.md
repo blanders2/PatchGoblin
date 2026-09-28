@@ -71,9 +71,24 @@ within the current tab.
 **Git.** Before a run, any uncommitted changes you made are committed as a
 `checkpoint before task #N`, so the AI's commit contains only its own work. After a
 successful run, everything is committed as `PatchGoblin: task #N <title>` with the
-AI's summary. Nothing is ever pushed. The commit uses your git identity if it's set,
-otherwise `PatchGoblin <patchgoblin@localhost>`. Failed runs leave their changes
-uncommitted so you can inspect them. The **Commits** button shows recent history.
+AI's summary. Nothing is pushed unless you sync (see below). The commit uses your git
+identity if it's set, otherwise `PatchGoblin <patchgoblin@localhost>`. Failed runs
+leave their changes uncommitted so you can inspect them. The **Commits** button shows
+recent history.
+
+**Remote sync.** The **Sync** button sets the project's `origin` URL and syncs with it.
+A sync commits any uncommitted changes (including `tasks.json`) as `checkpoint before
+sync`, fetches `origin`, brings in its commits for the current branch, then pushes
+(`push -u`, so the branch tracks `origin`). Choose **Fast-forward only** (the default;
+diverged history is refused) or **Rebase** (your commits are replayed on top of
+origin's). No merge commits are ever made, and a conflicting rebase is aborted, so the
+repository is never left mid-merge. Sync is refused while any AI job or chat is running
+in the project. Tick **Auto-sync** on a project (off by default) to sync after every
+successful task commit; if that sync fails, the task stays done and the failure is
+written to its history. Credentials come from your own git setup (SSH keys and agent,
+or a credential manager); prompts are turned off, so missing credentials fail at once
+instead of hanging. For SSH projects the remote is reached from the SSH host. A URL
+with an embedded token is stored in `.git/config` and shown in the dialog.
 
 **Chat.** The **Chat** button opens a conversation with the project's AI, running in
 the project directory with the same read-only access as planning (the planning command

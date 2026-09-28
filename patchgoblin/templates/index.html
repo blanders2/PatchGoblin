@@ -51,9 +51,13 @@
           <label class="check" title="When the AI plans a task, let it rewrite the task title">
             <input type="checkbox" id="p-rewrite-titles"> AI titles
           </label>
+          <label class="check" title="After each successful task commit, pull and push to origin">
+            <input type="checkbox" id="p-auto-sync"> Auto-sync
+          </label>
           <button class="ghost" id="chat-btn" title="Ask the AI about this project (read-only)">Chat</button>
           <button class="ghost" id="terminal-btn" title="Open a terminal in the project directory">Terminal</button>
           <button class="ghost" id="commits-btn">Commits</button>
+          <button class="ghost" id="sync-btn" title="Pull from and push to the origin git remote">Sync</button>
           <button class="ghost danger" id="remove-project-btn" title="Unregister (files are kept)">Remove</button>
         </div>
       </div>
@@ -226,6 +230,34 @@
   <h2>Recent commits</h2>
   <ul id="commit-list" class="commits"></ul>
   <div class="actions right"><button type="button" data-close="commits-dialog">Close</button></div>
+</dialog>
+
+<!-- Git remote sync -->
+<dialog id="remote-dialog">
+  <h2>Sync with remote</h2>
+  <div class="remote-body">
+    <div class="row">
+      <label class="grow">Remote URL (origin)
+        <input id="r-url" placeholder="git@github.com:me/repo.git or https://…" autocomplete="off">
+      </label>
+      <button type="button" id="r-save-btn">Save</button>
+    </div>
+    <p id="r-status" class="muted small remote-status"></p>
+    <label>Mode
+      <select id="r-mode">
+        <option value="ff-only">Fast-forward only</option>
+        <option value="rebase">Rebase local commits</option>
+      </select>
+    </label>
+    <label class="check"><input type="checkbox" id="r-push" checked> Push after pull</label>
+    <p class="muted small">Uncommitted changes are committed first. Conflicts or diverged history abort the sync; no merge commits are made.</p>
+    <pre id="r-log" class="remote-log" hidden></pre>
+    <div id="r-error" class="error" hidden></div>
+  </div>
+  <div class="actions right">
+    <button type="button" id="r-sync-btn" class="primary">Sync now</button>
+    <button type="button" data-close="remote-dialog">Close</button>
+  </div>
 </dialog>
 
 <!-- Settings dialog -->

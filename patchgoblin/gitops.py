@@ -1,6 +1,10 @@
 """Git bookkeeping for projects: every project is its own repository, and each
-completed task is recorded as a commit. Nothing is ever pushed."""
+completed task is recorded as a commit. Commits are only pushed by an explicit
+sync with the ``origin`` remote: a manual Sync, or the project's opt-in auto-sync."""
 from __future__ import annotations
+
+import contextlib
+import re
 
 from .hosts import HostError
 
@@ -19,8 +23,19 @@ __pycache__/
 FALLBACK_IDENTITY = ["-c", "user.name=PatchGoblin", "-c", "user.email=patchgoblin@localhost"]
 
 
-def git(host, path: str, *args: str, timeout: float = 300):
-    return host.run(["git", *args], cwd=path, timeout=timeout)
+REMOTE = "origin"
+SYNC_MODES = ("ff-only", "rebase")
+# Talking to a remote must fail fast instead of waiting on a credential prompt nobody can see.
+NOPROMPT_ENV = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never", "SSH_ASKPASS_REQUIRE": "never"}
+NOPROMPT_ARGS = ["-c", "credential.interactive=never"]
+
+
+def git(host, path: str, *args: str, timeout: float = 300, env: dict | None = None):
+    return host.run(["git", *args], cwd=path, timeout=timeout, env=env)
+
+
+def _remote_git(host, path: str, *args: str):
+    return git(host, path, *NOPROMPT_ARGS, *args, env=NOPROMPT_ENV)
 
 
 def _check(res, what: str):
@@ -81,3 +96,103 @@ def recent_commits(host, path: str, limit: int = 30) -> list[dict]:
         if len(parts) == 4:
             commits.append(dict(zip(("hash", "author", "when", "subject"), parts)))
     return commits
+
+
+# ---- remote sync ------------------------------------------------------------
+_BAD_URL = re.compile(r"[\s\x00-\x1f\x7f]")
+
+
+def get_remote(host, path: str, name: str = REMOTE) -> str:
+    res = git(host, path, "remote", "get-url", name)
+    return res.stdout.strip() if res.ok else ""
+
+
+def set_remote(host, path: str, url: str, name: str = REMOTE) -> None:
+    """Point ``name`` at ``url``; an empty url removes the remote."""
+    url = (url or "").strip()
+    if not url:
+        git(host, path, "remote", "remove", name)  # a missing remote is fine
+        return
+    if url.startswith("-") or _BAD_URL.search(url):
+        raise ValueError("Remote URL must not start with '-' or contain spaces or control characters.")
+    verb = "set-url" if get_remote(host, path, name) else "add"
+    _check(git(host, path, "remote", verb, name, url), f"remote {verb}")
+
+
+def current_branch(host, path: str) -> str:
+    res = git(host, path, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if not res.ok or not res.stdout.strip():
+        raise HostError("detached HEAD; cannot sync")
+    return res.stdout.strip()
+
+
+def _has_head(host, path: str) -> bool:
+    return git(host, path, "rev-parse", "--verify", "--quiet", "HEAD").ok
+
+
+def remote_status(host, path: str) -> dict:
+    """Remote, branch and ahead/behind counts from local refs only (never fetches)."""
+    url = get_remote(host, path)
+    res = git(host, path, "symbolic-ref", "--quiet", "--short", "HEAD")
+    branch = res.stdout.strip() if res.ok else ""
+    res = git(host, path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    upstream = res.stdout.strip() if res.ok else ""
+    ahead = behind = 0
+    if upstream:
+        res = git(host, path, "rev-list", "--left-right", "--count", "HEAD...@{u}")
+        parts = res.stdout.split() if res.ok else []
+        if len(parts) == 2:
+            ahead, behind = int(parts[0]), int(parts[1])
+    elif url and _has_head(host, path):
+        res = git(host, path, "rev-list", "--count", "HEAD")
+        ahead = int(res.stdout.strip() or 0) if res.ok else 0
+    return {"url": url, "branch": branch, "upstream": upstream, "ahead": ahead, "behind": behind,
+            "dirty": has_changes(host, path)}
+
+
+def sync(host, path: str, mode: str = "ff-only", push: bool = True, checkpoint: bool = True,
+         message: str = "PatchGoblin: checkpoint before sync", guard=None) -> dict:
+    """Fetch origin, bring in its commits for the current branch, then push.
+
+    Never creates merge commits: ``ff-only`` refuses diverged history and ``rebase``
+    replays local commits on top of origin's (aborting cleanly on conflict).
+    ``guard`` is a context manager held while the working tree is being changed, so
+    nothing else writes to it (e.g. tasks.json) mid-merge.
+    """
+    if mode not in SYNC_MODES:
+        raise ValueError(f"Unknown sync mode {mode!r}.")
+    if not get_remote(host, path):
+        raise HostError(f"no remote configured; set the {REMOTE} URL first")
+    guard = guard if guard is not None else contextlib.nullcontext()
+    branch = current_branch(host, path)
+    log = []
+
+    _check(_remote_git(host, path, "fetch", REMOTE), "fetch")
+    log.append(f"Fetched {REMOTE}")
+    tracking = f"refs/remotes/{REMOTE}/{branch}"
+    with guard:
+        if checkpoint and has_changes(host, path):
+            sha = commit_all(host, path, message)
+            log.append(f"Committed local changes as {sha[:10]}")
+        if not git(host, path, "rev-parse", "--verify", "--quiet", tracking).ok:
+            log.append(f"{REMOTE} has no branch {branch} yet")
+        elif mode == "rebase" and _has_head(host, path):
+            res = git(host, path, *_identity(host, path), "rebase", tracking)
+            if not res.ok:
+                git(host, path, "rebase", "--abort")
+                raise HostError(f"git rebase onto {REMOTE}/{branch} failed and was aborted: "
+                                f"{(res.stderr or res.stdout).strip()}")
+            log.append(f"Rebased onto {REMOTE}/{branch}")
+        else:
+            res = git(host, path, "merge", "--ff-only", tracking)
+            if not res.ok:
+                raise HostError(f"Could not fast-forward to {REMOTE}/{branch} (histories have diverged? "
+                                f"try rebase mode): {(res.stderr or res.stdout).strip()}")
+            log.append(f"Fast-forwarded to {REMOTE}/{branch}")
+
+    if push:
+        if not _has_head(host, path):
+            raise HostError("nothing to push: the repository has no commits yet")
+        _check(_remote_git(host, path, "push", "-u", REMOTE, branch), "push")
+        log.append(f"Pushed {branch} to {REMOTE}")
+    return {"log": log, **remote_status(host, path)}

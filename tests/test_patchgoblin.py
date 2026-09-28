@@ -382,6 +382,203 @@ class WorkflowTests(AppTestCase):
         self.assertIn("interrupted", task["error"])
 
 
+def git(path, *args, check=True):
+    return subprocess.run(["git", "-c", "user.name=T", "-c", "user.email=t@example.com", *args],
+                          cwd=path, capture_output=True, text=True, check=check).stdout.strip()
+
+
+class RemoteTests(AppTestCase):
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.dict(os.environ, {"GIT_TERMINAL_PROMPT": "0"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.bare = os.path.join(self.tmp.name, "origin.git")
+        subprocess.run(["git", "init", "-q", "--bare", self.bare], check=True)
+
+    def setup_remote(self):
+        pid = self.add_project()["id"]
+        res = self.client.put(f"/api/projects/{pid}/remote", headers=H, json={"url": self.bare})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        return pid, res.get_json()
+
+    def sync(self, pid, **body):
+        return self.client.post(f"/api/projects/{pid}/remote/sync", headers=H, json=body)
+
+    def branch(self):
+        return git(self.proj_dir, "symbolic-ref", "--short", "HEAD")
+
+    def clone(self):
+        other = os.path.join(self.tmp.name, "other")
+        subprocess.run(["git", "clone", "-q", "-b", self.branch(), self.bare, other], check=True)
+        return other
+
+    def commit_file(self, repo, name, push=False):
+        with open(os.path.join(repo, name), "w") as fh:
+            fh.write(name + "\n")
+        git(repo, "add", name)
+        git(repo, "commit", "-q", "-m", f"add {name}")
+        if push:
+            git(repo, "push", "-q", "origin", "HEAD")
+
+    def run_task(self, pid):
+        tid = self.post_task(pid, "Create output file")["id"]
+        self.client.patch(f"/api/projects/{pid}/tasks/{tid}", headers=H, json={"plan": "do it"})
+        self.action(pid, tid, "mark_planned")
+        self.assertEqual(self.action(pid, tid, "queue").status_code, 200)
+        return self.wait_for(pid, tid, {"done", "failed"})
+
+    def test_remote_set_and_status(self):
+        pid, status = self.setup_remote()
+        self.assertEqual(status["url"], self.bare)
+        self.assertEqual(status["branch"], self.branch())
+        self.assertGreaterEqual(status["ahead"], 1)
+        self.assertEqual(status["upstream"], "")
+        got = self.client.get(f"/api/projects/{pid}/remote").get_json()
+        self.assertEqual(got["url"], self.bare)
+        self.assertIs(got["auto_sync"], False)
+        self.assertEqual(got["sync_mode"], "ff-only")
+        # An empty URL removes the remote.
+        res = self.client.put(f"/api/projects/{pid}/remote", headers=H, json={"url": ""})
+        self.assertEqual(res.get_json()["url"], "")
+        self.assertEqual(self.sync(pid).status_code, 502)
+
+    def test_set_remote_rejects_option_like_url(self):
+        pid = self.add_project()["id"]
+        for bad in ("--upload-pack=touch /tmp/x", "a b", "x\ny"):
+            res = self.client.put(f"/api/projects/{pid}/remote", headers=H, json={"url": bad})
+            self.assertEqual(res.status_code, 400, bad)
+        self.assertEqual(git(self.proj_dir, "remote"), "")
+
+    def test_sync_pushes_to_empty_remote(self):
+        pid, _ = self.setup_remote()
+        res = self.sync(pid)
+        data = res.get_json()
+        self.assertEqual(res.status_code, 200, data)
+        head = git(self.proj_dir, "rev-parse", "HEAD")
+        self.assertEqual(git(self.bare, "rev-parse", self.branch()), head)
+        self.assertEqual((data["ahead"], data["behind"]), (0, 0))
+        self.assertEqual(data["upstream"], f"origin/{self.branch()}")
+        self.assertTrue(any("Pushed" in line for line in data["log"]))
+
+    def test_sync_commits_dirty_tree_first(self):
+        pid, _ = self.setup_remote()
+        with open(os.path.join(self.proj_dir, "notes.txt"), "w") as fh:
+            fh.write("mine\n")
+        self.assertEqual(self.sync(pid).status_code, 200)
+        self.assertEqual(git_log(self.proj_dir)[0], "PatchGoblin: checkpoint before sync")
+        self.assertEqual(git(self.bare, "log", "-1", "--pretty=%s", self.branch()),
+                         "PatchGoblin: checkpoint before sync")
+
+    def test_sync_pulls_fast_forward(self):
+        pid, _ = self.setup_remote()
+        self.assertEqual(self.sync(pid).status_code, 200)
+        other = self.clone()
+        self.commit_file(other, "remote.txt", push=True)
+        res = self.sync(pid, push=False)
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertTrue(os.path.exists(os.path.join(self.proj_dir, "remote.txt")))
+        self.assertEqual(git_log(self.proj_dir)[0], "add remote.txt")
+
+    def diverge(self, pid):
+        self.assertEqual(self.sync(pid).status_code, 200)
+        other = self.clone()
+        self.commit_file(other, "remote.txt", push=True)
+        self.commit_file(self.proj_dir, "local.txt")
+
+    def test_sync_diverged_ff_only_fails_cleanly(self):
+        pid, _ = self.setup_remote()
+        self.diverge(pid)
+        head = git(self.proj_dir, "rev-parse", "HEAD")
+        res = self.sync(pid, mode="ff-only")
+        self.assertEqual(res.status_code, 502)
+        self.assertIn("fast-forward", res.get_json()["error"])
+        self.assertEqual(git(self.proj_dir, "rev-parse", "HEAD"), head)
+        self.assertEqual(git(self.proj_dir, "status", "--porcelain"), "")
+        gitdir = os.path.join(self.proj_dir, ".git")
+        for marker in ("MERGE_HEAD", "rebase-merge", "rebase-apply"):
+            self.assertFalse(os.path.exists(os.path.join(gitdir, marker)))
+
+    def test_sync_rebase_mode(self):
+        pid, _ = self.setup_remote()
+        self.diverge(pid)
+        res = self.sync(pid, mode="rebase")
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertEqual(git_log(self.proj_dir)[:2], ["add local.txt", "add remote.txt"])
+        self.assertEqual(git(self.proj_dir, "rev-list", "--merges", "--count", "HEAD"), "0")
+        self.assertEqual(git(self.bare, "rev-parse", self.branch()), git(self.proj_dir, "rev-parse", "HEAD"))
+
+    def test_sync_rebase_conflict_is_aborted(self):
+        pid, _ = self.setup_remote()
+        self.assertEqual(self.sync(pid).status_code, 200)
+        other = self.clone()
+        self.commit_file(other, "same.txt", push=True)
+        with open(os.path.join(self.proj_dir, "same.txt"), "w") as fh:
+            fh.write("different\n")
+        git(self.proj_dir, "add", "same.txt")
+        git(self.proj_dir, "commit", "-q", "-m", "local same")
+        res = self.sync(pid, mode="rebase")
+        self.assertEqual(res.status_code, 502)
+        self.assertIn("aborted", res.get_json()["error"])
+        gitdir = os.path.join(self.proj_dir, ".git")
+        self.assertFalse(os.path.exists(os.path.join(gitdir, "rebase-merge")))
+        self.assertEqual(git_log(self.proj_dir)[0], "local same")
+
+    def test_sync_rejected_while_busy(self):
+        pid, _ = self.setup_remote()
+        self.app.config["ENGINE"].jobs[(pid, 99)] = object()
+        try:
+            self.assertEqual(self.sync(pid).status_code, 400)
+        finally:
+            del self.app.config["ENGINE"].jobs[(pid, 99)]
+        self.assertEqual(self.sync(pid, mode="bogus").status_code, 400)
+        self.assertEqual(self.sync(pid).status_code, 200)
+
+    def test_auto_sync_off_by_default(self):
+        pid, _ = self.setup_remote()
+        task = self.run_task(pid)
+        self.assertEqual(task["status"], "done", task["error"])
+        self.assertEqual(git(self.bare, "rev-list", "--all"), "")
+
+    def test_auto_sync_pushes_after_task(self):
+        pid, _ = self.setup_remote()
+        self.client.patch(f"/api/projects/{pid}", headers=H, json={"auto_sync": True})
+        task = self.run_task(pid)
+        self.assertEqual(task["status"], "done", task["error"])
+        self.assertTrue(any(h["event"] == "Synced with origin" for h in task["history"]), task["history"])
+        pushed = git(self.bare, "log", "--pretty=%s", self.branch()).splitlines()
+        self.assertTrue(any(s.startswith("PatchGoblin: task #1") for s in pushed), pushed)
+        self.assertIn(task["commit"], git(self.bare, "rev-list", self.branch()))
+
+    def test_auto_sync_failure_does_not_fail_task(self):
+        pid = self.add_project()["id"]
+        self.client.put(f"/api/projects/{pid}/remote", headers=H,
+                        json={"url": os.path.join(self.tmp.name, "missing.git")})
+        self.client.patch(f"/api/projects/{pid}", headers=H, json={"auto_sync": True})
+        task = self.run_task(pid)
+        self.assertEqual(task["status"], "done", task["error"])
+        self.assertTrue(any(h["event"].startswith("Auto-sync failed") for h in task["history"]),
+                        task["history"])
+
+    def test_update_project_auto_sync_field(self):
+        pid = self.add_project()["id"]
+        res = self.client.patch(f"/api/projects/{pid}", headers=H,
+                                json={"auto_sync": True, "sync_mode": "rebase"})
+        self.assertIs(res.get_json()["auto_sync"], True)
+        self.assertEqual(res.get_json()["sync_mode"], "rebase")
+        got = self.client.get(f"/api/projects/{pid}/remote").get_json()
+        self.assertEqual((got["auto_sync"], got["sync_mode"]), (True, "rebase"))
+        res = self.client.patch(f"/api/projects/{pid}", headers=H, json={"sync_mode": "merge"})
+        self.assertEqual(res.status_code, 400)
+
+    def test_ssh_run_env_is_quoted(self):
+        host = SSHHost("me@box")
+        with mock.patch("patchgoblin.hosts.communicate") as comm:
+            comm.return_value = mock.Mock(ok=True)
+            host.run(["git", "fetch"], cwd="/srv/p", env={"GIT_TERMINAL_PROMPT": "0"})
+        self.assertEqual(comm.call_args.args[0][-1], "cd /srv/p && env GIT_TERMINAL_PROMPT=0 git fetch")
+
+
 class ChatTests(AppTestCase):
     def wait_chat(self, pid, timeout=30):
         deadline = time.time() + timeout

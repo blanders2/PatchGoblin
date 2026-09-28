@@ -155,6 +155,7 @@ async function selectProject(pid) {
   fillModelSelect($("#p-model"), p.provider || "claude", p.model || "");
   $("#p-plan-limit").value = p.plan_limit || "";
   $("#p-rewrite-titles").checked = p.rewrite_titles !== false;
+  $("#p-auto-sync").checked = p.auto_sync === true;
   state.tasks = [];
   renderBoard();
   loadChat();
@@ -916,6 +917,63 @@ async function showCommits() {
   } catch (e) { list.replaceChildren(el("li", { class: "error" }, e.message)); }
 }
 
+function renderRemote(r) {
+  $("#r-url").value = r.url || "";
+  $("#r-mode").value = r.sync_mode || "ff-only";
+  const parts = [r.branch ? `Branch ${r.branch}` : "Detached HEAD"];
+  if (r.upstream) parts.push(`tracking ${r.upstream}`, `${r.ahead} ahead, ${r.behind} behind`);
+  else if (r.url) parts.push(`not pushed yet (${r.ahead} local commit${r.ahead === 1 ? "" : "s"})`);
+  else parts.push("no remote set");
+  if (r.dirty) parts.push("uncommitted changes");
+  $("#r-status").textContent = parts.join(" · ");
+  $("#r-sync-btn").disabled = !r.url;
+}
+
+async function showRemote() {
+  showError($("#r-error"), "");
+  $("#r-log").hidden = true;
+  $("#r-status").textContent = "Loading…";
+  $("#remote-dialog").showModal();
+  try {
+    renderRemote(await api("GET", `/api/projects/${state.pid}/remote`));
+  } catch (e) { $("#r-status").textContent = ""; showError($("#r-error"), e.message); }
+}
+
+function setupRemoteDialog() {
+  $("#sync-btn").onclick = showRemote;
+  $("#r-save-btn").onclick = async () => {
+    showError($("#r-error"), "");
+    try {
+      renderRemote(await api("PUT", `/api/projects/${state.pid}/remote`, { url: $("#r-url").value }));
+      toast("Remote saved");
+    } catch (e) { showError($("#r-error"), e.message); }
+  };
+  $("#r-url").onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); $("#r-save-btn").click(); } };
+  $("#r-mode").onchange = e => updateProject({ sync_mode: e.target.value });
+  $("#r-sync-btn").onclick = async () => {
+    const btn = $("#r-sync-btn");
+    showError($("#r-error"), "");
+    $("#r-log").hidden = true;
+    btn.disabled = true;
+    btn.textContent = "Syncing…";
+    try {
+      const r = await api("POST", `/api/projects/${state.pid}/remote/sync`,
+        { mode: $("#r-mode").value, push: $("#r-push").checked });
+      renderRemote(r);
+      $("#r-log").textContent = r.log.join("\n");
+      $("#r-log").hidden = false;
+      toast("Synced");
+    } catch (e) {
+      showError($("#r-error"), e.message);
+      toast(e.message, true);
+    } finally {
+      btn.textContent = "Sync now";
+      btn.disabled = !$("#r-url").value.trim();
+      loadTasks();
+    }
+  };
+}
+
 /* ---------------- wiring ---------------- */
 
 function init() {
@@ -923,6 +981,7 @@ function init() {
   setupSettingsDialog();
   setupChat();
   setupBatchBar();
+  setupRemoteDialog();
   $("#new-task").onsubmit = createTask;
   $("#commits-btn").onclick = showCommits;
   $("#terminal-btn").onclick = async () => {
@@ -950,6 +1009,10 @@ function init() {
   $("#p-rewrite-titles").onchange = async e => {
     await updateProject({ rewrite_titles: e.target.checked });
     e.target.checked = currentProject().rewrite_titles !== false;
+  };
+  $("#p-auto-sync").onchange = async e => {
+    await updateProject({ auto_sync: e.target.checked });
+    e.target.checked = currentProject().auto_sync === true;
   };
   $("#remove-project-btn").onclick = async () => {
     const p = currentProject();

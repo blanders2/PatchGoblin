@@ -193,6 +193,10 @@ class TaskStore:
             yield doc
             self.write(project, doc)
 
+    def lock(self, pid: str) -> threading.RLock:
+        """The lock serializing tasks.json edits (held by git sync while it changes the tree)."""
+        return self._locks[pid]
+
     def forget(self, pid: str) -> None:
         self._cache.pop(pid, None)
 

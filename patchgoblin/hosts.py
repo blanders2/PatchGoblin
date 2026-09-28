@@ -60,9 +60,15 @@ def kill_tree(proc: subprocess.Popen) -> None:
 
 
 def communicate(argv, cwd=None, input: Optional[str] = None, timeout: Optional[float] = None,
-                on_output: OutputFn = None, on_start: StartFn = None, shell: bool = False) -> Result:
-    """Run a process, streaming stdout+stderr lines to ``on_output`` as they arrive."""
+                on_output: OutputFn = None, on_start: StartFn = None, shell: bool = False,
+                env: Optional[dict] = None) -> Result:
+    """Run a process, streaming stdout+stderr lines to ``on_output`` as they arrive.
+
+    ``env`` holds extra environment variables added to this process's own environment.
+    """
     kwargs = {}
+    if env:
+        kwargs["env"] = {**os.environ, **env}
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     else:
@@ -188,10 +194,10 @@ class LocalHost:
 
     def run(self, argv: list[str], cwd: str, input: Optional[str] = None,
             timeout: Optional[float] = None, on_output: OutputFn = None,
-            on_start: StartFn = None, login: bool = False) -> Result:
+            on_start: StartFn = None, login: bool = False, env: Optional[dict] = None) -> Result:
         exe = shutil.which(argv[0]) or argv[0]
         return communicate([exe, *argv[1:]], cwd=cwd, input=input, timeout=timeout,
-                           on_output=on_output, on_start=on_start)
+                           on_output=on_output, on_start=on_start, env=env)
 
     def run_shell(self, command: str, cwd: str, timeout: Optional[float] = None,
                   on_output: OutputFn = None, on_start: StartFn = None) -> Result:
@@ -292,8 +298,9 @@ class SSHHost:
 
     def run(self, argv: list[str], cwd: str, input: Optional[str] = None,
             timeout: Optional[float] = None, on_output: OutputFn = None,
-            on_start: StartFn = None, login: bool = False) -> Result:
-        script = f"cd {shlex.quote(cwd)} && " + " ".join(shlex.quote(a) for a in argv)
+            on_start: StartFn = None, login: bool = False, env: Optional[dict] = None) -> Result:
+        prefix = ["env", *(f"{k}={v}" for k, v in env.items())] if env else []
+        script = f"cd {shlex.quote(cwd)} && " + " ".join(shlex.quote(a) for a in [*prefix, *argv])
         if login:
             script = self._login(script)
         return self._exec(script, input=input, timeout=timeout, on_output=on_output, on_start=on_start)
