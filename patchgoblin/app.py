@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import threading
+import time
 from urllib.parse import urlparse
 
 from flask import Flask, abort, jsonify, render_template, request
@@ -10,12 +13,88 @@ from flask import Flask, abort, jsonify, render_template, request
 from . import gitops
 from .engine import Engine
 from .hosts import HostError, host_for, open_terminal
-from .providers import plan_questions
-from .store import (MODELS, PROVIDERS, STATUSES, Registry, Settings, TaskStore, empty_doc, find_task,
-                    log_event, new_task, now, set_status, tasks_path)
+from .providers import endpoint_key, list_models, plan_questions
+from .store import (CLI_PROVIDERS, MODELS, STATUSES, Registry, Settings, TaskStore, empty_doc, find_endpoint,
+                    find_task, log_event, new_task, now, provider_choices, set_status, tasks_path,
+                    valid_provider)
 
 EDITABLE = ("title", "description", "plan", "provider")
 LOCKED = ("planning", "running")
+ENDPOINT_ID = re.compile(r"^[a-z0-9_-]{1,32}$")
+MODELS_CACHE_SECONDS = 600
+
+
+def model_suggestions(settings: dict) -> dict:
+    """Model dropdown suggestions per provider id (endpoint lists are extended live in the UI)."""
+    out = {p: list(MODELS[p]) for p in CLI_PROVIDERS}
+    for ep in settings["endpoints"]:
+        builtin = list(MODELS["openai"]) if ep["id"] == "openai" else []
+        out[ep["id"]] = list(dict.fromkeys(ep["models"] + ([ep["model"]] if ep["model"] else []) + builtin))
+    return out
+
+
+def _slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9_-]+", "-", name.lower()).strip("-")[:32].strip("-") or "api"
+
+
+def clean_endpoints(values, saved: list[dict]) -> list[dict]:
+    """Validate endpoints sent by the Settings form. Blank keys keep the saved key for that id."""
+    if not isinstance(values, list):
+        raise ValueError("endpoints must be a list.")
+    saved_by_id = {ep["id"]: ep for ep in saved}
+    out, seen = [], set(CLI_PROVIDERS)
+    for raw in values:
+        if not isinstance(raw, dict):
+            raise ValueError("Each endpoint must be an object.")
+        name = str(raw.get("name") or "").strip()
+        if not name:
+            raise ValueError("Every endpoint needs a name.")
+        eid = str(raw.get("id") or "").strip()
+        if not eid:
+            base, n, eid = _slug(name), 2, _slug(name)
+            while eid in seen or eid in (e.get("id") for e in values if isinstance(e, dict)):
+                eid = f"{base[:29]}-{n}"
+                n += 1
+        if not ENDPOINT_ID.match(eid):
+            raise ValueError(f"Endpoint id {eid!r} must be 1–32 lowercase letters, digits, - or _.")
+        if eid in seen:
+            raise ValueError(f"Endpoint id {eid!r} is reserved or used twice.")
+        seen.add(eid)
+        base_url = str(raw.get("base_url") or "").strip()
+        if not re.match(r"^https?://[^/\s]+", base_url, re.IGNORECASE):
+            raise ValueError(f"{name}: the base URL must start with http:// or https://.")
+        try:
+            max_steps = int(40 if raw.get("max_steps") in (None, "") else raw["max_steps"])
+        except (TypeError, ValueError):
+            raise ValueError(f"{name}: max steps must be a whole number.") from None
+        if not 1 <= max_steps <= 200:
+            raise ValueError(f"{name}: max steps must be between 1 and 200.")
+        headers = raw.get("headers") or {}
+        if not isinstance(headers, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) and k.strip()
+                and not any(c in k + v for c in "\r\n") for k, v in headers.items()):
+            raise ValueError(f"{name}: headers must be single-line 'Name: value' strings.")
+        models = raw.get("models") or []
+        if isinstance(models, str):
+            models = models.replace(",", " ").split()
+        if not isinstance(models, list) or not all(isinstance(m, str) for m in models):
+            raise ValueError(f"{name}: model suggestions must be a list of names.")
+        key = raw.get("api_key") or ""
+        if not isinstance(key, str) or any(c in key for c in "\r\n"):
+            raise ValueError(f"{name}: the API key must be a single line.")
+        key = key.strip()
+        if not key and not raw.get("api_key_clear"):
+            key = saved_by_id.get(eid, {}).get("api_key", "")
+        out.append({
+            "id": eid, "name": name, "base_url": base_url, "api_key": key,
+            "api_key_env": str(raw.get("api_key_env") or "").strip(),
+            "headers": {k.strip(): v.strip() for k, v in headers.items()},
+            "model": str(raw.get("model") or "").strip(),
+            "models": list(dict.fromkeys(m.strip() for m in models if m.strip())),
+            "allow_commands": bool(raw.get("allow_commands")),
+            "max_steps": max_steps,
+        })
+    return out
 
 
 def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
@@ -76,18 +155,66 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     # ---- pages --------------------------------------------------------------
     @app.get("/")
     def index():
-        return render_template("index.html", statuses=STATUSES, providers=PROVIDERS, models=MODELS)
+        current = settings.get()
+        return render_template("index.html", statuses=STATUSES, providers=provider_choices(current),
+                               models=model_suggestions(current))
 
     # ---- settings -----------------------------------------------------------
+    def settings_view(values: dict) -> dict:
+        """Settings for the browser: saved keys are never sent, only whether one exists."""
+        endpoints = []
+        for ep in values["endpoints"]:
+            env = ep["api_key_env"].strip()
+            endpoints.append({**ep, "api_key": "", "api_key_saved": bool(ep["api_key"].strip()),
+                              "api_key_env_present": bool(env and os.environ.get(env))})
+        return {**values, "endpoints": endpoints, "providers": provider_choices(values),
+                "models": model_suggestions(values)}
+
     @app.get("/api/settings")
     def get_settings():
-        return jsonify(settings.get() | {"openai_key_present": bool(os.environ.get("OPENAI_API_KEY"))})
+        return jsonify(settings_view(settings.get()))
 
     @app.put("/api/settings")
     def put_settings():
         data = body()
-        allowed = {k: data[k] for k in ("commands", "openai", "timeouts") if k in data}
-        return jsonify(settings.update(allowed))
+        allowed = {k: data[k] for k in ("commands", "timeouts") if k in data}
+        endpoints = clean_endpoints(data["endpoints"], settings.get()["endpoints"]) if "endpoints" in data else None
+        updated = settings.update(allowed)
+        if endpoints is not None:
+            updated = settings.save_endpoints(endpoints)
+            models_cache.clear()
+        return jsonify(settings_view(updated))
+
+    # ---- OpenAI-compatible endpoints ---------------------------------------
+    models_cache: dict[tuple, tuple[float, list[str]]] = {}
+    models_lock = threading.Lock()
+
+    @app.get("/api/endpoints/<eid>/models")
+    def endpoint_models(eid):
+        ep = find_endpoint(settings.get(), eid) or abort(404)
+        suggestions = model_suggestions(settings.get())[eid]
+        cache_key = (eid, ep["base_url"], bool(endpoint_key(ep)))
+        with models_lock:
+            cached = models_cache.get(cache_key)
+        if cached and not request.args.get("refresh") and time.monotonic() - cached[0] < MODELS_CACHE_SECONDS:
+            live, error = cached[1], ""
+        else:
+            try:
+                live, error = list_models(ep), ""
+                with models_lock:
+                    models_cache[cache_key] = (time.monotonic(), live)
+            except RuntimeError as exc:
+                live, error = [], str(exc)
+        return jsonify(models=list(dict.fromkeys(suggestions + live)), error=error)
+
+    @app.post("/api/endpoints/test")
+    def test_endpoint():
+        ep = clean_endpoints([body()], settings.get()["endpoints"])[0]
+        try:
+            models = list_models(ep)
+        except RuntimeError as exc:
+            return jsonify(ok=False, error=str(exc), count=0)
+        return jsonify(ok=True, error="", count=len(models))
 
     # ---- projects -----------------------------------------------------------
     @app.get("/api/projects")
@@ -96,7 +223,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
 
     def project_fields(data: dict) -> dict:
         provider = data.get("provider") or "claude"
-        if provider not in PROVIDERS:
+        if not valid_provider(settings.get(), provider):
             raise ValueError(f"Unknown provider {provider}.")
         location = data.get("location") or "local"
         fields = {
@@ -152,7 +279,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         if "name" in data and data["name"].strip():
             fields["name"] = data["name"].strip()
         if "provider" in data:
-            if data["provider"] not in PROVIDERS:
+            if not valid_provider(settings.get(), data["provider"]):
                 raise ValueError("Unknown provider.")
             fields["provider"] = data["provider"]
         if "model" in data:
@@ -287,7 +414,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         if not title:
             raise ValueError("A task needs a title.")
         provider = data.get("provider") or ""
-        if provider and provider not in PROVIDERS:
+        if provider and not valid_provider(settings.get(), provider):
             raise ValueError("Unknown provider.")
         with store.edit(project) as doc:
             task = new_task(doc, title, (data.get("description") or "").strip(), provider)
@@ -302,7 +429,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             if task["status"] in LOCKED:
                 raise ValueError(f"Task is {task['status']}; wait or cancel first.")
             changed = [k for k in EDITABLE if k in data and data[k] != task[k]]
-            if "provider" in changed and data["provider"] and data["provider"] not in PROVIDERS:
+            if "provider" in changed and data["provider"] and not valid_provider(settings.get(), data["provider"]):
                 raise ValueError("Unknown provider.")
             if "title" in changed and not str(data["title"]).strip():
                 raise ValueError("A task needs a title.")
@@ -389,7 +516,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         if len(ids) > MAX_BATCH:
             raise ValueError(f"At most {MAX_BATCH} tasks per batch.")
         provider = data.get("provider") or ""
-        if action == "set_provider" and provider and provider not in PROVIDERS:
+        if action == "set_provider" and provider and not valid_provider(settings.get(), provider):
             raise ValueError("Unknown provider.")
 
         errors: dict[int, str] = {}

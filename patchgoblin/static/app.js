@@ -90,16 +90,76 @@ const openTask = () => state.tasks.find(t => t.id === state.openTid);
 /* ---------------- model dropdowns ---------------- */
 
 const MODELS = JSON.parse(document.body.dataset.models || "{}");
+let PROVIDERS = JSON.parse(document.body.dataset.providers || "[]");
 const CUSTOM_MODEL = "\u0000custom";
+const CLI = new Set(["claude", "codex"]);
+
+// Endpoint model lists are fetched from the API once per session and merged into MODELS.
+const modelFetch = new Map(); // provider -> Promise
+const modelLoading = new Set();
+const modelErrors = {};
+
+const isEndpoint = id => !!id && !CLI.has(id) && PROVIDERS.some(p => p.id === id);
+
+function providerName(id) {
+  const p = PROVIDERS.find(x => x.id === id);
+  return p ? p.name : `${id} (missing)`;
+}
+
+// Selects a provider, keeping a removed endpoint visible as "(missing)" instead of silently switching.
+function setProviderValue(select, id) {
+  for (const opt of $$("option.missing", select)) opt.remove();
+  if (id && ![...select.options].some(o => o.value === id)) {
+    select.append(el("option", { value: id, class: "missing" }, `${id} (missing)`));
+  }
+  select.value = id;
+}
+
+function renderProviderSelects() {
+  for (const select of $$(".provider-select")) {
+    const value = select.value;
+    const blank = [...select.options].find(o => o.value === "");
+    select.replaceChildren(...(blank ? [el("option", { value: "" }, blank.textContent)] : []),
+      ...PROVIDERS.map(p => el("option", { value: p.id }, p.name)));
+    setProviderValue(select, value);
+  }
+}
+
+function ensureModels(provider, refresh = false) {
+  if (!isEndpoint(provider)) return Promise.resolve();
+  if (!refresh && modelFetch.has(provider)) return modelFetch.get(provider);
+  modelLoading.add(provider);
+  const job = api("GET", `/api/endpoints/${encodeURIComponent(provider)}/models${refresh ? "?refresh=1" : ""}`)
+    .then(data => {
+      MODELS[provider] = [...new Set([...(MODELS[provider] || []), ...data.models])];
+      modelErrors[provider] = data.error || "";
+    })
+    .catch(e => { modelErrors[provider] = e.message; modelFetch.delete(provider); })
+    .finally(() => modelLoading.delete(provider));
+  modelFetch.set(provider, job);
+  return job;
+}
+
+// Fills the select now, then again once the endpoint's live model list arrives.
+async function fillModelSelectLive(select, provider, current, stillValid = () => true) {
+  fillModelSelect(select, provider, current);
+  if (!isEndpoint(provider) || (modelFetch.has(provider) && !modelLoading.has(provider))) return;
+  const job = ensureModels(provider);
+  fillModelSelect(select, provider, current);
+  await job;
+  if (stillValid()) fillModelSelect(select, provider, select.dataset.value);
+}
 
 function fillModelSelect(select, provider, current = "") {
   const models = [...(MODELS[provider] || [])];
   if (current && !models.includes(current)) models.push(current);
   select.replaceChildren(el("option", { value: "" }, "default"),
     ...models.map(m => el("option", { value: m }, m)),
+    modelLoading.has(provider) ? el("option", { value: "", disabled: true }, "Loading models…") : null,
     el("option", { value: CUSTOM_MODEL }, "Custom…"));
   select.value = current;
   select.dataset.value = current;
+  select.title = modelErrors[provider] ? `Couldn't list models: ${modelErrors[provider]}` : "";
 }
 
 // Resolves the select's new value, asking for a name when "Custom…" is picked.
@@ -151,8 +211,7 @@ async function selectProject(pid) {
   $("#p-name").textContent = p.name;
   $("#p-where").textContent = p.location === "ssh"
     ? `${p.ssh_target}${p.ssh_port ? ":" + p.ssh_port : ""}:${p.path}` : p.path;
-  $("#p-provider").value = p.provider || "claude";
-  fillModelSelect($("#p-model"), p.provider || "claude", p.model || "");
+  renderProjectModel();
   $("#p-plan-limit").value = p.plan_limit || "";
   $("#p-rewrite-titles").checked = p.rewrite_titles !== false;
   $("#p-auto-sync").checked = p.auto_sync === true;
@@ -160,6 +219,16 @@ async function selectProject(pid) {
   renderBoard();
   loadChat();
   await loadTasks();
+}
+
+function renderProjectModel() {
+  const p = currentProject();
+  if (!p) return;
+  const provider = p.provider || "claude";
+  setProviderValue($("#p-provider"), provider);
+  $("#p-model-refresh").hidden = !isEndpoint(provider);
+  fillModelSelectLive($("#p-model"), provider, p.model || "",
+    () => currentProject() === p && (p.provider || "claude") === provider);
 }
 
 async function updateProject(fields) {
@@ -276,7 +345,7 @@ function renderCard(t) {
     el("span", { class: `badge ${t.status}` }, STATUS_LABEL[t.status])),
   el("div", { class: "card-title" }, t.title),
   el("div", { class: "card-meta" },
-    t.provider && t.provider !== p.provider ? el("span", { class: "chip" }, t.provider) : null,
+    t.provider && t.provider !== p.provider ? el("span", { class: "chip" }, providerName(t.provider)) : null,
     hasOpenQuestions(t) ? el("span", { class: "chip question", title: t.questions.join("\n") },
       `? ${t.questions.length} question${t.questions.length === 1 ? "" : "s"}`) : null,
     t.error && t.status !== "failed" ? el("span", { class: "chip warn", title: t.error }, "last attempt failed") : null,
@@ -490,7 +559,7 @@ function renderDrawer(fillForm) {
   if (fillForm || (!state.dirty && state.formStamp !== formStamp(t))) {
     $("#d-title").value = t.title;
     $("#d-desc").value = t.description || "";
-    $("#d-provider").value = t.provider || "";
+    setProviderValue($("#d-provider"), t.provider || "");
     $("#d-plan").value = t.plan || "";
     state.formStamp = formStamp(t);
     state.dirty = false;
@@ -674,7 +743,7 @@ function renderChat(data) {
   const log = $("#c-log");
   const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
   const p = currentProject();
-  $("#c-where").textContent = p ? `${p.name} · ${p.provider || "claude"}${p.model ? " · " + p.model : ""}` : "";
+  $("#c-where").textContent = p ? `${p.name} · ${providerName(p.provider || "claude")}${p.model ? " · " + p.model : ""}` : "";
   chat.active = data.active;
   chat.messages = data.messages;
   $("#c-empty").hidden = data.messages.length > 0;
@@ -817,7 +886,7 @@ function setupProjectDialog() {
   const resetBrowser = setupFolderBrowser(form);
   const open = () => {
     form.reset();
-    fillModelSelect(form.model, form.provider.value);
+    fillModelSelectLive(form.model, form.provider.value, "", () => dialog.open);
     syncLocation();
     showError($("#project-form-error"), "");
     dialog.showModal();
@@ -831,8 +900,13 @@ function setupProjectDialog() {
   $("#add-project-btn").onclick = open;
   $("#empty-add-btn").onclick = open;
   $$("input[name=location]", form).forEach(r => { r.onchange = syncLocation; });
-  form.provider.onchange = () =>
-    fillModelSelect(form.model, form.provider.value, modelFor(form.provider.value, form.model.value));
+  form.provider.onchange = async () => {
+    const provider = form.provider.value;
+    const current = form.model.value === CUSTOM_MODEL ? "" : form.model.value;
+    fillModelSelect(form.model, provider, "");
+    await ensureModels(provider);
+    if (form.provider.value === provider) fillModelSelect(form.model, provider, modelFor(provider, current));
+  };
   form.model.onchange = () => pickModel(form.model, form.provider.value);
   form.ssh_target.addEventListener("change", resetBrowser);
   form.ssh_port.addEventListener("change", resetBrowser);
@@ -860,9 +934,103 @@ function setupProjectDialog() {
 
 const SETTING_FIELDS = [
   "claude.plan", "claude.run", "codex.plan", "codex.run",
-  "openai.base_url", "openai.model", "openai.max_steps", "openai.allow_commands",
   "timeouts.plan", "timeouts.run",
 ];
+
+/* ---------------- OpenAI-compatible endpoints ---------------- */
+
+function keyStatus(ep) {
+  const env = (ep.api_key_env || "").trim();
+  if (ep.api_key_saved) return "Key saved (used)" + (env ? `; $${env} is ignored` : "");
+  if (env) return ep.api_key_env_present ? `$${env} detected` : `$${env} not set in PatchGoblin's environment`;
+  return "No key (keyless, e.g. a local server)";
+}
+
+function endpointBlock(ep = {}) {
+  const node = $("#endpoint-tpl").content.firstElementChild.cloneNode(true);
+  const f = name => $(`[data-f="${name}"]`, node);
+  node.dataset.id = ep.id || "";
+  f("name").value = ep.name || "";
+  f("base_url").value = ep.base_url || "";
+  f("api_key").placeholder = ep.api_key_saved ? "saved (leave blank to keep)" : "not set";
+  f("api_key_clear").closest("label").hidden = !ep.api_key_saved;
+  f("api_key_env").value = ep.api_key_env || "";
+  f("key_status").textContent = ep.id ? keyStatus(ep) : "";
+  f("model").value = ep.model || "";
+  f("models").value = (ep.models || []).join(" ");
+  f("max_steps").value = ep.max_steps || 40;
+  f("headers").value = Object.entries(ep.headers || {}).map(([k, v]) => `${k}: ${v}`).join("\n");
+  f("allow_commands").checked = !!ep.allow_commands;
+  $('[data-act="remove"]', node).onclick = () => removeEndpoint(node);
+  $('[data-act="test"]', node).onclick = () => testEndpoint(node);
+  return node;
+}
+
+function parseHeaders(text) {
+  const headers = {};
+  for (const line of text.split("\n")) {
+    const at = line.indexOf(":");
+    if (at <= 0) continue;
+    const name = line.slice(0, at).trim();
+    if (name) headers[name] = line.slice(at + 1).trim();
+  }
+  return headers;
+}
+
+function readEndpoint(node) {
+  const f = name => $(`[data-f="${name}"]`, node);
+  return {
+    id: node.dataset.id || "",
+    name: f("name").value.trim(),
+    base_url: f("base_url").value.trim(),
+    api_key: f("api_key").value.trim(),
+    api_key_clear: f("api_key_clear").checked,
+    api_key_env: f("api_key_env").value.trim(),
+    model: f("model").value.trim(),
+    models: f("models").value.split(/[\s,]+/).filter(Boolean),
+    max_steps: Number(f("max_steps").value) || 40,
+    headers: parseHeaders(f("headers").value),
+    allow_commands: f("allow_commands").checked,
+  };
+}
+
+function removeEndpoint(node) {
+  const id = node.dataset.id;
+  const name = $('[data-f="name"]', node).value.trim() || id || "this endpoint";
+  if (id) {
+    const projects = state.projects.filter(p => p.provider === id).length;
+    const tasks = state.tasks.filter(t => t.provider === id).length;
+    const uses = [projects && `${projects} project(s)`, tasks && `${tasks} task(s)`].filter(Boolean).join(" and ");
+    if (uses && !confirm(`${uses} use ${name}; they will fail with "provider missing" until changed. `
+        + "Remove anyway? (Takes effect when you save.)")) return;
+  }
+  node.remove();
+}
+
+async function testEndpoint(node) {
+  const status = $('[data-f="status"]', node);
+  status.textContent = "Testing…";
+  status.classList.remove("error");
+  try {
+    const r = await api("POST", "/api/endpoints/test", readEndpoint(node));
+    status.textContent = r.ok ? `OK: ${r.count} tool-capable model${r.count === 1 ? "" : "s"}` : r.error;
+    status.classList.toggle("error", !r.ok);
+  } catch (e) {
+    status.textContent = e.message;
+    status.classList.add("error");
+  }
+}
+
+function applyProviderSettings(s) {
+  PROVIDERS = s.providers;
+  for (const key of Object.keys(MODELS)) delete MODELS[key];
+  Object.assign(MODELS, s.models);
+  modelFetch.clear();
+  for (const key of Object.keys(modelErrors)) delete modelErrors[key];
+  renderProviderSelects();
+  renderProjectModel();
+  renderBoard();
+}
 
 function settingPath(name, settings) {
   const [group, key] = name.split(".");
@@ -872,6 +1040,11 @@ function settingPath(name, settings) {
 function setupSettingsDialog() {
   const dialog = $("#settings-dialog");
   const form = $("#settings-form");
+  $("#add-endpoint-btn").onclick = () => {
+    const node = endpointBlock();
+    $("#endpoint-list").append(node);
+    $('[data-f="name"]', node).focus();
+  };
   $("#settings-btn").onclick = async () => {
     try {
       const s = await api("GET", "/api/settings");
@@ -881,15 +1054,15 @@ function setupSettingsDialog() {
         if (input.type === "checkbox") input.checked = !!obj[key];
         else input.value = Array.isArray(obj[key]) ? obj[key].join(" ") : obj[key];
       }
-      $("#key-status").textContent = s.openai_key_present
-        ? "· OPENAI_API_KEY detected" : "· OPENAI_API_KEY not set in the server environment";
+      $("#endpoint-list").replaceChildren(...s.endpoints.map(endpointBlock));
       showError($("#settings-error"), "");
       dialog.showModal();
     } catch (e) { toast(e.message, true); }
   };
   form.onsubmit = async ev => {
     ev.preventDefault();
-    const out = { commands: { claude: {}, codex: {} }, openai: {}, timeouts: {} };
+    const out = { commands: { claude: {}, codex: {} }, timeouts: {},
+      endpoints: $$("#endpoint-list .endpoint").map(readEndpoint) };
     for (const name of SETTING_FIELDS) {
       const [obj, key] = settingPath(name, out);
       const input = form.elements[name];
@@ -897,7 +1070,7 @@ function setupSettingsDialog() {
         : input.type === "number" ? Number(input.value) : input.value.trim();
     }
     try {
-      await api("PUT", "/api/settings", out);
+      applyProviderSettings(await api("PUT", "/api/settings", out));
       dialog.close();
       toast("Settings saved");
     } catch (e) { showError($("#settings-error"), e.message); }
@@ -995,8 +1168,22 @@ function init() {
   $("#p-provider").onchange = async e => {
     const p = currentProject();
     const provider = e.target.value;
+    fillModelSelect($("#p-model"), provider, "");
+    await ensureModels(provider);
     await updateProject({ provider, model: modelFor(provider, p.model || "") });
-    fillModelSelect($("#p-model"), p.provider || "claude", p.model || "");
+    if (currentProject() === p) renderProjectModel();
+  };
+  $("#p-model-refresh").onclick = async () => {
+    const p = currentProject();
+    const provider = p.provider || "claude";
+    const job = ensureModels(provider, true);
+    fillModelSelect($("#p-model"), provider, p.model || "");
+    await job;
+    if (currentProject() === p) {
+      fillModelSelect($("#p-model"), provider, p.model || "");
+      toast(modelErrors[provider] ? `Couldn't list models: ${modelErrors[provider]}` : "Model list refreshed",
+        !!modelErrors[provider]);
+    }
   };
   $("#p-model").onchange = e => {
     const model = pickModel(e.target, currentProject().provider || "claude");

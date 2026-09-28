@@ -1,7 +1,8 @@
 # PatchGoblin
 
 A small Flask web app for queueing up AI work on your projects. Write tasks, get an
-AI (Claude Code, Codex, or the OpenAI API) to help plan them, then queue them for the
+AI (Claude Code, Codex, or any OpenAI-compatible API such as OpenAI, OpenRouter or
+Ollama) to help plan them, then queue them for the
 AI to implement. Projects can be local directories or directories on SSH hosts, and
 every completed task is committed to the project's own git repository.
 
@@ -105,15 +106,45 @@ override the default. Commands can be edited under **Settings**.
   prompting. Tighten the run command in Settings if you want less.
 - **Codex** (`codex exec`) uses the `read-only` sandbox for planning and
   `workspace-write` for runs.
-- **OpenAI API** runs a tool-calling agent against any OpenAI-compatible Chat
-  Completions endpoint (set the base URL and model in Settings). The key is read from
-  `OPENAI_API_KEY` in PatchGoblin's environment and is never stored. The agent can list,
-  read and search files, and during runs it can also write files. Its tools run
-  through the project's host, so remote projects don't need a key on the remote
-  machine. It can't write to `.git/` or `.patchgoblin/`, or to paths outside the project.
-  Shell commands are off by default. Turning them on in Settings runs them unsandboxed.
+- **OpenAI-compatible endpoints** run a tool-calling agent against a Chat Completions
+  API (see below). The agent can list, read and search files, and during runs it can
+  also write files. Its tools run through the project's host, so remote projects don't
+  need a key on the remote machine. It can't write to `.git/` or `.patchgoblin/`, or to
+  paths outside the project. Shell commands are off by default. Turning them on for an
+  endpoint runs them unsandboxed.
 
 The CLIs must be installed and logged in on whichever machine hosts the project.
+
+### OpenAI-compatible endpoints
+
+Under **Settings → OpenAI-compatible APIs** you can add any number of named endpoints.
+Each one shows up by name in every AI dropdown. For each endpoint you set:
+
+- a **base URL** (the part before `/chat/completions`);
+- an **API key**, either saved in Settings or read from an **env var** in PatchGoblin's
+  environment. A saved key takes priority. Saved keys are stored in plain text in
+  PatchGoblin's own `settings.json` (in its data directory, never in a project) and are
+  never sent back to the browser. Leave both empty for keyless local servers;
+- a default model, optional model suggestions, extra HTTP headers, max agent steps and
+  whether shell commands are allowed.
+
+The model dropdown combines your suggestions with the server's `/models` list (cached
+for 10 minutes; ↻ refreshes it). The agent needs tool calling, so when the server says
+which models support tools (OpenRouter does), only those are listed. **Test** checks the
+URL and key by listing models.
+
+Examples:
+
+| Name | Base URL | Key |
+| --- | --- | --- |
+| OpenAI | `https://api.openai.com/v1` | env var `OPENAI_API_KEY` |
+| OpenRouter | `https://openrouter.ai/api/v1` | env var `OPENROUTER_API_KEY` (models like `anthropic/claude-sonnet-5`) |
+| Ollama / LM Studio | `http://localhost:11434/v1` / `http://localhost:1234/v1` | none |
+
+Projects and tasks store the endpoint's id, so renaming an endpoint is safe. Removing
+one that is still in use leaves those projects and tasks showing "(missing)"; their jobs
+fail with a "not configured" error until you pick another AI. Settings from older
+versions (a single "OpenAI API" block) become an endpoint with id `openai`.
 
 ## SSH projects
 

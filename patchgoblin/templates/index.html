@@ -7,7 +7,7 @@
   <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
 </head>
-<body data-models="{{ models|tojson|forceescape }}">
+<body data-models="{{ models|tojson|forceescape }}" data-providers="{{ providers|tojson|forceescape }}">
 <header class="topbar">
   <div class="brand"><img src="{{ url_for('static', filename='favicon.svg') }}" alt=""> PatchGoblin</div>
   <button class="ghost" id="settings-btn">Settings</button>
@@ -39,11 +39,12 @@
         </div>
         <div class="project-controls">
           <label>AI
-            <select id="p-provider">
-              {% for p in providers %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+            <select id="p-provider" class="provider-select">
+              {% for p in providers %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
             </select>
           </label>
           <label>Model <select id="p-model"></select></label>
+          <button type="button" class="ghost small" id="p-model-refresh" title="Reload the model list from the API" hidden>↻</button>
           <label>Plan limit
             <input id="p-plan-limit" type="number" min="0" step="1" placeholder="∞"
                    title="Max simultaneous planning jobs (blank = unlimited). Each job is one AI CLI process.">
@@ -80,9 +81,9 @@
         <label class="check small"><input type="checkbox" id="batch-all"> <span id="batch-count"></span></label>
         <span class="batch-actions" id="batch-actions"></span>
         <span class="batch-provider">
-          <select id="batch-provider" aria-label="AI for the selected tasks">
+          <select id="batch-provider" class="provider-select" aria-label="AI for the selected tasks">
             <option value="">project default</option>
-            {% for p in providers %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+            {% for p in providers %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
           </select>
           <button type="button" class="ghost small" id="batch-provider-btn">Set AI</button>
         </span>
@@ -110,9 +111,9 @@
     <input id="d-title" class="title-input">
     <label>Description<textarea id="d-desc" rows="4"></textarea></label>
     <label class="inline">AI for this task
-      <select id="d-provider">
+      <select id="d-provider" class="provider-select">
         <option value="">project default</option>
-        {% for p in providers %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+        {% for p in providers %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
       </select>
     </label>
     <section id="d-questions" class="questions" hidden aria-labelledby="d-questions-title">
@@ -211,7 +212,7 @@
     <label>Name <input name="name" placeholder="defaults to folder name"></label>
     <div class="row">
       <label>Default AI
-        <select name="provider">{% for p in providers %}<option value="{{ p }}">{{ p }}</option>{% endfor %}</select>
+        <select name="provider" class="provider-select">{% for p in providers %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}</select>
       </label>
       <label class="grow">Model <select name="model"></select></label>
     </div>
@@ -277,15 +278,41 @@
       <label>Run command <input name="codex.run" class="mono"></label>
     </fieldset>
     <fieldset>
-      <legend>OpenAI API <span class="muted small" id="key-status"></span></legend>
-      <div class="row">
-        <label class="grow">Base URL <input name="openai.base_url" class="mono"></label>
-        <label>Default model <input name="openai.model" size="14"></label>
-        <label>Max steps <input name="openai.max_steps" type="number" min="1" max="200" size="4"></label>
-      </div>
-      <label class="check"><input type="checkbox" name="openai.allow_commands">
-        Let the API agent run shell commands during runs (no sandbox)</label>
+      <legend>OpenAI-compatible APIs</legend>
+      <p class="muted small">Any Chat Completions server with tool calling: OpenAI, OpenRouter, Ollama, LM Studio…
+        A saved key takes priority over the env var. Saved keys are stored in plain text in PatchGoblin's
+        settings.json.</p>
+      <div id="endpoint-list" class="endpoint-list"></div>
+      <button type="button" class="ghost small" id="add-endpoint-btn">+ Add endpoint</button>
     </fieldset>
+    <template id="endpoint-tpl">
+      <div class="endpoint">
+        <div class="row">
+          <label>Name <input data-f="name" size="14" required></label>
+          <label class="grow">Base URL <input data-f="base_url" class="mono" placeholder="https://openrouter.ai/api/v1" required></label>
+        </div>
+        <div class="row">
+          <label class="grow">API key <input data-f="api_key" type="password" autocomplete="off" class="mono"></label>
+          <label class="check small" title="Delete the saved key on Save"><input type="checkbox" data-f="api_key_clear"> Clear saved key</label>
+          <label>Key env var <input data-f="api_key_env" class="mono" size="16" placeholder="OPENROUTER_API_KEY"></label>
+        </div>
+        <div class="muted small" data-f="key_status"></div>
+        <div class="row">
+          <label>Default model <input data-f="model" size="18"></label>
+          <label class="grow">Model suggestions <input data-f="models" placeholder="space or comma separated"></label>
+          <label>Max steps <input data-f="max_steps" type="number" min="1" max="200" size="4"></label>
+        </div>
+        <label>Extra headers <span class="muted small">(one <code>Name: value</code> per line)</span>
+          <textarea data-f="headers" rows="2" class="mono" placeholder="HTTP-Referer: https://example.com"></textarea></label>
+        <label class="check"><input type="checkbox" data-f="allow_commands">
+          Let this agent run shell commands during runs (no sandbox)</label>
+        <div class="actions">
+          <button type="button" class="ghost small" data-act="test">Test</button>
+          <button type="button" class="ghost small danger" data-act="remove">Remove</button>
+          <span class="muted small" data-f="status"></span>
+        </div>
+      </div>
+    </template>
     <fieldset>
       <legend>Timeouts (seconds)</legend>
       <div class="row">

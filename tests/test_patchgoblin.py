@@ -755,6 +755,228 @@ class OpenAIAgentTests(unittest.TestCase):
         names = {t["function"]["name"] for t in agent.tools()}
         self.assertEqual(names, {"list_files", "read_file", "search"})
 
+    # ---- HTTP-level behaviour (urlopen patched) ---------------------------------
+    def job(self):
+        job = mock.Mock(cancelled=False)
+        job.elapsed.return_value = 0
+        return job
+
+    def ep(self, **extra):
+        return {"id": "or", "name": "OpenRouter", "base_url": "https://or.example/api/v1", "model": "m",
+                "max_steps": 5, **extra}
+
+    def run_agent(self, ep, replies, root=".", mode="plan"):
+        """Run the agent against canned JSON replies; returns (outcome, requests sent)."""
+        sent = []
+
+        def fake_urlopen(req, timeout=None):
+            sent.append(req)
+            resp = mock.MagicMock()
+            resp.__enter__.return_value.read.return_value = json.dumps(replies[len(sent) - 1]).encode()
+            return resp
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            outcome = OpenAIAgent(LocalHost(), root, ep, "", mode, self.job()).run("go", timeout=60)
+        return outcome, sent
+
+    DONE = {"choices": [{"message": {"role": "assistant", "content": "done"}}]}
+
+    def test_saved_key_wins_over_env_and_env_is_fallback(self):
+        with mock.patch.dict(os.environ, {"PG_TEST_KEY": "envkey"}):
+            _, sent = self.run_agent(self.ep(api_key="saved", api_key_env="PG_TEST_KEY"), [self.DONE])
+            self.assertEqual(sent[0].get_header("Authorization"), "Bearer saved")
+            _, sent = self.run_agent(self.ep(api_key_env="PG_TEST_KEY"), [self.DONE])
+            self.assertEqual(sent[0].get_header("Authorization"), "Bearer envkey")
+
+    def test_keyless_sends_no_authorization(self):
+        outcome, sent = self.run_agent(self.ep(), [self.DONE])
+        self.assertTrue(outcome.ok)
+        self.assertIsNone(sent[0].get_header("Authorization"))
+
+    def test_extra_headers(self):
+        headers = {"HTTP-Referer": "https://x", "X-Bad": "a\r\nInjected: 1", "Authorization": "Bearer user"}
+        _, sent = self.run_agent(self.ep(api_key="k", headers=headers), [self.DONE])
+        got = {k.lower(): v for k, v in sent[0].header_items()}
+        self.assertEqual(got["http-referer"], "https://x")
+        self.assertNotIn("x-bad", got)
+        self.assertEqual(got["authorization"], "Bearer k")
+        _, sent = self.run_agent(self.ep(headers={"Authorization": "Bearer user"}), [self.DONE])
+        self.assertEqual(sent[0].get_header("Authorization"), "Bearer user")
+
+    def test_base_url_variants(self):
+        for base in ("https://h/v1/", "https://h/v1/chat/completions", " https://h/v1 "):
+            _, sent = self.run_agent(self.ep(base_url=base), [self.DONE])
+            self.assertEqual(sent[0].full_url, "https://h/v1/chat/completions")
+        outcome, sent = self.run_agent(self.ep(base_url="ftp://h"), [self.DONE])
+        self.assertFalse(outcome.ok)
+        self.assertIn("http", outcome.error)
+
+    def test_error_reply_and_missing_choices_fail(self):
+        outcome, _ = self.run_agent(self.ep(), [{"error": {"message": "No endpoints found that support tool use"}}])
+        self.assertFalse(outcome.ok)
+        self.assertIn("No endpoints found that support tool use", outcome.error)
+        self.assertIn("OpenRouter", outcome.error)
+        outcome, _ = self.run_agent(self.ep(), [{"choices": []}])
+        self.assertFalse(outcome.ok)
+        self.assertIn("no choices", outcome.error)
+
+    def test_http_error_uses_endpoint_name_and_message(self):
+        import io
+        import urllib.error
+        err = urllib.error.HTTPError("u", 401, "no", {}, io.BytesIO(b'{"error": {"message": "bad key"}}'))
+        self.addCleanup(err.close)
+        with mock.patch("urllib.request.urlopen", side_effect=err):
+            outcome = OpenAIAgent(LocalHost(), ".", self.ep(api_key="k"), "", "plan", self.job()).run("go", 60)
+        self.assertEqual(outcome.error, "OpenRouter API error 401: bad key")
+
+    def test_tool_call_without_id_and_dict_arguments(self):
+        with tempfile.TemporaryDirectory() as root:
+            replies = [{"choices": [{"message": {
+                "role": "assistant", "content": "", "reasoning": "secret thoughts",
+                "tool_calls": [{"type": "function", "function": {
+                    "name": "write_file", "arguments": {"path": "a.txt", "content": "hi"}}}]}}]},
+                self.DONE]
+            outcome, sent = self.run_agent(self.ep(), replies, root=root, mode="run")
+            self.assertTrue(outcome.ok, outcome.error)
+            with open(os.path.join(root, "a.txt")) as fh:
+                self.assertEqual(fh.read(), "hi")
+            messages = json.loads(sent[1].data)["messages"]
+            echo, tool = messages[2], messages[3]
+            self.assertNotIn("reasoning", echo)
+            self.assertEqual(echo["tool_calls"][0]["id"], "call_0_0")
+            self.assertEqual(json.loads(echo["tool_calls"][0]["function"]["arguments"]), {"path": "a.txt", "content": "hi"})
+            self.assertEqual(tool["tool_call_id"], "call_0_0")
+
+    def test_missing_env_key_fails_early_for_remote_hosts_only(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PG_MISSING_KEY", None)
+            outcome, sent = self.run_agent(self.ep(api_key_env="PG_MISSING_KEY"), [self.DONE])
+            self.assertFalse(outcome.ok)
+            self.assertIn("PG_MISSING_KEY", outcome.error)
+            self.assertEqual(sent, [])
+            outcome, sent = self.run_agent(self.ep(api_key_env="PG_MISSING_KEY",
+                                                   base_url="http://localhost:11434/v1"), [self.DONE])
+            self.assertTrue(outcome.ok)
+
+    def test_list_models(self):
+        from patchgoblin.providers import list_models
+        data = {"data": [{"id": "b"}, {"id": "a"},
+                         {"id": "no-tools", "supported_parameters": ["temperature"]},
+                         {"id": "tools", "supported_parameters": ["tools", "temperature"]}]}
+        resp = mock.MagicMock()
+        resp.__enter__.return_value.read.return_value = json.dumps(data).encode()
+        with mock.patch("urllib.request.urlopen", return_value=resp) as urlopen:
+            self.assertEqual(list_models(self.ep()), ["a", "b", "tools"])
+        self.assertEqual(urlopen.call_args.args[0].full_url, "https://or.example/api/v1/models")
+        import io
+        import urllib.error
+        err = urllib.error.HTTPError("u", 404, "no", {}, io.BytesIO(b"not here"))
+        self.addCleanup(err.close)
+        with mock.patch("urllib.request.urlopen", side_effect=err):
+            with self.assertRaisesRegex(RuntimeError, "404"):
+                list_models(self.ep())
+
+
+class EndpointSettingsTests(AppTestCase):
+    def put(self, **data):
+        return self.client.put("/api/settings", headers=H, json=data)
+
+    def endpoint(self, **extra):
+        return {"name": "OpenRouter", "base_url": "https://openrouter.ai/api/v1", "model": "x/y", **extra}
+
+    def test_legacy_openai_block_migrates(self):
+        from patchgoblin.providers import run_ai
+        from patchgoblin.store import Settings
+        data_dir = os.path.join(self.tmp.name, "legacy")
+        os.makedirs(data_dir)
+        with open(os.path.join(data_dir, "settings.json"), "w") as fh:
+            json.dump({"openai": {"base_url": "http://old/v1", "model": "old-model"}}, fh)
+        s = Settings(data_dir).get()
+        self.assertEqual(len(s["endpoints"]), 1)
+        ep = s["endpoints"][0]
+        self.assertEqual((ep["id"], ep["base_url"], ep["model"], ep["api_key_env"]),
+                         ("openai", "http://old/v1", "old-model", "OPENAI_API_KEY"))
+        self.assertNotIn("openai", s)
+        job = mock.Mock(cancelled=False)
+        with mock.patch("patchgoblin.providers.OpenAIAgent") as agent:
+            agent.return_value.run.return_value = Outcome(True, "ok")
+            out = run_ai("openai", "plan", "p", host=None, project={"path": "."}, settings=s, model="", job=job)
+        self.assertTrue(out.ok)
+        self.assertEqual(agent.call_args.args[2]["id"], "openai")
+        out = run_ai("deleted-id", "plan", "p", host=None, project={"path": "."}, settings=s, model="", job=job)
+        self.assertFalse(out.ok)
+        self.assertIn("not configured", out.error)
+
+    def test_save_endpoints_and_validation(self):
+        res = self.put(endpoints=[self.endpoint(api_key="sk-secret"),
+                                  self.endpoint(name="Local", base_url="http://localhost:11434/v1")])
+        self.assertEqual(res.status_code, 200, res.get_json())
+        data = res.get_json()
+        self.assertEqual([e["id"] for e in data["endpoints"]], ["openrouter", "local"])
+        self.assertEqual([p["id"] for p in data["providers"]], ["claude", "codex", "openrouter", "local"])
+        self.assertIn("x/y", data["models"]["openrouter"])
+        self.assertNotIn("sk-secret", json.dumps(data))
+        got = self.client.get("/api/settings").get_json()
+        self.assertNotIn("sk-secret", json.dumps(got))
+        self.assertTrue(got["endpoints"][0]["api_key_saved"])
+        self.assertFalse(got["endpoints"][1]["api_key_saved"])
+        self.assertEqual(self.app.config["SETTINGS"].get()["endpoints"][0]["api_key"], "sk-secret")
+
+        # A blank key keeps the saved one; api_key_clear removes it.
+        self.put(endpoints=[self.endpoint(id="openrouter"), self.endpoint(id="local", name="Local")])
+        self.assertEqual(self.app.config["SETTINGS"].get()["endpoints"][0]["api_key"], "sk-secret")
+        self.put(endpoints=[self.endpoint(id="openrouter", api_key_clear=True)])
+        s = self.app.config["SETTINGS"].get()
+        self.assertEqual(s["endpoints"][0]["api_key"], "")
+        self.assertEqual(len(s["endpoints"]), 1)
+
+        for bad in ([self.endpoint(id="a"), self.endpoint(id="a")], [self.endpoint(id="claude")],
+                    [self.endpoint(id="Bad Id")], [self.endpoint(name="")], [self.endpoint(base_url="ftp://x")],
+                    [self.endpoint(max_steps=0)], [self.endpoint(headers={"X": "a\nb"})]):
+            self.assertEqual(self.put(endpoints=bad).status_code, 400, bad)
+
+    def test_projects_and_tasks_accept_endpoint_ids(self):
+        self.put(endpoints=[self.endpoint(id="or")])
+        project = self.add_project()
+        pid = project["id"]
+        res = self.client.patch(f"/api/projects/{pid}", headers=H, json={"provider": "or"})
+        self.assertEqual(res.get_json()["provider"], "or")
+        self.assertEqual(self.client.patch(f"/api/projects/{pid}", headers=H,
+                                           json={"provider": "nope"}).status_code, 400)
+        res = self.client.post(f"/api/projects/{pid}/tasks", headers=H, json={"title": "t", "provider": "or"})
+        self.assertEqual(res.status_code, 201)
+        tid = res.get_json()["id"]
+        self.assertEqual(self.client.post(f"/api/projects/{pid}/tasks", headers=H,
+                                          json={"title": "t", "provider": "nope"}).status_code, 400)
+        self.assertEqual(self.client.patch(f"/api/projects/{pid}/tasks/{tid}", headers=H,
+                                           json={"provider": "nope"}).status_code, 400)
+        res = self.client.post(f"/api/projects/{pid}/tasks/batch", headers=H,
+                               json={"action": "set_provider", "ids": [tid], "provider": "or"})
+        self.assertEqual(res.status_code, 200)
+        page = self.client.get("/").get_data(as_text=True)
+        self.assertIn('value="or">OpenRouter<', page)
+
+    def test_models_route_caches_and_refreshes(self):
+        self.put(endpoints=[self.endpoint(id="or", models=["pinned"])])
+        with mock.patch("patchgoblin.app.list_models", return_value=["live-a", "pinned"]) as lm:
+            data = self.client.get("/api/endpoints/or/models").get_json()
+            self.assertEqual(data, {"models": ["pinned", "x/y", "live-a"], "error": ""})
+            self.client.get("/api/endpoints/or/models")
+            self.assertEqual(lm.call_count, 1)
+            self.client.get("/api/endpoints/or/models?refresh=1")
+            self.assertEqual(lm.call_count, 2)
+        with mock.patch("patchgoblin.app.list_models", side_effect=RuntimeError("down")):
+            data = self.client.get("/api/endpoints/or/models?refresh=1").get_json()
+            self.assertEqual(data, {"models": ["pinned", "x/y"], "error": "down"})
+        self.assertEqual(self.client.get("/api/endpoints/nope/models").status_code, 404)
+
+    def test_endpoint_test_uses_saved_key(self):
+        self.put(endpoints=[self.endpoint(id="or", api_key="sk-saved")])
+        with mock.patch("patchgoblin.app.list_models", return_value=["a", "b"]) as lm:
+            res = self.client.post("/api/endpoints/test", headers=H, json=self.endpoint(id="or"))
+        self.assertEqual(res.get_json(), {"ok": True, "error": "", "count": 2})
+        self.assertEqual(lm.call_args.args[0]["api_key"], "sk-saved")
+
 
 if __name__ == "__main__":
     unittest.main()

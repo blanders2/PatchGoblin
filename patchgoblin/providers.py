@@ -2,9 +2,10 @@
 
 * ``claude`` / ``codex`` — the CLI agents, launched in the project directory
   (over SSH for remote projects), with the prompt sent on stdin.
-* ``openai`` — a tool-calling loop against an OpenAI-compatible Chat
-  Completions API. The model's file and command tools are executed through the
-  project's host, so remote projects work without any key on the remote side.
+* configured endpoints (``openai``, ``openrouter``, …) — a tool-calling loop
+  against an OpenAI-compatible Chat Completions API. The model's file and command
+  tools are executed through the project's host, so remote projects work without
+  any key on the remote side.
 """
 from __future__ import annotations
 
@@ -14,10 +15,12 @@ import posixpath
 import re
 import shlex
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
 from .gitops import git
+from .store import find_endpoint
 
 PLAN_INSTRUCTIONS = """\
 You are planning a software task for the project in the current working directory.
@@ -157,10 +160,12 @@ def run_ai(provider: str, mode: str, prompt: str, *, host, project: dict, settin
            model: str, job) -> Outcome:
     """Run ``prompt`` with ``provider`` in ``mode`` ("plan" or "run")."""
     timeout = float(settings["timeouts"][mode])
-    if provider == "openai":
-        return OpenAIAgent(host, project["path"], settings["openai"], model, mode, job).run(prompt, timeout)
+    endpoint = find_endpoint(settings, provider)
+    if endpoint is not None:
+        return OpenAIAgent(host, project["path"], endpoint, model, mode, job).run(prompt, timeout)
     if provider not in settings["commands"]:
-        return Outcome(False, error=f"Unknown AI provider: {provider}")
+        return Outcome(False, error=f"AI provider '{provider}' is not configured "
+                                    "(it may have been removed in Settings).")
     return run_cli(settings["commands"][provider], mode, prompt, host=host, cwd=project["path"],
                    model=model, timeout=timeout, job=job)
 
@@ -231,10 +236,103 @@ def _tool(name: str, description: str, **props) -> dict:
 
 _S = {"type": "string"}
 
+LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
+def endpoint_key(ep: dict) -> str:
+    """The saved key wins; otherwise the named environment variable, if any."""
+    if (ep.get("api_key") or "").strip():
+        return ep["api_key"].strip()
+    env = (ep.get("api_key_env") or "").strip()
+    return os.environ.get(env, "").strip() if env else ""
+
+
+def endpoint_base(ep: dict) -> str:
+    base = (ep.get("base_url") or "").strip().rstrip("/")
+    if base.endswith("/chat/completions"):  # a pasted full endpoint URL
+        base = base[:-len("/chat/completions")].rstrip("/")
+    if not re.match(r"^https?://[^/\s]+", base, re.IGNORECASE):
+        raise RuntimeError(f"{endpoint_name(ep)}: the base URL must start with http:// or https:// "
+                           f"(got {base or 'nothing'}).")
+    return base
+
+
+def endpoint_url(ep: dict, path: str) -> str:
+    return endpoint_base(ep) + "/" + path.lstrip("/")
+
+
+def endpoint_name(ep: dict) -> str:
+    return ep.get("name") or ep.get("id") or "API"
+
+
+def endpoint_headers(ep: dict) -> dict:
+    headers = {}
+    for name, value in (ep.get("headers") or {}).items():
+        if not isinstance(name, str) or not isinstance(value, str) or not name.strip():
+            continue
+        if any(c in name + value for c in "\r\n"):
+            continue
+        if name.strip().lower() in ("content-type", "user-agent") or (
+                name.strip().lower() == "authorization" and endpoint_key(ep)):
+            continue
+        headers[name.strip()] = value.strip()
+    headers.update({"Content-Type": "application/json", "User-Agent": "PatchGoblin"})
+    key = endpoint_key(ep)
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
+def _api_error(ep: dict, code: int, detail: str) -> str:
+    try:
+        data = json.loads(detail)
+        err = data.get("error") if isinstance(data, dict) else None
+        message = err.get("message") if isinstance(err, dict) else err if isinstance(err, str) else None
+        if message:
+            detail = message
+    except ValueError:
+        pass
+    return f"{endpoint_name(ep)} API error {code}: {detail.strip()[:1500]}"
+
+
+def _http(ep: dict, req: urllib.request.Request, timeout: float):
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(_api_error(ep, exc.code, exc.read().decode("utf-8", "replace"))) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Could not reach {req.full_url}: {exc.reason}") from exc
+    except ValueError as exc:
+        raise RuntimeError(f"{endpoint_name(ep)} returned a reply that isn't JSON.") from exc
+
+
+def list_models(ep: dict) -> list[str]:
+    """Model ids from ``{base_url}/models``, keeping only tool-capable ones when the server says."""
+    req = urllib.request.Request(endpoint_url(ep, "models"), headers=endpoint_headers(ep))
+    data = _http(ep, req, 20)
+    if isinstance(data, dict):
+        if data.get("error"):
+            raise RuntimeError(_api_error(ep, 200, json.dumps(data)))
+        data = data.get("data", data.get("models", []))
+    if not isinstance(data, list):
+        raise RuntimeError(f"{endpoint_name(ep)}: unexpected /models reply.")
+    ids = set()
+    for entry in data:
+        if isinstance(entry, str):
+            ids.add(entry)
+        elif isinstance(entry, dict) and isinstance(entry.get("id") or entry.get("name"), str):
+            params = entry.get("supported_parameters")
+            if isinstance(params, list) and "tools" not in params:
+                continue
+            ids.add(entry.get("id") or entry["name"])
+    return sorted(ids)
+
 
 class OpenAIAgent:
     def __init__(self, host, root: str, cfg: dict, model: str, mode: str, job):
         self.host, self.root, self.cfg, self.mode, self.job = host, root, cfg, mode, job
+        self.name = endpoint_name(cfg)
         self.model = model or cfg.get("model", "")
         self.files = ProjectFiles(host, root)
         self.allow_commands = mode == "run" and bool(cfg.get("allow_commands"))
@@ -279,25 +377,30 @@ class OpenAIAgent:
         return f"Tool {name} is not available."
 
     def _request(self, messages: list[dict]) -> dict:
-        key = os.environ.get("OPENAI_API_KEY", "")
-        url = self.cfg["base_url"].rstrip("/") + "/chat/completions"
+        url = endpoint_url(self.cfg, "chat/completions")
         body = json.dumps({"model": self.model, "messages": messages, "tools": self.tools()}).encode()
-        req = urllib.request.Request(url, data=body, method="POST", headers={
-            "Content-Type": "application/json", "Authorization": f"Bearer {key}"})
+        req = urllib.request.Request(url, data=body, method="POST", headers=endpoint_headers(self.cfg))
+        return _http(self.cfg, req, 600)
+
+    def _missing_key(self) -> str:
+        """An error if a key is expected but not available (keyless local servers are fine)."""
+        if endpoint_key(self.cfg):
+            return ""
         try:
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")
-            raise RuntimeError(f"OpenAI API error {exc.code}: {detail[:1500]}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"Could not reach {url}: {exc.reason}") from exc
+            host = (urllib.parse.urlsplit(endpoint_base(self.cfg)).hostname or "").lower()
+        except RuntimeError as exc:
+            return str(exc)
+        env = (self.cfg.get("api_key_env") or "").strip()
+        if host in LOCAL_HOSTS or not env:
+            return ""
+        return f"{env} is not set in PatchGoblin's environment and no key is saved for {self.name}."
 
     def run(self, prompt: str, timeout: float) -> Outcome:
         if not self.model:
-            return Outcome(False, error="No OpenAI model configured (Settings or project).")
-        if not os.environ.get("OPENAI_API_KEY") and "api.openai.com" in self.cfg["base_url"]:
-            return Outcome(False, error="OPENAI_API_KEY is not set in PatchGoblin's environment.")
+            return Outcome(False, error=f"No model configured for {self.name} (Settings or project).")
+        missing = self._missing_key()
+        if missing:
+            return Outcome(False, error=missing)
         system = ("You are a careful software engineering agent working through tools on a repository. "
                   "All paths are relative to the project root.")
         if self.mode == "plan":
@@ -305,8 +408,8 @@ class OpenAIAgent:
         elif not self.allow_commands:
             system += " You cannot run commands; verify by reading code."
         messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
-        self.job.write(f"OpenAI agent: model {self.model}, mode {self.mode}\n")
-        for _ in range(int(self.cfg.get("max_steps", 40))):
+        self.job.write(f"{self.name} agent: model {self.model}, mode {self.mode}\n")
+        for step in range(int(self.cfg.get("max_steps", 40))):
             if self.job.cancelled:
                 raise Cancelled()
             if self.job.elapsed() > timeout:
@@ -315,18 +418,30 @@ class OpenAIAgent:
                 reply = self._request(messages)
             except RuntimeError as exc:
                 return Outcome(False, error=str(exc))
-            msg = reply["choices"][0]["message"]
-            messages.append({k: v for k, v in msg.items() if v is not None})
-            if msg.get("content"):
-                self.job.write(msg["content"].rstrip() + "\n")
-            calls = msg.get("tool_calls") or []
+            msg, error = self._message(reply)
+            if error:
+                return Outcome(False, error=error)
+            content = msg.get("content")
+            if isinstance(content, list):  # some servers return content parts
+                content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+            content = content if isinstance(content, str) else ""
+            calls = self._calls(msg.get("tool_calls"), step)
+            # Echo back only the standard fields; extras (reasoning, …) confuse some servers.
+            echo = {"role": "assistant", "content": content or None}
+            if calls:
+                echo["tool_calls"] = calls
+            messages.append(echo)
+            if content:
+                self.job.write(content.rstrip() + "\n")
             if not calls:
-                text = (msg.get("content") or "").strip()
+                text = content.strip()
                 return Outcome(bool(text), text, "" if text else "The model returned an empty reply.")
             for call in calls:
                 fn = call["function"]
                 try:
-                    args = json.loads(fn.get("arguments") or "{}")
+                    args = json.loads(fn["arguments"] or "{}")
+                    if not isinstance(args, dict):
+                        raise ValueError("tool arguments must be a JSON object")
                     self.job.write(f"→ {fn['name']} {_clip(json.dumps(args), 200)}\n")
                     result = self.call_tool(fn["name"], args)
                 except Cancelled:
@@ -335,3 +450,34 @@ class OpenAIAgent:
                     result = f"Error: {exc}"
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
         return Outcome(False, error="Stopped: reached the maximum number of agent steps.")
+
+    def _message(self, reply) -> tuple[dict, str]:
+        """The assistant message from a reply, or an error for replies that carry none."""
+        if not isinstance(reply, dict):
+            return {}, f"{self.name} returned an unexpected reply."
+        if reply.get("error"):
+            err = reply["error"]
+            message = err.get("message") if isinstance(err, dict) else str(err)
+            return {}, f"{self.name} API error: {message or json.dumps(err)[:1500]}"
+        choices = reply.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            return {}, f"{self.name} returned no choices: {json.dumps(reply)[:1500]}"
+        msg = choices[0].get("message")
+        if not isinstance(msg, dict):
+            return {}, f"{self.name} returned a choice without a message."
+        return msg, ""
+
+    @staticmethod
+    def _calls(raw, step: int) -> list[dict]:
+        """Normalized tool calls: string arguments and an id on every call."""
+        calls = []
+        for i, call in enumerate(raw if isinstance(raw, list) else []):
+            fn = call.get("function") if isinstance(call, dict) else None
+            if not isinstance(fn, dict) or not fn.get("name"):
+                continue
+            args = fn.get("arguments")
+            if isinstance(args, (dict, list)):
+                args = json.dumps(args)
+            calls.append({"id": call.get("id") or f"call_{step}_{i}", "type": "function",
+                          "function": {"name": fn["name"], "arguments": args or "{}"}})
+        return calls

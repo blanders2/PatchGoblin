@@ -19,8 +19,10 @@ from datetime import datetime, timezone
 from .hosts import host_for
 
 STATUSES = ("unplanned", "planning", "planned", "queued", "running", "done", "failed")
-PROVIDERS = ("claude", "codex", "openai")
+CLI_PROVIDERS = ("claude", "codex")
+CLI_NAMES = {"claude": "Claude Code", "codex": "Codex"}
 # Suggestions for the model dropdowns; any other model name can still be entered as "Custom…".
+# "openai" is only used for the built-in endpoint with that id.
 MODELS = {
     "claude": ("opus", "sonnet", "haiku", "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5",
                "claude-haiku-4-5"),
@@ -45,14 +47,57 @@ DEFAULT_SETTINGS = {
             "model_flag": "-m",
         },
     },
-    "openai": {
+    "endpoints": [{
+        "id": "openai",
+        "name": "OpenAI",
         "base_url": "https://api.openai.com/v1",
+        "api_key_env": "OPENAI_API_KEY",
         "model": "gpt-5",
-        "allow_commands": False,
-        "max_steps": 40,
-    },
+    }],
     "timeouts": {"plan": 900, "run": 3600},
 }
+
+# An OpenAI-compatible Chat Completions endpoint; each one is its own provider, by id.
+DEFAULT_ENDPOINT = {
+    "name": "",
+    "base_url": "",
+    "api_key": "",
+    "api_key_env": "",
+    "headers": {},
+    "model": "",
+    "models": [],
+    "allow_commands": False,
+    "max_steps": 40,
+}
+
+
+def _endpoint(ep: dict) -> dict:
+    out = _merge(DEFAULT_ENDPOINT, ep)
+    if not isinstance(out["models"], list):
+        out["models"] = []
+    out["models"] = [m for m in out["models"] if isinstance(m, str) and m.strip()]
+    if not isinstance(out["headers"], dict):
+        out["headers"] = {}
+    out["headers"] = {k: v for k, v in out["headers"].items() if isinstance(k, str) and isinstance(v, str)}
+    return out
+
+
+def endpoint_ids(settings: dict) -> list[str]:
+    return [ep["id"] for ep in settings.get("endpoints", [])]
+
+
+def find_endpoint(settings: dict, pid: str) -> dict | None:
+    return next((ep for ep in settings.get("endpoints", []) if ep.get("id") == pid), None)
+
+
+def valid_provider(settings: dict, pid) -> bool:
+    return isinstance(pid, str) and (pid in CLI_PROVIDERS or find_endpoint(settings, pid) is not None)
+
+
+def provider_choices(settings: dict) -> list[dict]:
+    """Every selectable AI: the CLIs, then each endpoint by its display name."""
+    return ([{"id": p, "name": CLI_NAMES[p]} for p in CLI_PROVIDERS]
+            + [{"id": ep["id"], "name": ep.get("name") or ep["id"]} for ep in settings.get("endpoints", [])])
 
 
 def now() -> str:
@@ -137,11 +182,29 @@ class Settings:
         self.file = JsonFile(os.path.join(data_dir, "settings.json"), {})
 
     def get(self) -> dict:
-        return _merge(DEFAULT_SETTINGS, self.file.load())
+        saved = self.file.load()
+        legacy = saved.get("openai")
+        if "endpoints" not in saved and isinstance(legacy, dict):
+            # Before named endpoints there was a single "openai" block; keep its id.
+            saved = {**saved, "endpoints": [{**DEFAULT_SETTINGS["endpoints"][0], **legacy, "id": "openai"}]}
+        saved.pop("openai", None)
+        out = _merge(DEFAULT_SETTINGS, saved)
+        endpoints = out["endpoints"] if isinstance(out["endpoints"], list) else []
+        out["endpoints"] = [_endpoint(ep) for ep in endpoints if isinstance(ep, dict) and ep.get("id")]
+        return out
 
     def update(self, values: dict) -> dict:
         with self.file.lock:
             self.file.save(_merge(self.file.load(), values))
+        return self.get()
+
+    def save_endpoints(self, endpoints: list[dict]) -> dict:
+        """Replace the whole endpoint list (``_merge`` would replace lists anyway)."""
+        with self.file.lock:
+            data = self.file.load()
+            data.pop("openai", None)
+            data["endpoints"] = endpoints
+            self.file.save(data)
         return self.get()
 
 
