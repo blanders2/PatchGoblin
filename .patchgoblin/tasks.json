@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "next_id": 6,
+  "next_id": 7,
   "tasks": [
     {
       "id": 1,
@@ -10,13 +10,13 @@
       "status": "done",
       "provider": "claude",
       "created_at": "2026-09-28T01:09:42+00:00",
-      "updated_at": "2026-09-28T01:27:12+00:00",
+      "updated_at": "2026-09-28T01:27:13+00:00",
       "queued_at": "2026-09-28T01:25:42+00:00",
       "started_at": "2026-09-28T01:25:42+00:00",
       "finished_at": "2026-09-28T01:27:12+00:00",
       "output": "I've replaced the side-by-side board with tabs. Only one queue shows at a time, and each tab has a badge with its count. The unit tests pass, but I couldn't try it in a browser (Playwright isn't installed here), so none of the manual checks from the plan have been done.\n\n**What changed**\n- **Tabs** (`patchgoblin/templates/index.html`): Unplanned, Planned, AI queue and Finished sit in a tab bar above the board. The old column headers and their counts are gone.\n- **Badge counts** (`patchgoblin/static/app.js`): each badge counts only tasks you can still act on (unplanned, planned, queued or failed). Tasks that are planning, running or done are still listed under their tab but don't add to the count. The badge hides when the count is 0.\n- **Activity dot:** a pulsing dot appears on a tab while it holds a task that is planning or running.\n- **Tooltip:** hovering a tab shows the full breakdown, e.g. \"AI queue: 2 actionable, 1 running (3 total)\". Screen readers get the same text.\n- **Remembered tab:** the selected tab is kept across reloads and project switches.\n- **Switching tabs:** click a tab, or use Left/Right arrows (wrapping around) and Home/End. Adding a task switches to Unplanned so the new card is visible. Status changes, from the drawer or the 3-second refresh, don't switch tabs.\n- **Empty tab:** shows \"No tasks here\".\n- **Styling** (`patchgoblin/static/app.css`): the active tab has an accent underline, and the tab bar scrolls sideways on narrow screens. Cards now fill the full-width panel in a grid instead of one narrow stack. The pulsing animations stop if the system is set to reduce motion.\n\nOne fix along the way: the saved tab is checked against the list of queue names, which were defined below `state`. That would have crashed the page on load, so I moved `state` below them.\n\n**Checks**\n- I added `test_index_has_queue_tabs`, which checks that the page has all four tabs and a matching panel for each. `pytest` wasn't found under `uv`, so I ran the suite with `unittest` instead: all 17 tests pass.\n- `node --check` finds no syntax errors in `app.js`.\n- I didn't change `README.md` because it doesn't describe the board.\n\nTo finish checking, run `uv run python run.py` and go through the manual steps in the plan: the badge changes during planning and runs, reload keeps the tab, arrow keys move between tabs, and the tab bar scrolls at mobile width.",
       "error": "",
-      "commit": "",
+      "commit": "e8658cf4105ca13f4e7106ab7277ecc0c3419273",
       "history": [
         {
           "at": "2026-09-28T01:09:42+00:00",
@@ -69,6 +69,10 @@
         {
           "at": "2026-09-28T01:27:12+00:00",
           "event": "AI run finished"
+        },
+        {
+          "at": "2026-09-28T01:27:13+00:00",
+          "event": "Committed e8658cf410"
         }
       ],
       "prev_status": "planned"
@@ -162,6 +166,44 @@
         {
           "at": "2026-09-28T01:25:34+00:00",
           "event": "Created"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "put tasks in a list, one per line",
+      "description": "put tasks in a list, one per line",
+      "plan": "",
+      "status": "done",
+      "provider": "",
+      "created_at": "2026-09-28T01:28:56+00:00",
+      "updated_at": "2026-09-28T01:30:02+00:00",
+      "queued_at": "2026-09-28T01:29:09+00:00",
+      "started_at": "2026-09-28T01:29:09+00:00",
+      "finished_at": "2026-09-28T01:30:02+00:00",
+      "output": "Tasks now show as a vertical list with one task per row. I only changed `patchgoblin/static/app.css`; the tests pass, but I haven't looked at it in a browser.\n\n**What changed**\n- **List instead of grid:** the task container used to be a grid of cards at least 260px wide. It's now a single column.\n- **One-row layout:** each task sits on one line: `#id`, then the title, then any chips (provider, commit, last attempt failed), then the status badge at the far right. The title takes up the spare width. Long titles still wrap to a second line rather than being cut off.\n- **No markup changes:** the page and JavaScript are untouched. The row order comes from CSS alone.\n- **Empty chip area:** it's hidden when a task has no chips, so it doesn't leave a gap. This only works if the chip area is truly empty in the page, which I haven't checked.\n\n**How I checked it:** the unit tests pass (17 tests, run with unittest because pytest isn't installed). They don't cover the layout, so it's still worth opening the board once to check the rows look right.",
+      "error": "",
+      "commit": "",
+      "history": [
+        {
+          "at": "2026-09-28T01:28:56+00:00",
+          "event": "Created"
+        },
+        {
+          "at": "2026-09-28T01:29:00+00:00",
+          "event": "Marked planned"
+        },
+        {
+          "at": "2026-09-28T01:29:09+00:00",
+          "event": "Queued for AI"
+        },
+        {
+          "at": "2026-09-28T01:29:09+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-09-28T01:30:02+00:00",
+          "event": "AI run finished"
         }
       ]
     }

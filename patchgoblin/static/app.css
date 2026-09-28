@@ -172,22 +172,28 @@ main { flex: 1; min-width: 0; overflow: auto; padding: 18px 22px; }
 .board { display: block; }
 .column { background: var(--panel-2); border-radius: 10px; padding: 10px; min-height: 120px; }
 .column[hidden] { display: none; }
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; align-items: start; }
+.cards { display: flex; flex-direction: column; gap: 6px; }
 .empty-col { padding: 8px 4px; }
+/* One task per row: #id, title, meta chips, status badge. */
 .card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 9px 10px;
+  padding: 8px 10px;
   cursor: pointer;
   box-shadow: var(--shadow);
 }
 .card:hover { border-color: var(--accent); }
 .card.open { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-.card-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
-.tid { color: var(--muted); font-size: 12px; }
-.card-title { font-weight: 550; word-break: break-word; }
-.card-meta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 6px; font-size: 11.5px; }
+.card-top { display: contents; }
+.tid { color: var(--muted); font-size: 12px; min-width: 2.5em; order: 0; }
+.card-title { font-weight: 550; word-break: break-word; flex: 1; min-width: 0; order: 1; }
+.card-meta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 11.5px; order: 2; }
+.card-meta:empty { display: none; }
+.card .badge { order: 3; }
 .chip { background: var(--panel-2); border-radius: 5px; padding: 1px 6px; }
 .chip.warn { color: var(--warn); }
 
