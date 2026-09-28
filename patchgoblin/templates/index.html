@@ -61,7 +61,7 @@
       </form>
 
       <div class="queue-tabs" role="tablist" aria-label="Task queues">
-        {% for col, label in [("unplanned", "Unplanned"), ("drafted", "Drafted"), ("planned", "Planned"), ("queue", "AI queue"), ("finished", "Finished")] %}
+        {% for col, label in [("unplanned", "Unplanned"), ("drafted", "Drafted"), ("planned", "Planned"), ("queue", "AI queue"), ("review", "Review"), ("finished", "Finished")] %}
         <button type="button" class="queue-tab" role="tab" id="tab-{{ col }}" data-col="{{ col }}" data-label="{{ label }}" aria-controls="col-{{ col }}">
           {{ label }} <span class="activity" hidden></span><span class="count empty"></span>
         </button>
@@ -86,7 +86,7 @@
         <button type="button" class="ghost small" id="batch-clear" title="Clear selection (Esc)">✕</button>
       </div>
       <div class="board">
-        {% for col in ["unplanned", "drafted", "planned", "queue", "finished"] %}
+        {% for col in ["unplanned", "drafted", "planned", "queue", "review", "finished"] %}
         <div class="column" id="col-{{ col }}" data-col="{{ col }}" role="tabpanel" aria-labelledby="tab-{{ col }}"><div class="cards"></div></div>
         {% endfor %}
       </div>
@@ -226,12 +226,20 @@
       <button type="button" class="ghost" id="d-discard-btn">Discard</button>
     </div>
     <div id="d-error" class="error" hidden></div>
+    <div id="d-review-feedback" class="review-feedback" hidden>
+      <h4>Review feedback the AI is addressing</h4>
+      <p id="d-review-feedback-text"></p>
+    </div>
     <div id="d-feedback-wrap">
-      <label>Other feedback for the AI <span class="muted">(optional)</span>
+      <label><span id="d-feedback-label">Other feedback for the AI <span class="muted">(optional)</span></span>
         <textarea id="d-feedback" rows="2" placeholder="e.g. Use the existing API client instead of adding a new one."></textarea></label>
     </div>
     <div class="actions flow-actions" id="d-flow-actions"></div>
     <div id="d-commit" class="muted" hidden></div>
+    <details id="d-changes" class="changes" open hidden>
+      <summary>Files changed <span class="muted" id="d-changes-count"></span></summary>
+      <ul id="d-changes-list" class="changes-list mono small"></ul>
+    </details>
     <details id="d-live-wrap" open hidden>
       <summary>Live output <span class="muted" id="d-elapsed"></span></summary>
       <pre id="d-live" class="log"></pre>

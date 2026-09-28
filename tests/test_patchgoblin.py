@@ -127,7 +127,7 @@ class ProjectTests(AppTestCase):
 
     def test_index_has_queue_tabs(self):
         html = self.client.get("/").get_data(as_text=True)
-        for col in ("unplanned", "drafted", "planned", "queue", "finished"):
+        for col in ("unplanned", "drafted", "planned", "queue", "review", "finished"):
             self.assertIn(f'role="tab" id="tab-{col}" data-col="{col}"', html)
             self.assertIn(f'id="col-{col}" data-col="{col}" role="tabpanel" aria-labelledby="tab-{col}"', html)
 
@@ -151,8 +151,8 @@ class WorkflowTests(AppTestCase):
         with open(os.path.join(self.proj_dir, "notes.txt"), "w") as fh:
             fh.write("mine\n")
         self.assertEqual(self.action(pid, tid, "queue").status_code, 200)
-        task = self.wait_for(pid, tid, {"done", "failed"})
-        self.assertEqual(task["status"], "done", task["error"])
+        task = self.wait_for(pid, tid, {"review", "failed"})
+        self.assertEqual(task["status"], "review", task["error"])
         self.assertTrue(os.path.exists(os.path.join(self.proj_dir, "agent_output.txt")))
         log = git_log(self.proj_dir)
         self.assertTrue(log[0].startswith("PatchGoblin: task #1 Create agent output file"))
@@ -163,7 +163,116 @@ class WorkflowTests(AppTestCase):
 
         with open(os.path.join(self.proj_dir, ".patchgoblin", "tasks.json"), encoding="utf-8") as fh:
             stored = json.load(fh)["tasks"][0]
-        self.assertEqual(stored["status"], "done")
+        self.assertEqual(stored["status"], "review")
+
+        self.assertEqual(self.action(pid, tid, "approve").get_json()["status"], "done")
+        self.assertEqual(self.action(pid, tid, "approve").status_code, 400)
+
+    def test_queue_is_not_blocked_by_review(self):
+        pid = self.add_project()["id"]
+        ids = [self.post_task(pid, f"Create output file {i}")["id"] for i in (1, 2)]
+        for tid in ids:
+            self.patch_plan(pid, tid, "do it")
+            self.action(pid, tid, "mark_planned")
+            self.assertEqual(self.action(pid, tid, "queue").status_code, 200)
+        for tid in ids:
+            self.assertEqual(self.wait_for(pid, tid, {"review", "failed"})["status"], "review")
+
+    def test_approve_and_reopen(self):
+        pid = self.add_project()["id"]
+        a, b, c = (self.post_task(pid, t)["id"] for t in ("a", "b", "c"))
+        for status in ("unplanned", "planned", "queued", "failed", "done"):
+            self.set_status(pid, a, status)
+            self.assertEqual(self.action(pid, a, "approve").status_code, 400, status)
+        for tid in (a, b):
+            self.set_status(pid, tid, "review")
+        data = self.batch(pid, "approve", [a, b, c]).get_json()
+        self.assertEqual([r["ok"] for r in data["results"]], [True, True, False])
+        self.assertEqual([t["status"] for t in data["tasks"]], ["done", "done", "unplanned"])
+        self.assertEqual(data["tasks"][0]["history"][-1]["event"], "Approved by engineer")
+        self.set_status(pid, c, "review")
+        self.assertEqual(self.action(pid, c, "reopen").get_json()["status"], "planned")
+
+    def test_send_back(self):
+        from patchgoblin import engine as engine_mod
+        pid = self.add_project()["id"]
+        tid = self.post_task(pid, "Create output file")["id"]
+        self.patch_plan(pid, tid, "do it")
+        self.action(pid, tid, "mark_planned")
+        self.action(pid, tid, "queue")
+        first = self.wait_for(pid, tid, {"review", "failed"})
+        self.assertEqual(first["status"], "review", first["error"])
+
+        changes = self.client.get(f"/api/projects/{pid}/tasks/{tid}/changes").get_json()["files"]
+        self.assertEqual(changes, [{"status": "A", "path": "agent_output.txt"}])
+
+        res = self.action(pid, tid, "send_back", feedback="  ")
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("needs feedback", res.get_json()["error"])
+        self.assertEqual(self.action(pid, tid, "send_back").status_code, 400)
+
+        with mock.patch.object(engine_mod, "plan_prompt", wraps=engine_mod.plan_prompt) as spy:
+            res = self.action(pid, tid, "send_back", feedback="Also add a follow-up file")
+            self.assertEqual(res.status_code, 200, res.get_json())
+            self.assertEqual(res.get_json()["status"], "planning")
+            self.assertEqual(res.get_json()["review_feedback"], "Also add a follow-up file")
+            task = self.wait_for(pid, tid, {"planned", "drafted"})
+            prompt = engine_mod.plan_prompt(*spy.call_args.args, **spy.call_args.kwargs)
+        self.assertIn("Sent back after review with feedback", self.events(task))
+        self.assertEqual(task["review_feedback"], "Also add a follow-up file")
+        self.assertIn("## Feedback from reviewing the last AI run\nAlso add a follow-up file", prompt)
+        self.assertIn(first["commit"][:10], prompt)
+        self.assertIn("follow-up changes", prompt)
+        self.assertIn("Also add a follow-up file", engine_mod.run_prompt(task))
+
+        # Only review/done tasks can be sent back.
+        for status in ("planned", "queued", "unplanned"):
+            self.set_status(pid, tid, status)
+            self.assertEqual(self.action(pid, tid, "send_back", feedback="x").status_code, 400, status)
+        self.set_status(pid, tid, "planned")
+
+        self.action(pid, tid, "queue")
+        second = self.wait_for(pid, tid, {"review", "failed"})
+        self.assertEqual(second["status"], "review", second["error"])
+        self.assertEqual(second["review_feedback"], "")
+        self.assertTrue(second["commit"])
+        self.assertNotEqual(second["commit"], first["commit"])
+        self.assertIn("(addressing review feedback)", git_log(self.proj_dir)[0])
+        changes = self.client.get(f"/api/projects/{pid}/tasks/{tid}/changes").get_json()["files"]
+        self.assertEqual(changes, [{"status": "A", "path": "followup.txt"}])
+
+        # From Finished too; a failed send-back returns there and drops the feedback.
+        self.assertEqual(self.action(pid, tid, "approve").get_json()["status"], "done")
+        res = self.action(pid, tid, "send_back", feedback="Please FAIL this")
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertIn("Sent back from Finished with feedback", self.events(res.get_json()))
+        task = self.wait_for(pid, tid, {"done"})
+        self.assertEqual(task["review_feedback"], "")
+        self.assertTrue(task["error"])
+        res = self.action(pid, tid, "send_back", feedback="One more tweak")
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertIn(self.wait_for(pid, tid, {"planned", "drafted", "done"})["status"], {"planned", "drafted"})
+
+    def test_changes_without_commit(self):
+        pid = self.add_project()["id"]
+        tid = self.post_task(pid, "t")["id"]
+        url = f"/api/projects/{pid}/tasks/{tid}/changes"
+        self.assertEqual(self.client.get(url).get_json()["files"], [])
+        self.set_status(pid, tid, "done", commit="deadbeef" * 5)
+        self.assertEqual(self.client.get(url).get_json()["files"], [])
+        self.set_status(pid, tid, "done", commit="--output=x")
+        self.assertEqual(self.client.get(url).get_json()["files"], [])
+        self.assertEqual(self.client.get(f"/api/projects/{pid}/tasks/999/changes").status_code, 404)
+
+    def events(self, task):
+        return [h["event"] for h in task["history"]]
+
+    def set_status(self, pid, tid, status, **fields):
+        store = self.app.config["STORE"]
+        with store.edit(self.app.config["REGISTRY"].get(pid)) as doc:
+            task = next(t for t in doc["tasks"] if t["id"] == tid)
+            task["status"] = status
+            task.update(fields)
 
     def test_plan_keeps_title_when_disabled(self):
         pid = self.add_project()["id"]
@@ -217,7 +326,7 @@ class WorkflowTests(AppTestCase):
         self.assertEqual(res.get_json()["plan"], "do it")
         self.assertEqual(self.action(pid, tid, "mark_planned").get_json()["status"], "planned")
         self.action(pid, tid, "queue")
-        task = self.wait_for(pid, tid, {"done", "failed"})
+        task = self.wait_for(pid, tid, {"review", "failed"})
         self.assertEqual(task["status"], "failed")
         self.assertIn("exited with code 3", task["error"])
         # A failed task can be re-queued or sent back to planned.
@@ -355,7 +464,7 @@ class WorkflowTests(AppTestCase):
         doc = store.read(project, fresh=True)
         self.assertEqual([t["status"] for t in doc["tasks"]], ["drafted", "planned"])
         self.assertEqual(doc["tasks"][0]["history"][-1]["event"], "Plan has open questions")
-        self.assertEqual(doc["version"], 2)
+        self.assertEqual(doc["version"], 3)
 
         stamp = seed(2, [ASKING_PLAN, ASKING_PLAN])
         engine.reconcile(project)  # already migrated: planned tasks keep their questions
@@ -704,8 +813,8 @@ class AutomationTests(AppTestCase):
         pid = self.add_project()["id"]
         self.set_global(auto_plan=True, auto_queue=True)
         tid = self.post_task(pid, "Create output file")["id"]
-        task = self.wait_for(pid, tid, {"done", "failed"})
-        self.assertEqual(task["status"], "done", task["error"])
+        task = self.wait_for(pid, tid, {"review", "failed"})
+        self.assertEqual(task["status"], "review", task["error"])
         self.assertTrue(task["commit"])
         self.assertTrue(os.path.exists(os.path.join(self.proj_dir, "agent_output.txt")))
         events = self.events(task)
@@ -756,7 +865,7 @@ class RemoteTests(AppTestCase):
         self.client.patch(f"/api/projects/{pid}/tasks/{tid}", headers=H, json={"plan": "do it"})
         self.action(pid, tid, "mark_planned")
         self.assertEqual(self.action(pid, tid, "queue").status_code, 200)
-        return self.wait_for(pid, tid, {"done", "failed"})
+        return self.wait_for(pid, tid, {"review", "failed"})
 
     def test_remote_set_and_status(self):
         pid, status = self.setup_remote()
@@ -867,14 +976,14 @@ class RemoteTests(AppTestCase):
     def test_auto_sync_off_by_default(self):
         pid, _ = self.setup_remote()
         task = self.run_task(pid)
-        self.assertEqual(task["status"], "done", task["error"])
+        self.assertEqual(task["status"], "review", task["error"])
         self.assertEqual(git(self.bare, "rev-list", "--all"), "")
 
     def test_auto_sync_pushes_after_task(self):
         pid, _ = self.setup_remote()
         self.client.patch(f"/api/projects/{pid}", headers=H, json={"auto_sync": True})
         task = self.run_task(pid)
-        self.assertEqual(task["status"], "done", task["error"])
+        self.assertEqual(task["status"], "review", task["error"])
         self.assertTrue(any(h["event"] == "Synced with origin" for h in task["history"]), task["history"])
         pushed = git(self.bare, "log", "--pretty=%s", self.branch()).splitlines()
         self.assertTrue(any(s.startswith("PatchGoblin: task #1") for s in pushed), pushed)
@@ -886,7 +995,7 @@ class RemoteTests(AppTestCase):
                         json={"url": os.path.join(self.tmp.name, "missing.git")})
         self.client.patch(f"/api/projects/{pid}", headers=H, json={"auto_sync": True})
         task = self.run_task(pid)
-        self.assertEqual(task["status"], "done", task["error"])
+        self.assertEqual(task["status"], "review", task["error"])
         self.assertTrue(any(h["event"].startswith("Auto-sync failed") for h in task["history"]),
                         task["history"])
 

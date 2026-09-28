@@ -572,7 +572,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         "unplan": (("planned", "drafted"), "unplanned", "Moved back to unplanned"),
         "queue": (("planned", "drafted", "failed"), "queued", "Queued for AI"),
         "dequeue": (("queued",), "planned", "Removed from queue"),
-        "reopen": (("done",), "planned", "Reopened"),
+        "approve": (("review",), "done", "Approved by engineer"),
+        "reopen": (("done", "review"), "planned", "Reopened"),
     }
 
     def transition(pid: str, task: dict, action: str, queued_at: str | None = None) -> bool:
@@ -604,6 +605,11 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         pid = project["id"]
         if action == "plan":
             engine.start_planning(project, tid, data.get("feedback") or "", plan_answers(data.get("answers")))
+        elif action == "send_back":  # per-task feedback, so never a batch action
+            feedback = data.get("feedback") or ""
+            if not isinstance(feedback, str):
+                raise ValueError("feedback must be a string.")
+            engine.start_planning(project, tid, feedback, review=True)
         elif action == "cancel":
             if not engine.cancel(pid, tid):
                 raise ValueError("No AI job is running for this task.")
@@ -713,6 +719,20 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         return jsonify(active=job is not None, kind=job.kind if job else None,
                        output=job.text() if job else "",
                        elapsed=round(job.elapsed()) if job else 0)
+
+    @app.get("/api/projects/<pid>/tasks/<int:tid>/changes")
+    def task_changes(pid, tid):
+        """The files changed by the task's (latest) commit; [] without one."""
+        project = project_or_404(pid)
+        task = find_task(store.read(project), tid) or abort(404)
+        sha = task.get("commit") or ""
+        if not sha:
+            return jsonify(files=[])
+        try:
+            files = gitops.commit_files(host_for(project), project["path"], sha)
+        except HostError:  # e.g. the commit is not in this clone
+            files = []
+        return jsonify(files=files)
 
     if start_engine:
         engine.startup()

@@ -16,7 +16,7 @@ from . import gitops
 from .hosts import HostError, host_for, kill_tree
 from .providers import (Cancelled, Outcome, chat_prompt, plan_prompt, plan_questions, ready_status, run_ai,
                         resolve_trust, run_prompt, split_title)
-from .store import DOC_VERSION, find_task, global_model, log_event, now, resolve_auto, set_status
+from .store import find_task, global_model, log_event, now, resolve_auto, set_status
 
 log = logging.getLogger("patchgoblin")
 
@@ -142,15 +142,15 @@ class Engine:
         """Tasks left 'planning'/'running' by a previous server process are interrupted.
 
         Also moves 'planned' tasks whose plan has open questions to 'drafted', once, in a
-        tasks.json saved before that status existed (including one pulled in by git sync).
-        Later, a planned task may keep hand-added questions until "Move to drafted".
+        version-1 tasks.json saved before that status existed (including one pulled in by
+        git sync). Later, a planned task may keep hand-added questions until "Move to drafted".
         """
         pid = project["id"]
         doc = self.store.read(project)
         stale = [t["id"] for t in doc["tasks"]
                  if t["status"] in ("planning", "running") and (pid, t["id"]) not in self.jobs]
         drafts = [t["id"] for t in doc["tasks"]
-                  if (doc.get("version") or 1) < DOC_VERSION
+                  if (doc.get("version") or 1) < 2
                   and t["status"] == "planned" and plan_questions(t.get("plan", ""))]
         if not stale and not drafts:
             return
@@ -182,7 +182,9 @@ class Engine:
 
     # ---- planning --------------------------------------------------------
     def start_planning(self, project: dict, tid: int, feedback: str = "",
-                       answers: list[dict] | None = None, auto: bool = False) -> None:
+                       answers: list[dict] | None = None, auto: bool = False, review: bool = False) -> None:
+        """Start AI planning. ``review`` sends back a review/done task with feedback: the
+        committed work stays and the AI plans follow-up changes on top of it."""
         pid = project["id"]
         job = Job("plan")
         try:
@@ -192,23 +194,34 @@ class Engine:
                 task = find_task(doc, tid)
                 if task is None:
                     raise KeyError(tid)
-                if task["status"] not in ("unplanned", "drafted", "planned", "failed"):
-                    raise ValueError(f"Cannot plan a task that is {task['status']}.")
+                allowed = ("review", "done") if review else ("unplanned", "drafted", "planned", "failed")
+                if task["status"] not in allowed:
+                    raise ValueError(f"Cannot {'send back' if review else 'plan'} a task that is "
+                                     f"{task['status']}.")
+                if review and not feedback.strip():
+                    raise ValueError("Send back needs feedback for the AI.")
                 if (pid, tid) in self.jobs:
                     raise ValueError("This task already has a job running.")
                 self.jobs[(pid, tid)] = job
                 task["prev_status"] = task["status"]
                 task["error"] = ""
-                extras = [name for name, given in (("answers", answers), ("feedback", feedback.strip()))
-                          if given]
-                set_status(task, "planning", "Auto-planned: AI planning started" if auto else
-                           "AI planning started" + (" with " + "/".join(extras) if extras else ""))
+                if review:
+                    task["review_feedback"] = feedback.strip()
+                    log_event(task, "Sent back from Finished with feedback" if task["status"] == "done"
+                              else "Sent back after review with feedback")
+                    set_status(task, "planning", "AI re-planning started with review feedback")
+                else:
+                    extras = [name for name, given in (("answers", answers), ("feedback", feedback.strip()))
+                              if given]
+                    set_status(task, "planning", "Auto-planned: AI planning started" if auto else
+                               "AI planning started" + (" with " + "/".join(extras) if extras else ""))
                 snapshot = dict(task)
         except BaseException:
             if self.jobs.get((pid, tid)) is job:
                 del self.jobs[(pid, tid)]
             raise
-        threading.Thread(target=self._plan, args=(project, snapshot, feedback, answers, job),
+        # Review feedback reaches the prompt through the task itself, not as plan feedback.
+        threading.Thread(target=self._plan, args=(project, snapshot, "" if review else feedback, answers, job),
                          name=f"pg-plan-{pid}-{tid}", daemon=True).start()
 
     def _plan_limit(self, pid: str) -> int:
@@ -286,7 +299,9 @@ class Engine:
             try:
                 self._acquire_plan_slot(pid, job)
                 try:
-                    prompt = plan_prompt(task, feedback, answers, rewrite_title=rewrite, trust=trust)
+                    prompt = plan_prompt(task, feedback, answers, rewrite_title=rewrite, trust=trust,
+                                         review_feedback=task.get("review_feedback", ""),
+                                         commit=task.get("commit", ""))
                     outcome = self._ai(project, task, "plan", prompt, job)
                 finally:
                     self._release_plan_slot(pid)
@@ -317,6 +332,8 @@ class Engine:
                             queued = self.maybe_auto_queue(pid, current)
                 else:
                     current["error"] = outcome.error
+                    if current.get("prev_status") in ("review", "done"):
+                        current["review_feedback"] = ""  # the send-back did not happen
                     set_status(current, current.get("prev_status") or "unplanned",
                                "AI planning failed" if not job.cancelled else "Planning cancelled")
             if queued:
@@ -401,14 +418,17 @@ class Engine:
                 current["finished_at"] = now()
                 if outcome.ok:
                     current["error"] = ""
-                    set_status(current, "done", "AI run finished")
+                    current["review_feedback"] = ""
+                    set_status(current, "review", "AI run finished; awaiting review")
                 else:
                     current["error"] = outcome.error
                     set_status(current, "failed", "AI run failed")
 
             if outcome.ok:
                 summary = outcome.text.strip()[:1500]
-                commit = gitops.commit_all(host, path, f"PatchGoblin: task #{tid} {task['title']}\n\n{summary}\n")
+                note = " (addressing review feedback)" if task.get("review_feedback") else ""
+                commit = gitops.commit_all(host, path,
+                                           f"PatchGoblin: task #{tid} {task['title']}{note}\n\n{summary}\n")
                 with self.store.edit(project) as doc:
                     current = find_task(doc, tid)
                     if current is not None:

@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from .hosts import host_for
 
-STATUSES = ("unplanned", "planning", "drafted", "planned", "queued", "running", "done", "failed")
+STATUSES = ("unplanned", "planning", "drafted", "planned", "queued", "running", "review", "done", "failed")
 CLI_PROVIDERS = ("claude", "codex")
 CLI_NAMES = {"claude": "Claude Code", "codex": "Codex"}
 # Suggestions for the model dropdowns; any other model name can still be entered as "Custom…".
@@ -261,8 +261,8 @@ class Settings:
 
 
 # tasks.json format. 2: the 'drafted' status exists (version-1 files are migrated by
-# Engine.reconcile; every write stamps the current version).
-DOC_VERSION = 2
+# Engine.reconcile; every write stamps the current version). 3: the 'review' status exists.
+DOC_VERSION = 3
 
 
 def empty_doc() -> dict:
@@ -347,6 +347,7 @@ def new_task(doc: dict, title: str, description: str = "", provider: str = "",
         "output": "",
         "error": "",
         "commit": "",
+        "review_feedback": "",  # older tasks lack it; read with .get()
         "history": [],
     }
     doc["next_id"] += 1

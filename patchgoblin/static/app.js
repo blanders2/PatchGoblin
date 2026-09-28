@@ -5,14 +5,14 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 const STATUS_LABEL = {
   unplanned: "Unplanned", planning: "Planning…", drafted: "Drafted", planned: "Planned", queued: "Queued",
-  running: "Running…", done: "Done", failed: "Failed",
+  running: "Running…", review: "Needs review", done: "Done", failed: "Failed",
 };
 const COLUMN_OF = {
   unplanned: "unplanned", planning: "unplanned", drafted: "drafted", planned: "planned",
-  queued: "queue", running: "queue", done: "finished", failed: "finished",
+  queued: "queue", running: "queue", review: "review", done: "finished", failed: "finished",
 };
-// Not locked by the AI and not finished; mirrors LOCKED in app.py.
-const ACTIONABLE = new Set(["unplanned", "drafted", "planned", "queued", "failed"]);
+// Waiting on the user: not locked by the AI (LOCKED in app.py) and not done.
+const ACTIONABLE = new Set(["unplanned", "drafted", "planned", "queued", "review", "failed"]);
 const BUSY = new Set(["planning", "running"]);
 
 const state = {
@@ -470,6 +470,7 @@ function sortTasks(col, tasks) {
   if (col === "queue") {
     return tasks.sort((a, b) => (a.status === "running" ? -1 : b.status === "running" ? 1 : by("queued_at")(a, b)));
   }
+  if (col === "review") return tasks.sort(by("finished_at"));
   if (col === "finished") return tasks.sort(by("finished_at", -1));
   return tasks.sort((a, b) => a.id - b.id);
 }
@@ -525,7 +526,9 @@ function onTabKeydown(e) {
 
 // Statuses in which the plan can still be refined, so its questions still matter.
 const PLANNABLE = new Set(["unplanned", "drafted", "planned", "failed"]);
-const hasOpenQuestions = t => PLANNABLE.has(t.status) && (t.questions || []).length > 0;
+// Statuses whose finished work can be sent back to the AI with feedback.
+const REVIEWABLE = new Set(["review", "done"]);
+const hasOpenQuestions = t =>PLANNABLE.has(t.status) && (t.questions || []).length > 0;
 
 function renderCard(t) {
   const p = currentProject();
@@ -589,13 +592,15 @@ const BATCH_ACTIONS = [
   { action: "queue", label: "Queue for AI", from: ["drafted", "planned", "failed"] },
   { action: "dequeue", label: "Remove from queue", from: ["queued"] },
   { action: "unplan", label: "Back to unplanned", from: ["drafted", "planned"] },
-  { action: "reopen", label: "Reopen", from: ["done"] },
+  { action: "approve", label: "Approve", from: ["review"] },
+  { action: "reopen", label: "Reopen", from: ["done", "review"] },
   { action: "cancel", label: "Cancel", from: ["planning", "running"], cls: "danger" },
 ];
-const NOT_BUSY = ["unplanned", "drafted", "planned", "queued", "done", "failed"];
+const NOT_BUSY = ["unplanned", "drafted", "planned", "queued", "review", "done", "failed"];
 const BATCH_VERB = { delete: "Deleted", set_provider: "Updated", set_models: "Updated", plan: "Started planning",
   mark_planned: "Marked planned", mark_drafted: "Moved to drafted", queue: "Queued", dequeue: "Removed from queue",
-  unplan: "Moved back", reopen: "Reopened", cancel: "Cancelled" };
+  unplan: "Moved back", reopen: "Reopened", approve: "Approved", send_back: "Sent back",
+  cancel: "Cancelled" };
 
 const tabTasks = () => sortTasks(state.tab, state.tasks.filter(t => COLUMN_OF[t.status] === state.tab));
 const selectedTasks = () => state.tasks.filter(t => state.selected.has(t.id));
@@ -872,7 +877,15 @@ function renderDrawer(fillForm) {
   showError($("#d-error"), t.error);
 
   const canPlan = PLANNABLE.has(t.status);
-  $("#d-feedback-wrap").hidden = !canPlan;
+  const reviewing = REVIEWABLE.has(t.status);
+  $("#d-feedback-wrap").hidden = !canPlan && !reviewing;
+  $("#d-feedback-label").replaceChildren(...(reviewing ? ["Feedback for the AI"]
+    : ["Other feedback for the AI ", el("span", { class: "muted" }, "(optional)")]));
+  $("#d-feedback").placeholder = reviewing ? "e.g. The new button is missing on the mobile layout."
+    : "e.g. Use the existing API client instead of adding a new one.";
+  const reviewFeedback = (t.review_feedback || "").trim();
+  $("#d-review-feedback").hidden = !reviewFeedback || reviewing;
+  $("#d-review-feedback-text").textContent = reviewFeedback;
   renderQuestions(t, canPlan);
   renderEditActions();
   const hasPlan = (t.plan || "").trim().length > 0;
@@ -880,7 +893,15 @@ function renderDrawer(fillForm) {
   const asking = hasOpenQuestions(t);
   const planLabel = hasPlan ? "Refine plan with AI" : "Plan with AI";
   const planTip = "The AI drafts a new plan (read-only), using any feedback below. Unsaved edits are saved first.";
-  const queueTip = "The AI will implement this plan and commit the result. Unsaved edits are saved first.";
+  const queueTip = "The AI will implement this plan and commit the result; finished runs wait in Review. "
+    + "Unsaved edits are saved first.";
+  const sendBackTip = "AI re-plans with your feedback; the committed work stays";
+  const sendBack = () => {
+    const b = actionButton("Send back to AI", act("send_back"), "", sendBackTip);
+    b.dataset.needsFeedback = "";
+    b.disabled = !$("#d-feedback").value.trim();
+    return b;
+  };
   const skipTip = "Accept the plan as written without asking the AI";
 
   const A = [];
@@ -918,8 +939,14 @@ function renderDrawer(fillForm) {
     case "running":
       A.push(actionButton("Cancel run", act("cancel"), "danger"));
       break;
+    case "review":
+      A.push(actionButton("Approve → Finished", act("approve"), "primary", "The work is good; move it to Finished"));
+      A.push(sendBack());
+      A.push(actionButton("Reopen", act("reopen"), "ghost", "Back to Planned without asking the AI"));
+      break;
     case "done":
-      A.push(actionButton("Reopen", act("reopen")));
+      A.push(actionButton("Reopen", act("reopen"), "", "Back to Planned without asking the AI"));
+      A.push(sendBack());
       break;
     case "failed":
       A.push(actionButton("Queue to run again", act("queue"), asking ? "" : "primary", queueTip));
@@ -934,6 +961,7 @@ function renderDrawer(fillForm) {
   const commit = $("#d-commit");
   commit.hidden = !t.commit;
   commit.textContent = t.commit ? `Committed as ${t.commit.slice(0, 12)}` : "";
+  renderChanges(t, reviewing);
 
   $("#d-output-wrap").hidden = !t.output || t.active;
   $("#d-output").textContent = t.output || "";
@@ -943,6 +971,25 @@ function renderDrawer(fillForm) {
     el("li", {}, el("span", { class: "muted" }, new Date(h.at).toLocaleString()), " ", h.event)));
 
   if (t.active && !pollLive.timer) pollLive();
+}
+
+// Files changed by the task's commit, fetched once per commit while the drawer shows it.
+async function renderChanges(t, show) {
+  const box = $("#d-changes");
+  if (!show || !t.commit) { box.hidden = true; renderChanges.key = null; return; }
+  const key = `${state.pid}/${t.id}/${t.commit}`;
+  if (renderChanges.key === key) return;
+  renderChanges.key = key;
+  box.hidden = true;
+  let files;
+  try {
+    files = (await api("GET", `/api/projects/${state.pid}/tasks/${t.id}/changes`)).files;
+  } catch { files = []; }
+  if (renderChanges.key !== key) return;
+  $("#d-changes-count").textContent = `(${files.length})`;
+  $("#d-changes-list").replaceChildren(...files.map(f =>
+    el("li", {}, el("span", { class: `change-status s-${f.status}` }, f.status), " ", f.path)));
+  box.hidden = !files.length;
 }
 
 // The drawer's model selects list the models of the task's effective provider. Blank falls back
@@ -996,11 +1043,11 @@ async function doAction(action, extra = {}) {
   }
   if (state.dirty && action !== "cancel" && !(await saveTask(true))) return;
   const body = { action, ...extra };
-  if (action === "plan") body.feedback = $("#d-feedback").value;
+  if (action === "plan" || action === "send_back") body.feedback = $("#d-feedback").value;
   try {
     const updated = await api("POST", `/api/projects/${state.pid}/tasks/${t.id}/action`, body);
     Object.assign(t, updated);
-    if (action === "plan") {
+    if (action === "plan" || action === "send_back") {
       $("#d-feedback").value = "";
       resetQuestionAnswers();
     }
@@ -1550,6 +1597,10 @@ function init() {
     renderDrawer(true);
   };
   $("#d-answer-btn").onclick = answerQuestions;
+  $("#d-feedback").addEventListener("input", () => {
+    const empty = !$("#d-feedback").value.trim();
+    for (const b of $$("#d-flow-actions [data-needs-feedback]")) b.disabled = empty;
+  });
   document.addEventListener("click", e => {
     const target = e.target.closest("[data-close]");
     if (!target) return;

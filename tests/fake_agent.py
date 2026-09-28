@@ -23,3 +23,7 @@ else:
     with open("agent_output.txt", "w", encoding="utf-8") as fh:
         fh.write("written by fake agent\n")
     print("Created agent_output.txt")
+    if "## Feedback from reviewing the last AI run" in prompt:
+        with open("followup.txt", "w", encoding="utf-8") as fh:
+            fh.write("follow-up\n")
+        print("Created followup.txt")

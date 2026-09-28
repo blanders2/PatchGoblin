@@ -176,7 +176,8 @@ def ready_status(plan: str) -> str:
 
 
 def plan_prompt(task: dict, feedback: str = "", answers: list[dict] | None = None,
-                rewrite_title: bool = False, trust: str = "normal") -> str:
+                rewrite_title: bool = False, trust: str = "normal", review_feedback: str = "",
+                commit: str = "") -> str:
     # The title rule stays last so "Start your reply with…" wins.
     instructions = (PLAN_INSTRUCTIONS + TRUST_INSTRUCTIONS.get(trust, "")
                     + (TITLE_INSTRUCTIONS if rewrite_title else ""))
@@ -194,7 +195,18 @@ def plan_prompt(task: dict, feedback: str = "", answers: list[dict] | None = Non
     if feedback.strip():
         parts.append(f"## Feedback on the plan from the user\n{feedback.strip()}\n\n"
                      "Produce a revised, complete plan that addresses this feedback.")
+    if review_feedback.strip():
+        parts.append(_review_section(review_feedback, commit))
     return "\n\n".join(parts) + "\n"
+
+
+def _review_section(feedback: str, commit: str = "") -> str:
+    """The engineer's feedback on a finished AI run, framed as follow-up work."""
+    where = (f"The previous attempt was already committed (`{commit[:10]}`)" if commit
+             else "The previous attempt's changes are already in the working tree")
+    return (f"## Feedback from reviewing the last AI run\n{feedback.strip()}\n\n"
+            f"{where}, so the current code already includes it. Plan only the follow-up changes "
+            "needed on top of the current code; do not redo work that is already correct.")
 
 
 def run_prompt(task: dict) -> str:
@@ -203,6 +215,8 @@ def run_prompt(task: dict) -> str:
         parts.append(f"## Description\n{task['description'].strip()}")
     plan = task.get("plan", "").strip() or "(No written plan: use the description.)"
     parts.append(f"## Plan\n{plan}")
+    if (task.get("review_feedback") or "").strip():
+        parts.append(_review_section(task["review_feedback"], task.get("commit", "")))
     return "\n\n".join(parts) + "\n"
 
 

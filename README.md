@@ -44,7 +44,8 @@ committed along with it.
 | Planned | Has a plan (AI-drafted or yours). You can edit it, refine it with AI feedback, or queue it. |
 | Queued | Waiting for the AI to implement it. |
 | Running… | The AI is working in the project directory. Live output is shown in the task panel. |
-| Done | Finished and committed. You can reopen it. |
+| Needs review | The AI run finished and its work is committed. Approve it, send it back to the AI with feedback, or reopen it. |
+| Done | Approved by you. You can send it back to the AI with feedback, or reopen it. |
 | Failed | The run failed or was cancelled. You can re-queue it, replan it, or mark it planned. |
 
 Planning and implementation both run **in the project's directory, on the project's
@@ -65,6 +66,16 @@ at once, and each job is a separate AI process. If batch planning hits your prov
 rate limits, set **Plan limit** in Project settings. Extra tasks then show as Planning…
 and wait for a free slot. Leave it blank for unlimited. Lowering the limit doesn't stop
 jobs that are already running.
+
+**Review.** A successful run is committed (and auto-synced, if that's on) as soon as it
+finishes, then waits in the **Review** tab for you to check it. The drawer lists the files
+its commit changed. Unreviewed work is therefore already on your branch, and pushed if
+auto-sync is on.
+- **Approve → Finished** moves the task to Finished (Done). It also works as a batch action.
+- **Send back to AI** (from Review or Finished) needs feedback. The AI re-plans with it as
+  a follow-up on top of the existing commit, rather than redoing the work. Queue the new
+  plan as usual; the follow-up run is committed on top and lands in Review again.
+- **Reopen** returns the task to Planned without asking the AI.
 
 **AI titles.** When the AI plans a task (including replanning), it also suggests a
 concise title, which replaces the task's title. The old title is kept in the task's
@@ -97,7 +108,7 @@ questions goes from creation to an AI run and a commit without you reviewing the
 **Batch actions.** Tick the checkbox on each card you want (Shift+click selects a
 range, Space toggles the focused card, Esc clears). A toolbar then shows the actions
 that apply to the ticked tasks: Plan with AI, Mark planned, Move to drafted, Queue for AI, Remove from
-queue, Back to unplanned, Reopen, Cancel, Set AI and Delete. The same rules apply as for
+queue, Back to unplanned, Approve, Reopen, Cancel, Set AI and Delete. The same rules apply as for
 a single task. Tasks that don't qualify are skipped and listed in the result message,
 and the rest still go through. Batch-queued tasks run in id order. Selections stay
 within the current tab.
@@ -119,7 +130,7 @@ diverged history is refused) or **Rebase** (your commits are replayed on top of
 origin's). No merge commits are ever made, and a conflicting rebase is aborted, so the
 repository is never left mid-merge. Sync is refused while any AI job or chat is running
 in the project. Tick **Auto-sync** in Project settings (off by default) to sync after every
-successful task commit; if that sync fails, the task stays done and the failure is
+successful task commit; if that sync fails, the task still goes to Review and the failure is
 written to its history. Credentials come from your own git setup (SSH keys and agent,
 or a credential manager); prompts are turned off, so missing credentials fail at once
 instead of hanging. For SSH projects the remote is reached from the SSH host. A URL

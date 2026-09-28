@@ -13,6 +13,7 @@
   --b-unplanned: #e7e9e5; --t-unplanned: #4a534d;
   --b-planning: #e4ecfb; --t-planning: #2c55a8;
   --b-drafted: #fcead8; --t-drafted: #9a4a00;
+  --b-review: #efe5fa; --t-review: #6a3aa8;
   --b-planned: #e3f1e8; --t-planned: #256b41;
   --b-queued: #f7efd9; --t-queued: #7d5b00;
   --b-running: #e4ecfb; --t-running: #2c55a8;
@@ -37,6 +38,7 @@
     --b-unplanned: #2a302c; --t-unplanned: #c3cbc5;
     --b-planning: #1f2d45; --t-planning: #9dbcf5;
     --b-drafted: #3f2a18; --t-drafted: #f2b27a;
+    --b-review: #33254a; --t-review: #cfb2f5;
     --b-planned: #1e3527; --t-planned: #8fd6a9;
     --b-queued: #3a3019; --t-queued: #e8c56d;
     --b-running: #1f2d45; --t-running: #9dbcf5;
@@ -246,6 +248,7 @@ button.link:hover { filter: none; }
 .badge.planned {background: var(--b-planned); color: var(--t-planned); }
 .badge.queued { background: var(--b-queued); color: var(--t-queued); }
 .badge.running { background: var(--b-running); color: var(--t-running); }
+.badge.review { background: var(--b-review); color: var(--t-review); }
 .badge.done { background: var(--b-done); color: var(--t-done); }
 .badge.failed { background: var(--b-failed); color: var(--t-failed); }
 .badge.planning::before, .badge.running::before {
@@ -295,6 +298,17 @@ button.link:hover { filter: none; }
 .questions[hidden] { display: none; }
 .questions h4 { margin: 0; font-size: 14px; color: var(--t-queued); }
 .questions p { margin: 0; }
+.review-feedback {
+  border: 1px solid var(--t-review); border-left-width: 4px; border-radius: 8px;
+  background: var(--b-review); padding: 8px 12px;
+}
+.review-feedback[hidden] { display: none; }
+.review-feedback h4 { margin: 0 0 4px; font-size: 13px; color: var(--t-review); }
+.review-feedback p { margin: 0; white-space: pre-wrap; }
+.changes-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.change-status { display: inline-block; width: 1.4em; font-weight: 600; color: var(--muted); }
+.change-status.s-A { color: var(--t-done); }
+.change-status.s-D { color: var(--t-failed); }
 .question-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 10px; }
 .question-list li::marker { color: var(--t-queued); font-weight: 600; }
 .question-list .question-text { color: var(--text); font-size: 13.5px; margin-bottom: 4px; }

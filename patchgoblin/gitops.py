@@ -98,6 +98,28 @@ def recent_commits(host, path: str, limit: int = 30) -> list[dict]:
     return commits
 
 
+_SHA = re.compile(r"^[0-9a-fA-F]{4,64}$")
+
+
+def commit_files(host, path: str, sha: str) -> list[dict]:
+    """The files a commit changed, as ``{"status", "path"}``, leaving out PatchGoblin's own
+    metadata. [] for an unknown or malformed sha."""
+    if not _SHA.match(sha or ""):
+        return []
+    res = git(host, path, "-c", "core.quotePath=false", "show", "--name-status", "--format=", sha, "--")
+    if not res.ok:
+        return []
+    files = []
+    for line in res.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        name = parts[-1]  # a rename lists old and new paths; show the new one
+        if not name.startswith(".patchgoblin/"):
+            files.append({"status": parts[0][:1], "path": name})
+    return files
+
+
 # ---- remote sync ------------------------------------------------------------
 _BAD_URL = re.compile(r"[\s\x00-\x1f\x7f]")
 
