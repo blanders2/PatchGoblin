@@ -14,12 +14,12 @@ import re
 # Agents opencode ships with; custom ones come from opencode.json or agent/*.md files.
 BUILTIN_AGENTS = frozenset({"build", "plan", "general", "explore"})
 CONFIG_NAMES = ("opencode.json", "opencode.jsonc")
-_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07")
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07")
 _MODEL_LINE = re.compile(r"^\S+/\S+$")
 
 
 def strip_ansi(text: str) -> str:
-    return _ANSI.sub("", text or "")
+    return ANSI.sub("", text or "")
 
 
 def strip_jsonc(text: str) -> str:

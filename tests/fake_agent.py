@@ -1,4 +1,5 @@
-"""Stand-in for the claude/codex/opencode CLIs in tests: reads the prompt on stdin."""
+"""Stand-in for the claude/codex/opencode/cline CLIs in tests: reads the prompt on stdin.
+With --styled it first prints ANSI-styled thinking and tool-call chatter, like Cline does."""
 import os
 import sys
 
@@ -15,6 +16,12 @@ if mode == "plan" and "EDIT_DURING_PLAN" in prompt:
 if "FAIL" in prompt:
     print("simulated agent failure", file=sys.stderr)
     sys.exit(3)
+
+if "--styled" in sys.argv:
+    print("\x1b[2m[thinking] \x1b[0m\x1b[2mLet me look\x1b[0m\x1b[2m around.\x1b[0m")
+    print("I'll read the files first.")
+    print("\x1b[36m[read_files]\x1b[0m {\"files\": [\"a.txt\"]}\n   \x1b[90m> \x1b[0m\x1b[2m1 | hello\x1b[0m")
+    sys.stdout.flush()
 
 if mode == "plan":
     if "Title: <" in prompt:

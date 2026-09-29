@@ -1,7 +1,7 @@
 # PatchGoblin
 
 A small Flask web app for queueing up AI work on your projects. Write tasks, get an
-AI (Claude Code, Codex, opencode, or any OpenAI-compatible API such as OpenAI, OpenRouter or
+AI (Claude Code, Codex, opencode, Cline, or any OpenAI-compatible API such as OpenAI, OpenRouter or
 Ollama) to help plan them, then queue them for the
 AI to implement. Projects can be local directories or directories on SSH hosts, and
 every completed task is committed to the project's own git repository.
@@ -151,7 +151,7 @@ Each project has a **Planning Model** (used to plan tasks), a **Coding Model** (
 run them) and an optional **Chat model** (blank means the planning model), all set in
 Project settings; the chat panel's model picker is a quick override that saves at once. Each task can override its planning and coding models in the task
 drawer, or for many tasks at once with **Set models** in the batch bar. **Settings** has
-a default planning and coding model for Claude Code, Codex, opencode and each endpoint.
+a default planning and coding model for Claude Code, Codex, opencode, Cline and each endpoint.
 opencode's model dropdown lists the models in the project's opencode config (or, if it
 names none, `opencode models`).
 
@@ -179,6 +179,8 @@ field, after saving a one-time backup to `projects.json.bak` in its data directo
 - **Codex** (`codex exec`) uses the `read-only` sandbox for planning and
   `workspace-write` for runs.
 - **opencode** (`opencode run`) runs a named opencode agent (see below).
+- **Cline** (`cline`) plans in plan mode (`-p`) and runs in act mode, both with
+  `--auto-approve true` because no one is there to approve tool calls (see below).
 - **OpenAI-compatible endpoints** run a tool-calling agent against a Chat Completions
   API (see below). The agent can list, read and search files, and during runs it can
   also write files. Its tools run through the project's host, so remote projects don't
@@ -238,6 +240,25 @@ like the Claude Code run command.
 An OpenAI-compatible endpoint saved with the id `opencode` (from before opencode was a
 CLI provider) is renamed to `opencode-api` on first start. Projects and tasks that used it
 are updated to match.
+
+### Cline
+
+Install and log in to the Cline CLI on the machine that hosts the project
+(`npm i -g cline`, then `cline auth`). PatchGoblin runs `cline -p --auto-approve true`
+for planning and chat and `cline --auto-approve true` for runs, with the prompt on stdin.
+Model overrides are passed with `-m` and are ids for the provider you set up with
+`cline auth`; there is no built-in model list, so pick **Custom…** to enter one.
+
+Cline prints its thinking and tool calls along with its answer. PatchGoblin keeps all of
+it in the job log, but only Cline's final reply becomes the plan or chat answer.
+
+Cline's plan mode blocks its file-editing tools, but it can still run shell commands,
+which could change files. **Fail planning if Cline changes files** (on by default) runs
+the same `git status` check as opencode's. Act mode has unsandboxed shell access, just
+like the Claude Code run command.
+
+An endpoint saved with the id `cline` is renamed to `cline-api` on first start, in the same
+way as `opencode` above.
 
 ### OpenAI-compatible endpoints
 

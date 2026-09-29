@@ -407,6 +407,18 @@
         <input type="checkbox" name="opencode.plan_must_not_edit"> Fail planning if the plan agent edits files</label>
     </fieldset>
     <fieldset>
+      <legend>Cline</legend>
+      <label>Planning command <input name="cline.plan" class="mono"></label>
+      <label>Run command <input name="cline.run" class="mono"></label>
+      <div class="row">
+        <label class="grow">Default planning model <input name="cline.plan_model" placeholder="Cline default"></label>
+        <label class="grow">Default coding model <input name="cline.code_model" placeholder="Cline default"></label>
+      </div>
+      <p class="muted small">Models are ids for the provider set up with <code>cline auth</code>.</p>
+      <label class="check" title="Cline's plan mode blocks file edits but can still run commands. Changed files are kept for you to review, not reverted">
+        <input type="checkbox" name="cline.plan_must_not_edit"> Fail planning if Cline changes files</label>
+    </fieldset>
+    <fieldset>
       <legend>OpenAI-compatible APIs</legend>
       <p class="muted small">Any Chat Completions server with tool calling: OpenAI, OpenRouter, Ollama, LM Studio…
         A saved key takes priority over the env var. Saved keys are stored in plain text in PatchGoblin's

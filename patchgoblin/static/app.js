@@ -96,7 +96,7 @@ const openTask = () => state.tasks.find(t => t.id === state.openTid);
 const MODELS = JSON.parse(document.body.dataset.models || "{}");
 let PROVIDERS = JSON.parse(document.body.dataset.providers || "[]");
 const CUSTOM_MODEL = "\u0000custom";
-const CLI = new Set(["claude", "codex", "opencode"]);
+const CLI = new Set(["claude", "codex", "opencode", "cline"]);
 // opencode's models come from each project's own opencode config, so they are listed per project.
 const PER_PROJECT_MODELS = new Set(["opencode"]);
 
@@ -1346,6 +1346,7 @@ const SETTING_FIELDS = [
   "claude.plan_model", "claude.code_model", "codex.plan_model", "codex.code_model",
   "opencode.plan", "opencode.run", "opencode.plan_agent", "opencode.run_agent",
   "opencode.plan_model", "opencode.code_model", "opencode.require_agents", "opencode.plan_must_not_edit",
+  "cline.plan", "cline.run", "cline.plan_model", "cline.code_model", "cline.plan_must_not_edit",
   "timeouts.plan", "timeouts.run", "automation.auto_plan", "automation.auto_queue",
 ];
 

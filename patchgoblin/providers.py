@@ -1,9 +1,11 @@
 """AI back ends. Each runs *in the project directory on the project's host*:
 
-* ``claude`` / ``codex`` / ``opencode`` — the CLI agents, launched in the project
-  directory (over SSH for remote projects), with the prompt sent on stdin. opencode
+* ``claude`` / ``codex`` / ``opencode`` / ``cline`` — the CLI agents, launched in the
+  project directory (over SSH for remote projects), with the prompt sent on stdin. opencode
   runs a named opencode agent (``plan_agent`` for planning and chat, ``run_agent`` for
   runs) and gets extra checks, since its agents are defined by the user's opencode config.
+  Cline's styled output is reduced to its final reply, and its plan mode (which can still
+  run commands) gets the same no-edits check.
 * configured endpoints (``openai``, ``openrouter``, …) — a tool-calling loop
   against an OpenAI-compatible Chat Completions API. The model's file and command
   tools are executed through the project's host, so remote projects work without
@@ -251,6 +253,9 @@ def run_ai(provider: str, mode: str, prompt: str, *, host, project: dict, settin
     if provider == "opencode":
         return run_opencode(settings["commands"][provider], mode, prompt, host=host, cwd=project["path"],
                             model=model, timeout=timeout, job=job, run_marker=run_marker)
+    if provider == "cline":
+        return run_cline(settings["commands"][provider], mode, prompt, host=host, cwd=project["path"],
+                         model=model, timeout=timeout, job=job, run_marker=run_marker)
     return run_cli(settings["commands"][provider], mode, prompt, host=host, cwd=project["path"],
                    model=model, timeout=timeout, job=job)
 
@@ -293,12 +298,27 @@ def run_opencode(cfg: dict, mode: str, prompt: str, *, host, cwd: str, model: st
         # Highest-precedence inline config: the planning agent may read but not edit or run commands.
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(
             {"agent": {agent: {"permission": {"edit": "deny", "bash": "deny"}}}})
+
+    def run() -> Outcome:
+        outcome = run_cli(cfg, mode, prompt, host=host, cwd=cwd, model=model, timeout=timeout, job=job, env=env)
+        outcome.text = opencode.strip_ansi(outcome.text).strip()
+        outcome.error = opencode.strip_ansi(outcome.error)
+        return outcome
+
+    return _no_plan_edits(cfg, mode, run, host=host, cwd=cwd, job=job, run_marker=run_marker,
+                          blame=lambda paths: f"opencode's plan agent modified files: {paths}. Review them, "
+                                              f'and set agent.{agent} permissions edit/bash to "deny" in '
+                                              "opencode.json.")
+
+
+def _no_plan_edits(cfg: dict, mode: str, run, *, host, cwd: str, job, run_marker, blame) -> Outcome:
+    """``run()``, failing a plan (or chat) that left the working tree changed (the changed files
+    are reported, never reverted) unless ``plan_must_not_edit`` is off. ``blame(paths)`` is the
+    error message."""
     check = mode == "plan" and cfg.get("plan_must_not_edit", True) is not False
     before = set(status_lines(host, cwd, ignore_metadata=True)) if check else set()
     marker = run_marker() if check and run_marker else None
-    outcome = run_cli(cfg, mode, prompt, host=host, cwd=cwd, model=model, timeout=timeout, job=job, env=env)
-    outcome.text = opencode.strip_ansi(outcome.text).strip()
-    outcome.error = opencode.strip_ansi(outcome.error)
+    outcome = run()
     if not check:
         return outcome
     changed = set(status_lines(host, cwd, ignore_metadata=True)) ^ before
@@ -309,9 +329,55 @@ def run_opencode(cfg: dict, mode: str, prompt: str, *, host, cwd: str, model: st
         job.write(f"Files changed while a task run was active, so they aren't blamed on planning: "
                   f"{', '.join(paths)}\n")
         return outcome
-    return Outcome(False, outcome.text,
-                   f"opencode's plan agent modified files: {', '.join(paths)}. Review them, and set "
-                   f'agent.{agent} permissions edit/bash to "deny" in opencode.json.')
+    return Outcome(False, outcome.text, blame(", ".join(paths)))
+
+
+class _PlainLog:
+    """A job whose log writes have ANSI styling removed (an escape split across two writes is
+    held back until it is complete)."""
+
+    def __init__(self, job):
+        self._job, self._pending = job, ""
+
+    def write(self, text: str) -> None:
+        text = self._pending + text
+        at = text.rfind("\x1b")
+        if at != -1 and len(text) - at < 32 and not opencode.ANSI.match(text, at):
+            text, self._pending = text[:at], text[at:]
+        else:
+            self._pending = ""
+        if text:
+            self._job.write(opencode.strip_ansi(text))
+
+    def __getattr__(self, name):
+        return getattr(self._job, name)
+
+
+def cline_reply(output: str) -> str:
+    """Cline's final reply from its plain output. Its thinking and tool calls are styled with
+    ANSI escapes and the reply is not, so the reply is whatever follows the last escape."""
+    last = None
+    for last in opencode.ANSI.finditer(output or ""):
+        pass
+    reply = output[last.end():].strip() if last else ""
+    return reply or opencode.strip_ansi(output).strip()
+
+
+def run_cline(cfg: dict, mode: str, prompt: str, *, host, cwd: str, model: str,
+              timeout: float, job, run_marker=None) -> Outcome:
+    """The Cline CLI: its output is cut down to the final reply, and since plan mode only
+    blocks file-editing tools (commands can still change files), planning is checked too."""
+
+    def run() -> Outcome:
+        outcome = run_cli(cfg, mode, prompt, host=host, cwd=cwd, model=model, timeout=timeout,
+                          job=_PlainLog(job))
+        outcome.text = cline_reply(outcome.text)
+        outcome.error = opencode.strip_ansi(outcome.error)
+        return outcome
+
+    return _no_plan_edits(cfg, mode, run, host=host, cwd=cwd, job=job, run_marker=run_marker,
+                          blame=lambda paths: f"Cline modified files while planning: {paths}. Review them; "
+                                              "the planning command should use plan mode (-p).")
 
 
 def run_cli(cfg: dict, mode: str, prompt: str, *, host, cwd: str, model: str,

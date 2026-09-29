@@ -19,16 +19,18 @@ from datetime import datetime, timezone
 from .hosts import host_for
 
 STATUSES = ("unplanned", "planning", "drafted", "planned", "queued", "running", "review", "done", "failed")
-CLI_PROVIDERS = ("claude", "codex", "opencode")
-CLI_NAMES = {"claude": "Claude Code", "codex": "Codex", "opencode": "opencode"}
+CLI_PROVIDERS = ("claude", "codex", "opencode", "cline")
+CLI_NAMES = {"claude": "Claude Code", "codex": "Codex", "opencode": "opencode", "cline": "Cline"}
 # Suggestions for the model dropdowns; any other model name can still be entered as "Custom…".
 # "openai" is only used for the built-in endpoint with that id. opencode's models come from
-# each project's opencode config (see opencode.py), so it has no fixed list.
+# each project's opencode config (see opencode.py), and Cline's from whichever provider the
+# user set up with `cline auth`, so neither has a fixed list.
 MODELS = {
     "claude": ("opus", "sonnet", "haiku", "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5",
                "claude-haiku-4-5"),
     "codex": ("gpt-5-codex", "gpt-5", "gpt-5-mini"),
     "opencode": (),
+    "cline": (),
     "openai": ("gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1"),
 }
 TASKS_DIR = ".patchgoblin"
@@ -62,6 +64,15 @@ DEFAULT_SETTINGS = {
             "plan_model": "",
             "code_model": "",
             "require_agents": True,  # refuse to start if a custom agent isn't defined
+            "plan_must_not_edit": True,  # fail a plan (or chat) that changed files
+        },
+        "cline": {
+            # Plan mode (-p) blocks file edits but can still run commands; act mode is the default.
+            "plan": "cline -p --auto-approve true",
+            "run": "cline --auto-approve true",
+            "model_flag": "-m",
+            "plan_model": "",
+            "code_model": "",
             "plan_must_not_edit": True,  # fail a plan (or chat) that changed files
         },
     },
@@ -273,13 +284,13 @@ def rename_reserved_endpoints(endpoints: list) -> tuple[list, dict]:
 
 
 def rename_task_providers(doc: dict, renames: dict) -> bool:
-    """Point tasks saved before the renames (tasks.json version < 4) at their endpoint's new id.
-    Changes ``doc`` in place; True if any task changed."""
-    if not renames or (doc.get("version") or 1) >= 4:
-        return False
+    """Point tasks saved before an id became a CLI's (tasks.json version < RESERVED_SINCE[id])
+    at their endpoint's new id. Changes ``doc`` in place; True if any task changed."""
+    version = doc.get("version") or 1
     changed = False
     for task in doc.get("tasks", []):
-        if task.get("provider") in renames:
+        old = task.get("provider")
+        if old in renames and version < RESERVED_SINCE.get(old, DOC_VERSION):
             task["provider"] = renames[task["provider"]]
             changed = True
     return changed
@@ -341,7 +352,10 @@ class Settings:
 # Engine.reconcile; every write stamps the current version). 3: the 'review' status exists.
 # 4: a task provider "opencode" means the opencode CLI; older files meant an endpoint with that
 # id, which was renamed (TaskStore applies Settings' provider_renames when loading them).
-DOC_VERSION = 4
+# 5: likewise for "cline" (the Cline CLI).
+DOC_VERSION = 5
+# The tasks.json version from which each CLI id means the CLI rather than an endpoint.
+RESERVED_SINCE = {"opencode": 4, "cline": 5}
 
 
 def empty_doc() -> dict:

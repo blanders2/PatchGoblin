@@ -464,9 +464,9 @@ class WorkflowTests(AppTestCase):
         doc = store.read(project, fresh=True)
         self.assertEqual([t["status"] for t in doc["tasks"]], ["drafted", "planned"])
         self.assertEqual(doc["tasks"][0]["history"][-1]["event"], "Plan has open questions")
-        self.assertEqual(doc["version"], 4)
+        self.assertEqual(doc["version"], 5)
 
-        stamp = seed(2, [ASKING_PLAN, ASKING_PLAN])
+        stamp = seed(2,[ASKING_PLAN, ASKING_PLAN])
         engine.reconcile(project)  # already migrated: planned tasks keep their questions
         self.assertEqual(os.stat(path).st_mtime_ns, stamp)
 
@@ -1462,7 +1462,7 @@ class EndpointSettingsTests(AppTestCase):
         data = res.get_json()
         self.assertEqual([e["id"] for e in data["endpoints"]], ["openrouter", "local"])
         self.assertEqual([p["id"] for p in data["providers"]],
-                         ["claude", "codex", "opencode", "openrouter", "local"])
+                         ["claude", "codex", "opencode", "cline", "openrouter", "local"])
         self.assertIn("x/y", data["models"]["openrouter"])
         self.assertNotIn("sk-secret", json.dumps(data))
         got = self.client.get("/api/settings").get_json()
@@ -1913,7 +1913,7 @@ class OpencodeTests(AppTestCase):
         client.patch("/api/projects/old/tasks/2", headers=H, json={"provider": "opencode"})
         with open(os.path.join(old_dir, ".patchgoblin", "tasks.json"), encoding="utf-8") as fh:
             doc = json.load(fh)
-        self.assertEqual((doc["version"], [t["provider"] for t in doc["tasks"]]), (4, ["opencode-api", "opencode"]))
+        self.assertEqual((doc["version"], [t["provider"] for t in doc["tasks"]]), (5, ["opencode-api", "opencode"]))
         client.patch("/api/projects/old", headers=H, json={"provider": "opencode"})
 
         stamp = os.stat(settings_path).st_mtime_ns
@@ -1922,6 +1922,135 @@ class OpencodeTests(AppTestCase):
         self.assertEqual(app.config["REGISTRY"].get("old")["provider"], "opencode")
         tasks = app.test_client().get("/api/projects/old/tasks").get_json()["tasks"]
         self.assertEqual([t["provider"] for t in tasks], ["opencode-api", "opencode"])
+
+
+class ClineTests(AppTestCase):
+    def setUp(self):
+        super().setUp()
+        self.set_cline(plan=[sys.executable, FAKE, "plan", "--styled"],
+                       run=[sys.executable, FAKE, "run", "--styled"])
+
+    def set_cline(self, **values):
+        self.app.config["SETTINGS"].update({"commands": {"cline": values}})
+
+    def run_ai(self, mode, prompt, run_marker=None):
+        from patchgoblin.engine import Job
+        from patchgoblin.providers import run_ai
+        job = Job(mode)
+        out = run_ai("cline", mode, prompt, host=LocalHost(), project={"path": self.proj_dir},
+                     settings=self.app.config["SETTINGS"].get(), model="", job=job, run_marker=run_marker)
+        return out, job.text()
+
+    def test_provider_is_listed(self):
+        from patchgoblin.store import provider_choices, valid_provider
+        s = self.app.config["SETTINGS"].get()
+        self.assertIn({"id": "cline", "name": "Cline"}, provider_choices(s))
+        self.assertTrue(valid_provider(s, "cline"))
+        self.assertEqual(s["commands"]["cline"]["plan"][-1], "--styled")
+        pid = self.add_project(provider="cline")["id"]
+        a = self.post_task(pid, "a")["id"]
+        data = self.client.post(f"/api/projects/{pid}/tasks/batch", headers=H, json={
+            "action": "set_provider", "ids": [a], "provider": "cline"}).get_json()
+        self.assertEqual(data["tasks"][0]["provider"], "cline")
+
+    def test_settings_defaults(self):
+        from patchgoblin.store import Settings
+        fresh = Settings(os.path.join(self.tmp.name, "fresh"))
+        fresh.update({"commands": {"claude": {"plan_model": "opus"}}})  # saved file has no cline key
+        cfg = fresh.get()["commands"]["cline"]
+        self.assertEqual((cfg["plan"], cfg["run"], cfg["model_flag"], cfg["plan_model"], cfg["code_model"]),
+                         ("cline -p --auto-approve true", "cline --auto-approve true", "-m", "", ""))
+        self.assertIs(cfg["plan_must_not_edit"], True)
+        data = self.client.get("/api/settings").get_json()
+        self.assertEqual(data["models"]["cline"], [])
+        res = self.client.put("/api/settings", headers=H,
+                              json={"commands": {"cline": {"plan_model": " anthropic/x ", "plan_must_not_edit": False}}})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        cfg = res.get_json()["commands"]["cline"]
+        self.assertEqual((cfg["plan_model"], cfg["plan_must_not_edit"]), ("anthropic/x", False))
+
+    def test_cli_argv(self):
+        from patchgoblin.providers import cli_argv
+        from patchgoblin.store import DEFAULT_SETTINGS
+        cfg = DEFAULT_SETTINGS["commands"]["cline"]
+        self.assertEqual(cli_argv(cfg, "plan", "x/y"), ["cline", "-p", "--auto-approve", "true", "-m", "x/y"])
+        self.assertEqual(cli_argv(cfg, "run", ""), ["cline", "--auto-approve", "true"])
+
+    def test_cline_reply(self):
+        from patchgoblin.providers import cline_reply
+        out = ("\x1b[2m[thinking] \x1b[0m\x1b[2mhm\x1b[0m\nNote first.\n"
+               "\x1b[36m[run_commands]\x1b[0m ls\n   \x1b[2mx\x1b[0m\n## Plan\n1. Do **it**\n")
+        self.assertEqual(cline_reply(out), "## Plan\n1. Do **it**")
+        self.assertEqual(cline_reply("plain answer\n"), "plain answer")
+        self.assertEqual(cline_reply("\x1b[2monly styled\x1b[0m\n"), "only styled")
+
+    def test_plain_log_holds_split_escapes(self):
+        from patchgoblin.providers import _PlainLog
+        written = []
+        log = _PlainLog(mock.Mock(write=written.append, cancelled=False))
+        for chunk in ("a\x1b[", "2mb\x1b", "[0mc", "\x1b[36"):
+            log.write(chunk)
+        self.assertEqual("".join(written), "abc")
+        self.assertIs(log.cancelled, False)
+
+    def test_plan_keeps_only_the_final_reply(self):
+        self.add_project()
+        out, log = self.run_ai("plan", "plan it")
+        self.assertTrue(out.ok, out.error)
+        self.assertEqual(out.text.splitlines(), ["1. Step one: create agent_output.txt", "2. Verify it exists"])
+        self.assertIn("[thinking] Let me look around.", log)  # the log keeps it all, unstyled
+        self.assertIn("[read_files]", log)
+        self.assertNotIn("\x1b", log)
+
+    def test_plan_that_edits_files_fails(self):
+        self.add_project()
+        out, _ = self.run_ai("plan", "please EDIT_DURING_PLAN")
+        self.assertFalse(out.ok)
+        self.assertIn("Cline modified files while planning: plan_edit.txt", out.error)
+        os.remove(os.path.join(self.proj_dir, "plan_edit.txt"))
+        self.set_cline(plan_must_not_edit=False)
+        out, _ = self.run_ai("plan", "please EDIT_DURING_PLAN")
+        self.assertTrue(out.ok, out.error)
+
+    def test_plan_queue_run_with_cline(self):
+        pid = self.add_project(provider="cline")["id"]
+        tid = self.post_task(pid, "Create output file")["id"]
+        self.assertEqual(self.action(pid, tid, "plan").status_code, 200)
+        task = self.wait_for(pid, tid, {"planned", "unplanned"})
+        self.assertEqual(task["status"], "planned", task["error"])
+        self.assertTrue(task["plan"].startswith("1. Step one"), task["plan"])
+        self.assertEqual(self.action(pid, tid, "queue").status_code, 200)
+        task = self.wait_for(pid, tid, {"review", "failed"})
+        self.assertEqual(task["status"], "review", task["error"])
+        self.assertTrue(os.path.exists(os.path.join(self.proj_dir, "agent_output.txt")))
+        self.assertTrue(git_log(self.proj_dir)[0].startswith("PatchGoblin: task #1"))
+
+    def test_endpoint_named_cline_is_renamed(self):
+        data_dir = os.path.join(self.tmp.name, "upgrade")
+        old_dir, new_dir = os.path.join(self.tmp.name, "old"), os.path.join(self.tmp.name, "new")
+        for path, version in ((old_dir, 4), (new_dir, 5)):
+            subprocess.run(["git", "init", "-q", path], check=True)
+            write_file(os.path.join(path, ".patchgoblin", "tasks.json"), json.dumps({
+                "version": version, "next_id": 3,
+                "tasks": [{"id": 1, "title": "a", "status": "unplanned", "provider": "cline", "history": []},
+                          {"id": 2, "title": "b", "status": "unplanned", "provider": "opencode", "history": []}]}))
+        write_file(os.path.join(data_dir, "settings.json"), json.dumps({
+            "endpoints": [{"id": "cline", "name": "Cline API", "base_url": "https://example.com/v1"}],
+            "provider_renames": {"opencode": "opencode-api"}}))
+        write_file(os.path.join(data_dir, "projects.json"), json.dumps({"projects": [
+            {"id": "old", "name": "old", "location": "local", "path": old_dir, "provider": "cline"},
+            {"id": "new", "name": "new", "location": "local", "path": new_dir, "provider": "claude"}]}))
+
+        app = create_app(data_dir, start_engine=False)
+        client = app.test_client()
+        s = app.config["SETTINGS"].get()
+        self.assertEqual([e["id"] for e in s["endpoints"]], ["cline-api"])
+        self.assertEqual(s["provider_renames"], {"opencode": "opencode-api", "cline": "cline-api"})
+        self.assertEqual(app.config["REGISTRY"].get("old")["provider"], "cline-api")
+        providers = lambda pid: [t["provider"] for t in client.get(f"/api/projects/{pid}/tasks").get_json()["tasks"]]
+        # Version 4: "cline" was the endpoint, but "opencode" already meant the CLI.
+        self.assertEqual(providers("old"), ["cline-api", "opencode"])
+        self.assertEqual(providers("new"), ["cline", "opencode"])
 
 
 if __name__ == "__main__":
