@@ -6,13 +6,14 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
 from flask import Flask, abort, jsonify, render_template, request
 
 from . import gitops, opencode
 from .engine import Engine
-from .hosts import HostError, host_for, open_terminal
+from .hosts import HostError, host_for, open_terminal, probe
 from .providers import PLAN_TRUST_LEVELS, endpoint_key, list_models, plan_questions, ready_status
 from .store import (AUTO_MODES, CLI_PROVIDERS, MODELS, STATUSES, Registry, Settings, TaskStore, empty_doc,
                     find_endpoint, find_task, log_event, new_task, now, provider_choices, resolve_auto,
@@ -341,6 +342,14 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     @app.get("/api/projects")
     def list_projects():
         return jsonify(projects=registry.list())
+
+    @app.get("/api/projects/status")
+    def projects_status():
+        # Separate from list_projects: an SSH probe can take ~20 s, so check in parallel.
+        projects = registry.list()
+        with ThreadPoolExecutor(max_workers=min(8, len(projects) or 1)) as pool:
+            results = list(pool.map(probe, projects))
+        return jsonify(status={p["id"]: r for p, r in zip(projects, results)})
 
     def project_fields(data: dict) -> dict:
         provider = data.get("provider") or "claude"

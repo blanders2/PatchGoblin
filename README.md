@@ -28,7 +28,10 @@ on an SSH host. Type the path or use **Browse…** to pick a folder. The browser
 folders on whichever machine the project is on (drives on Windows, the remote file
 system over SSH), and you can add a new subfolder name to start a fresh project. If the directory doesn't exist it's created. If it isn't already the
 root of a git repository, `git init` is run there (with a basic `.gitignore`) and an
-initial commit is made. Existing repositories are left as they are.
+initial commit is made. Existing repositories are left as they are. A dot next to
+each project in the sidebar shows whether its directory can be reached right now
+(green), can't be (red; hover for the reason), or is still being checked (grey). It
+is re-checked every minute and when you return to the tab.
 
 **Tasks** are stored in `.patchgoblin/tasks.json` inside the project directory (on the
 remote host for SSH projects), so the task list and plans live with the code and are

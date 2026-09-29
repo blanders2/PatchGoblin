@@ -139,7 +139,14 @@ button.icon-btn { padding: 6px; line-height: 0; display: inline-flex; align-item
 .project-list li { padding: 8px 10px; border-radius: 8px; cursor: pointer; }
 .project-list li:hover { background: var(--panel-2); }
 .project-list li.active { background: var(--b-planned); }
-.p-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.p-title { font-weight: 600; display: flex; align-items: center; gap: 7px; min-width: 0; }
+.p-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.p-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--muted); }
+.p-dot.ok { background: var(--accent); }
+.p-dot.bad { background: var(--danger); }
+.p-dot.checking { opacity: .5; animation: p-dot-pulse 1.4s ease-in-out infinite; }
+@keyframes p-dot-pulse { 50% { opacity: .15; } }
+@media (prefers-reduced-motion: reduce) { .p-dot.checking { animation: none; } }
 .p-sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 main { flex: 1; min-width: 0; overflow: auto; padding: 18px 22px; }
 

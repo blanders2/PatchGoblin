@@ -399,3 +399,25 @@ def host_for(project: dict):
     if project.get("location") == "ssh":
         return SSHHost(project.get("ssh_target", ""), project.get("ssh_port"))
     return LocalHost()
+
+
+def probe(project: dict) -> dict:
+    """Whether the project's directory can be reached right now: ``{"ok", "error"}``. Never raises."""
+    path = project.get("path", "")
+    try:
+        host = host_for(project)
+        if host.kind == "local":
+            if os.path.isdir(path):
+                return {"ok": True, "error": ""}
+            return {"ok": False, "error": f"Directory does not exist: {path}"}
+        res = host._exec(f"test -d {shlex.quote(path)}", timeout=20)
+        if res.timed_out:
+            return {"ok": False, "error": f"SSH connection to {host.label} timed out"}
+        if res.returncode == 0:
+            return {"ok": True, "error": ""}
+        if res.returncode in (255, 126, 127):
+            return {"ok": False, "error": f"SSH connection to {host.label} failed: "
+                                          f"{res.stderr.strip() or res.returncode}"}
+        return {"ok": False, "error": f"Directory does not exist on {host.label}: {path}"}
+    except (HostError, OSError, ValueError) as exc:
+        return {"ok": False, "error": str(exc) or exc.__class__.__name__}

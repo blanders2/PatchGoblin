@@ -29,6 +29,7 @@ const state = {
   view: "board", // "board" or "settings" (the full-page Project settings view)
   settingsDirty: false,
   automation: {}, // the global automation defaults, for the project settings' "Default (…)" labels
+  reach: {}, // pid -> {ok, error} from /api/projects/status; missing means still checking
 };
 
 function validTab(col) { return Object.values(COLUMN_OF).includes(col) ? col : "unplanned"; }
@@ -209,7 +210,28 @@ async function loadProjects() {
   state.projects = data.projects;
   if (!currentProject()) state.pid = state.projects[0] ? state.projects[0].id : null;
   renderProjects();
+  loadReachability();
   await selectProject(state.pid);
+}
+
+// Whether each project's directory can be reached; SSH checks are slow, so this runs in the background.
+let reachInFlight = false, reachAgain = false;
+async function loadReachability() {
+  // Don't pile up slow checks; a request made meanwhile runs once the current one finishes.
+  if (reachInFlight) { reachAgain = true; return; }
+  reachInFlight = true;
+  try {
+    state.reach = (await api("GET", "/api/projects/status")).status || {};
+    renderProjects();
+  } catch { /* a failed check shouldn't toast on every poll */ }
+  finally { reachInFlight = false; }
+  if (reachAgain) { reachAgain = false; loadReachability(); }
+}
+
+function reachDot(p) {
+  const r = state.reach[p.id];
+  const [cls, label] = !r ? ["checking", "Checking…"] : r.ok ? ["ok", "Reachable"] : ["bad", r.error || "Not reachable"];
+  return el("span", { class: `p-dot ${cls}`, title: label, "aria-label": label, role: "img" });
 }
 
 function renderProjects() {
@@ -217,7 +239,7 @@ function renderProjects() {
   list.replaceChildren(...state.projects.map(p => el("li", {
     class: p.id === state.pid ? "active" : "",
     onclick: () => selectProject(p.id),
-  }, el("div", { class: "p-title" }, p.name),
+  }, el("div", { class: "p-title" }, reachDot(p), el("span", { class: "p-name" }, p.name)),
      el("div", { class: "p-sub" }, p.location === "ssh" ? `ssh · ${p.ssh_target}` : "local"))));
   const has = state.projects.length > 0;
   if (!has) state.view = "board";
@@ -411,6 +433,7 @@ async function saveProjectSettings(ev) {
     renderProjectTrust();
   }
   toast("Project settings saved");
+  loadReachability(); // the path or host may have changed
   closeProjectSettings(true);
   loadTasks(); // turning an automation mode on may have moved tasks
 }
@@ -1330,6 +1353,7 @@ function setupProjectDialog() {
       dialog.close();
       state.projects.push(project);
       renderProjects();
+      loadReachability();
       await selectProject(project.id);
       toast(`Added ${project.name}`);
     } catch (e) {
@@ -1663,7 +1687,10 @@ function init() {
 
   loadProjects().catch(e => toast(e.message, true));
   setInterval(() => { if (!document.hidden) loadTasks(); }, 3000);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) loadTasks(); });
+  setInterval(() => { if (!document.hidden) loadReachability(); }, 60000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) { loadTasks(); loadReachability(); }
+  });
 }
 
 init();

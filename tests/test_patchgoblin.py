@@ -11,7 +11,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from patchgoblin import create_app  # noqa: E402
-from patchgoblin.hosts import HostError, LocalHost, SSHHost, terminal_command  # noqa: E402
+from patchgoblin.hosts import HostError, LocalHost, Result, SSHHost, probe, terminal_command  # noqa: E402
 from patchgoblin.providers import OpenAIAgent, Outcome, ProjectFiles  # noqa: E402
 
 FAKE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_agent.py")
@@ -124,6 +124,30 @@ class ProjectTests(AppTestCase):
         self.assertTrue(self.proj_dir in argv or kwargs["cwd"] == self.proj_dir, (argv, kwargs))
         self.assertEqual(self.client.post(url).status_code, 403)
         self.assertEqual(self.client.post("/api/projects/nope/terminal", headers=H).status_code, 404)
+
+    def test_project_status_reports_reachability(self):
+        pid = self.add_project()["id"]
+        status = self.client.get("/api/projects/status").get_json()["status"]
+        self.assertEqual(status[pid], {"ok": True, "error": ""})
+        os.rename(self.proj_dir, self.proj_dir + "-moved")  # rename: .git files are read-only on Windows
+        status = self.client.get("/api/projects/status").get_json()["status"]
+        self.assertFalse(status[pid]["ok"])
+        self.assertIn("Directory does not exist", status[pid]["error"])
+
+    def test_probe_ssh_never_raises(self):
+        bad = probe({"location": "ssh", "ssh_target": "-bad", "path": "/srv/p"})
+        self.assertFalse(bad["ok"])
+        self.assertTrue(bad["error"])
+        project = {"location": "ssh", "ssh_target": "me@box", "path": "/srv/my app"}
+        cases = [(Result(0, "", ""), True, ""), (Result(1, "", ""), False, "Directory does not exist"),
+                 (Result(255, "", "Connection refused\n"), False, "Connection refused"),
+                 (Result(-1, "", "", timed_out=True), False, "timed out")]
+        for res, ok, text in cases:
+            with mock.patch("patchgoblin.hosts.communicate", return_value=res) as comm:
+                out = probe(project)
+            self.assertEqual(out["ok"], ok, out)
+            self.assertIn(text, out["error"])
+            self.assertIn("test -d '/srv/my app'", comm.call_args[0][0][-1])
 
     def test_index_has_queue_tabs(self):
         html = self.client.get("/").get_data(as_text=True)
