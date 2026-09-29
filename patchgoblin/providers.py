@@ -24,7 +24,8 @@ import urllib.request
 from dataclasses import dataclass
 
 from . import opencode
-from .gitops import git, status_lines
+from .gitops import dirty_fingerprint, git
+from .hosts import HostError
 from .store import find_endpoint
 
 PLAN_INSTRUCTIONS = """\
@@ -316,20 +317,32 @@ def _no_plan_edits(cfg: dict, mode: str, run, *, host, cwd: str, job, run_marker
     are reported, never reverted) unless ``plan_must_not_edit`` is off. ``blame(paths)`` is the
     error message."""
     check = mode == "plan" and cfg.get("plan_must_not_edit", True) is not False
-    before = set(status_lines(host, cwd, ignore_metadata=True)) if check else set()
-    marker = run_marker() if check and run_marker else None
+    before = _fingerprint(host, cwd, job) if check else None
+    marker = run_marker() if before is not None and run_marker else None
     outcome = run()
-    if not check:
+    if before is None:
         return outcome
-    changed = set(status_lines(host, cwd, ignore_metadata=True)) ^ before
-    if not changed:
+    after = _fingerprint(host, cwd, job)
+    if after is None:
         return outcome
-    paths = sorted({line[3:].strip('"') for line in changed})
+    paths = sorted(p for p in before.keys() | after.keys() if before.get(p) != after.get(p))
+    if not paths:
+        return outcome
     if run_marker and (marker != run_marker() or marker[1]):
         job.write(f"Files changed while a task run was active, so they aren't blamed on planning: "
                   f"{', '.join(paths)}\n")
         return outcome
     return Outcome(False, outcome.text, blame(", ".join(paths)))
+
+
+def _fingerprint(host, cwd: str, job) -> dict | None:
+    """The working tree's dirty fingerprint, or None (logged) if git can't give one, so a
+    plan never fails because of git."""
+    try:
+        return dirty_fingerprint(host, cwd)
+    except HostError as exc:
+        job.write(f"Can't check planning edits (git status failed): {exc}\n")
+        return None
 
 
 class _PlainLog:

@@ -63,6 +63,36 @@ def status_lines(host, path: str, ignore_metadata: bool = False) -> list[str]:
     return lines
 
 
+def dirty_fingerprint(host, path: str) -> dict[str, str]:
+    """``{path: "XY blob"}`` for every changed or untracked file outside ``.patchgoblin/``.
+
+    Comparing two fingerprints also catches edits to files that were already dirty, which
+    status lines alone miss. Deleted files have an empty blob."""
+    res = _check(git(host, path, "status", "--porcelain", "-z", "--untracked-files=all"), "status")
+    entries = res.stdout.split("\0")
+    status: dict[str, str] = {}
+    i = 0
+    while i < len(entries):
+        entry = entries[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        xy, name = entry[:2], entry[3:]
+        if "R" in xy or "C" in xy:
+            i += 1  # -z lists a rename as "XY new\0old"; skip the old path
+        if not name.startswith(".patchgoblin/"):
+            status[name] = xy
+    present = [name for name, xy in status.items() if "D" not in xy]
+    blobs: dict[str, str] = {}
+    if present:
+        res = host.run(["git", "hash-object", "--stdin-paths"], cwd=path, input="\n".join(present) + "\n",
+                       timeout=300)
+        hashes = res.stdout.split() if res.ok else []
+        if len(hashes) == len(present):  # otherwise (e.g. a submodule path) compare status only
+            blobs = dict(zip(present, hashes))
+    return {name: f"{xy} {blobs.get(name, '')}" for name, xy in status.items()}
+
+
 def has_changes(host, path: str, ignore_metadata: bool = False) -> bool:
     return bool(status_lines(host, path, ignore_metadata))
 

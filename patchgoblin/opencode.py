@@ -60,7 +60,7 @@ def strip_jsonc(text: str) -> str:
     return "".join(out)
 
 
-def _config_dirs(host) -> list[str]:
+def config_dirs(host) -> list[str]:
     """The user-level opencode config directories on the project's host."""
     dirs = [host.join(host.home(), ".config", "opencode")]
     if host.kind == "local" and os.environ.get("OPENCODE_CONFIG_DIR"):
@@ -68,22 +68,23 @@ def _config_dirs(host) -> list[str]:
     return dirs
 
 
-def config_paths(host, cwd: str) -> list[str]:
-    """opencode config files in the order opencode applies them (later ones win)."""
+def config_paths(host, cwd: str, dirs: list[str] | None = None) -> list[str]:
+    """opencode config files in the order opencode applies them (later ones win). ``dirs`` is
+    ``config_dirs(host)``, passed in to save looking up the home directory again."""
     paths = []
     if host.kind == "local" and os.environ.get("OPENCODE_CONFIG"):
         paths.append(os.environ["OPENCODE_CONFIG"])
-    for d in _config_dirs(host):
+    for d in config_dirs(host) if dirs is None else dirs:
         paths += [host.join(d, name) for name in CONFIG_NAMES]
     paths += [host.join(cwd, name) for name in CONFIG_NAMES]
     paths.append(host.join(cwd, ".opencode", "opencode.json"))
     return paths
 
 
-def read_configs(host, cwd: str) -> tuple[list[dict], list[str]]:
+def read_configs(host, cwd: str, dirs: list[str] | None = None) -> tuple[list[dict], list[str]]:
     """The opencode configs that exist, parsed, and a warning for each that can't be."""
     configs, warnings = [], []
-    for path in config_paths(host, cwd):
+    for path in config_paths(host, cwd, dirs):
         text = host.read_text(path)
         if text is None:
             continue
@@ -132,14 +133,13 @@ def cli_models(host, cwd: str, timeout: float = 30) -> list[str]:
     return list(dict.fromkeys(line for line in lines if _MODEL_LINE.match(line)))
 
 
-def agent_names(host, cwd: str, configs: list[dict]) -> set[str]:
+def agent_names(host, cwd: str, configs: list[dict], dirs: list[str] | None = None) -> set[str]:
     """Custom agents: the ``agent`` keys of the configs and the ``agent[s]/*.md`` files."""
     names = set()
     for cfg in configs:
         if isinstance(cfg.get("agent"), dict):
             names.update(cfg["agent"])
-    dirs = [host.join(cwd, ".opencode")] + _config_dirs(host)
-    for d in dirs:
+    for d in [host.join(cwd, ".opencode")] + (config_dirs(host) if dirs is None else dirs):
         for sub in ("agent", "agents"):
             names.update(f[:-3] for f in host.list_dir(host.join(d, sub)) if f.endswith(".md"))
     return names
