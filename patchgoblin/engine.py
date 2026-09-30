@@ -407,13 +407,14 @@ class Engine:
     def _execute(self, project: dict, task: dict, job: Job) -> None:
         pid, tid = project["id"], task["id"]
         host, path = host_for(project), project["path"]
+        track = gitops.tracked(project)
         commit, outcome = "", None
         try:
             try:
-                if gitops.has_changes(host, path, ignore_metadata=True):
+                if track and gitops.has_changes(host, path, ignore_metadata=True):
                     sha = gitops.commit_all(host, path, f"PatchGoblin: checkpoint before task #{tid}")
                     job.write(f"Committed pre-existing changes as checkpoint {sha[:10]}\n")
-                outcome = self._ai(project, task, "run", run_prompt(task), job)
+                outcome = self._ai(project, task, "run", run_prompt(task, track), job)
             except Cancelled:
                 outcome = Outcome(False, error="Cancelled by user. Review the working tree before re-queueing.")
             except HostError as exc:
@@ -434,17 +435,23 @@ class Engine:
                     set_status(current, "failed", "AI run failed")
 
             if outcome.ok:
-                summary = outcome.text.strip()[:1500]
-                note = " (addressing review feedback)" if task.get("review_feedback") else ""
-                commit = gitops.commit_all(host, path,
-                                           f"PatchGoblin: task #{tid} {task['title']}{note}\n\n{summary}\n")
-                with self.store.edit(project) as doc:
-                    current = find_task(doc, tid)
-                    if current is not None:
-                        current["commit"] = commit
-                        log_event(current, f"Committed {commit[:10]}" if commit else "No file changes to commit")
-                if project.get("auto_sync") is True:
-                    self._auto_sync(project, tid, job)
+                if track:
+                    summary = outcome.text.strip()[:1500]
+                    note = " (addressing review feedback)" if task.get("review_feedback") else ""
+                    commit = gitops.commit_all(host, path,
+                                               f"PatchGoblin: task #{tid} {task['title']}{note}\n\n{summary}\n")
+                    with self.store.edit(project) as doc:
+                        current = find_task(doc, tid)
+                        if current is not None:
+                            current["commit"] = commit
+                            log_event(current, f"Committed {commit[:10]}" if commit else "No file changes to commit")
+                    if project.get("auto_sync") is True:
+                        self._auto_sync(project, tid, job)
+                else:
+                    with self.store.edit(project) as doc:
+                        current = find_task(doc, tid)
+                        if current is not None:
+                            log_event(current, "Git tracking off; nothing committed")
         except Exception as exc:
             log.exception("Run of %s#%s failed", pid, tid)
             try:
@@ -462,6 +469,8 @@ class Engine:
     # ---- remote sync -----------------------------------------------------
     def sync(self, project: dict, mode: str, push: bool = True, checkpoint: bool = True) -> dict:
         """Manual sync with origin. The caller checks that no AI job is active."""
+        if not gitops.tracked(project):
+            raise ValueError("Git tracking is off for this project.")
         pid = project["id"]
         lock = self._sync_lock(pid)
         if not lock.acquire(blocking=False):
@@ -478,7 +487,7 @@ class Engine:
         pid = project["id"]
         host, path = host_for(project), project["path"]
         try:
-            if not gitops.get_remote(host, path):
+            if not gitops.tracked(project) or not gitops.get_remote(host, path):
                 return
             job.write(f"[{now()}] Auto-sync with origin\n")
             # Recording the commit hash left tasks.json changed; commit it before pulling.

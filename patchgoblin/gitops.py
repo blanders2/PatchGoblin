@@ -44,6 +44,11 @@ def _check(res, what: str):
     return res
 
 
+def tracked(project: dict) -> bool:
+    """Whether git tracking is turned on for this project."""
+    return project.get("git_tracking") is True
+
+
 def is_repo_root(host, path: str) -> bool:
     res = git(host, path, "rev-parse", "--show-cdup")
     return res.ok and res.stdout.strip() == ""
@@ -153,6 +158,22 @@ def commit_files(host, path: str, sha: str) -> list[dict]:
         if not name.startswith(".patchgoblin/"):
             files.append({"status": parts[0][:1], "path": name})
     return files
+
+
+def list_files(host, path: str, is_tracked: bool) -> list[str]:
+    """Every text file under ``path`` that respects .gitignore, for the OpenAI agent's
+    ``list_files`` tool.
+
+    Tracked projects use the repository's own index. Untracked projects (possibly nested
+    inside some other repository) must never resolve a parent repo, so ``--no-index`` is
+    used instead; this also means empty and binary files are left out.
+    """
+    if is_tracked:
+        res = git(host, path, "ls-files", "--cached", "--others", "--exclude-standard")
+        return [n for n in res.stdout.splitlines() if n]
+    res = git(host, path, "grep", "--no-index", "--exclude-standard", "-l", "-I", "-e", "")
+    names = [n for n in res.stdout.splitlines() if n]
+    return [n for n in names if not n.startswith((".git/", ".patchgoblin/"))]
 
 
 # ---- remote sync ------------------------------------------------------------

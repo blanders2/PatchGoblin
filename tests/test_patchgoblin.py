@@ -36,7 +36,7 @@ class AppTestCase(unittest.TestCase):
 
     def add_project(self, **extra):
         res = self.client.post("/api/projects", headers=H,
-                               json={"path": self.proj_dir, "provider": "claude", **extra})
+                               json={"path": self.proj_dir, "provider": "claude", "git_tracking": True, **extra})
         self.assertEqual(res.status_code, 201, res.get_json())
         return res.get_json()
 
@@ -78,6 +78,97 @@ class ProjectTests(AppTestCase):
         self.add_project()
         self.assertEqual(git_log(self.proj_dir), [])
         self.assertFalse(os.path.exists(os.path.join(self.proj_dir, ".gitignore")))
+
+    def test_add_project_untracked_by_default(self):
+        res = self.client.post("/api/projects", headers=H, json={"path": self.proj_dir, "provider": "claude"})
+        self.assertEqual(res.status_code, 201, res.get_json())
+        project = res.get_json()
+        self.assertIs(project["git_tracking"], False)
+        self.assertFalse(os.path.isdir(os.path.join(self.proj_dir, ".git")))
+        with open(os.path.join(self.proj_dir, ".patchgoblin", "tasks.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["tasks"], [])
+
+    def test_untracked_project_nested_in_repo_is_not_committed(self):
+        parent = self.tmp.name
+        subprocess.run(["git", "init", "-q"], cwd=parent, check=True)
+
+        project = self.add_project(git_tracking=False)
+        pid = project["id"]
+        self.assertIs(project["git_tracking"], False)
+        # Baseline taken after the (untracked) project directory exists, so running the task
+        # is the only thing that could still add to the parent repo's history or status.
+        before_log = git_log(parent)
+        before_status = subprocess.run(["git", "status", "--porcelain"], cwd=parent,
+                                       capture_output=True, text=True).stdout
+        tid = self.post_task(pid, "Create output file", "Make agent_output.txt")["id"]
+        self.assertEqual(self.action(pid, tid, "plan").status_code, 200)
+        self.wait_for(pid, tid, {"planned"})
+        self.assertEqual(self.action(pid, tid, "queue").status_code, 200)
+        task = self.wait_for(pid, tid, {"review", "failed"})
+
+        self.assertEqual(task["status"], "review", task.get("error"))
+        self.assertEqual(task["commit"], "")
+        self.assertFalse(os.path.isdir(os.path.join(self.proj_dir, ".git")))
+        # The parent repo (which encloses the untracked project) must never be touched.
+        self.assertEqual(git_log(parent), before_log)
+        after_status = subprocess.run(["git", "status", "--porcelain"], cwd=parent,
+                                      capture_output=True, text=True).stdout
+        self.assertEqual(after_status, before_status)
+
+    def test_enable_git_tracking_later(self):
+        project = self.add_project(git_tracking=False)
+        pid = project["id"]
+        url = f"/api/projects/{pid}/git/enable"
+        res = self.client.post(url, headers=H)
+        self.assertEqual(res.status_code, 200, res.get_json())
+        updated = res.get_json()
+        self.assertIs(updated["git_tracking"], True)
+        self.assertTrue(os.path.isdir(os.path.join(self.proj_dir, ".git")))
+        self.assertTrue(os.path.exists(os.path.join(self.proj_dir, ".gitignore")))
+        self.assertEqual(git_log(self.proj_dir), ["PatchGoblin: initial commit"])
+
+        tid = self.post_task(pid, "Create output file", "Make agent_output.txt")["id"]
+        self.assertEqual(self.action(pid, tid, "plan").status_code, 200)
+        self.wait_for(pid, tid, {"planned"})
+        self.assertEqual(self.action(pid, tid, "queue").status_code, 200)
+        task = self.wait_for(pid, tid, {"review", "failed"})
+        self.assertEqual(task["status"], "review", task.get("error"))
+        self.assertNotEqual(task["commit"], "")
+
+    def test_enable_on_existing_repo_does_not_recommit(self):
+        os.makedirs(self.proj_dir)
+        subprocess.run(["git", "init", "-q"], cwd=self.proj_dir, check=True)
+        subprocess.run(["git", "-c", "user.name=T", "-c", "user.email=t@example.com",
+                        "commit", "--allow-empty", "-q", "-m", "pre-existing"],
+                       cwd=self.proj_dir, check=True)
+        project = self.add_project(git_tracking=False)
+        res = self.client.post(f"/api/projects/{project['id']}/git/enable", headers=H)
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertEqual(git_log(self.proj_dir), ["pre-existing"])
+
+    def test_git_endpoints_rejected_when_untracked(self):
+        pid = self.add_project(git_tracking=False)["id"]
+        self.assertEqual(self.client.get(f"/api/projects/{pid}/commits").status_code, 400)
+        self.assertEqual(self.client.get(f"/api/projects/{pid}/remote").status_code, 400)
+        self.assertEqual(self.client.put(f"/api/projects/{pid}/remote", headers=H,
+                                         json={"url": "https://example.com/repo.git"}).status_code, 400)
+        self.assertEqual(self.client.post(f"/api/projects/{pid}/remote/sync", headers=H).status_code, 400)
+        res = self.client.patch(f"/api/projects/{pid}", headers=H, json={"auto_sync": True})
+        self.assertEqual(res.status_code, 400)
+        res = self.client.patch(f"/api/projects/{pid}", headers=H, json={"git_tracking": True})
+        self.assertEqual(res.status_code, 400)
+
+    def test_stop_and_resume_git_tracking(self):
+        pid = self.add_project()["id"]
+        res = self.client.patch(f"/api/projects/{pid}", headers=H, json={"git_tracking": False})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertIs(res.get_json()["git_tracking"], False)
+        self.assertTrue(os.path.isdir(os.path.join(self.proj_dir, ".git")))  # .git is kept
+        self.assertEqual(self.client.get(f"/api/projects/{pid}/commits").status_code, 400)
+        res = self.client.post(f"/api/projects/{pid}/git/enable", headers=H)
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertIs(res.get_json()["git_tracking"], True)
+        self.assertEqual(git_log(self.proj_dir), ["PatchGoblin: initial commit"])  # not recommitted
 
     def test_missing_dir_without_create_is_rejected(self):
         res = self.client.post("/api/projects", headers=H, json={"path": self.proj_dir, "create": False})
@@ -1327,6 +1418,27 @@ class OpenAIAgentTests(unittest.TestCase):
         names = {t["function"]["name"] for t in agent.tools()}
         self.assertEqual(names, {"list_files", "read_file", "search"})
 
+    def test_untracked_tools_do_not_resolve_parent_repo(self):
+        """list_files and search on an untracked project nested inside a repo must only see
+        that project's own files, never the enclosing repository's."""
+        with tempfile.TemporaryDirectory() as outer:
+            subprocess.run(["git", "init", "-q"], cwd=outer, check=True)
+            with open(os.path.join(outer, "outer.txt"), "w") as fh:
+                fh.write("needle in outer\n")
+            proj = os.path.join(outer, "proj")
+            os.makedirs(proj)
+            with open(os.path.join(proj, "inner.txt"), "w") as fh:
+                fh.write("needle in inner\n")
+            agent = OpenAIAgent(LocalHost(), proj, {"model": "m"}, "", "plan", self.job(), tracked=False)
+
+            names = agent.call_tool("list_files", {"prefix": ""})
+            self.assertIn("inner.txt", names)
+            self.assertNotIn("outer.txt", names)
+
+            matches = agent.call_tool("search", {"pattern": "needle"})
+            self.assertIn("inner.txt", matches)
+            self.assertNotIn("outer.txt", matches)
+
     # ---- HTTP-level behaviour (urlopen patched) ---------------------------------
     def job(self):
         job = mock.Mock(cancelled=False)
@@ -1604,7 +1716,10 @@ class ModelTests(AppTestCase):
         self.assertEqual({k: a.get(k) for k in ("plan_model", "code_model", "chat_model", "extra")},
                          {"plan_model": "opus", "code_model": "opus", "chat_model": "", "extra": 1})
         self.assertNotIn("model", a)
-        self.assertEqual(b, {"id": "b", "provider": "codex", "plan_model": "p", "code_model": "c"})
+        self.assertTrue(a["git_tracking"])
+        self.assertTrue(b["git_tracking"])
+        self.assertEqual({k: v for k, v in b.items() if k != "git_tracking"},
+                         {"id": "b", "provider": "codex", "plan_model": "p", "code_model": "c"})
         with open(path + ".bak", encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["projects"][0]["model"], "opus")
         before = os.path.getmtime(path)
@@ -1713,7 +1828,7 @@ class OpencodeTests(AppTestCase):
         from patchgoblin.engine import Job
         from patchgoblin.providers import run_ai
         job = Job(mode)
-        out = run_ai("opencode", mode, prompt, host=LocalHost(), project={"path": self.proj_dir},
+        out = run_ai("opencode", mode, prompt, host=LocalHost(), project={"path": self.proj_dir, "git_tracking": True},
                      settings=self.app.config["SETTINGS"].get(), model="", job=job, run_marker=run_marker)
         return out, job.text()
 
@@ -1961,7 +2076,7 @@ class ClineTests(AppTestCase):
         from patchgoblin.engine import Job
         from patchgoblin.providers import run_ai
         job = Job(mode)
-        out = run_ai("cline", mode, prompt, host=LocalHost(), project={"path": self.proj_dir},
+        out = run_ai("cline", mode, prompt, host=LocalHost(), project={"path": self.proj_dir, "git_tracking": True},
                      settings=self.app.config["SETTINGS"].get(), model="", job=job, run_marker=run_marker)
         return out, job.text()
 

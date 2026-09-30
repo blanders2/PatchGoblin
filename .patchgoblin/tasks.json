@@ -1,6 +1,6 @@
 {
-  "version": 4,
-  "next_id": 24,
+  "version": 5,
+  "next_id": 27,
   "tasks": [
     {
       "id": 1,
@@ -1343,23 +1343,23 @@
     },
     {
       "id": 23,
-      "title": "Show a reachability status dot next to each project in the sidebar",
+      "title": "Make the sidebar \"checking\" reachability dot static instead of pulsing",
       "description": "",
-      "plan": "Each project in the left sidebar gets a small coloured status dot. It shows whether PatchGoblin can reach the project's directory right now: on this computer, or over SSH. The check can't go in `GET /api/projects`, because that call runs on every refresh and an SSH check can take up to 15 s (`ConnectTimeout=15`) for each host. Instead, a new endpoint `GET /api/projects/status` checks every project in parallel and returns `{pid: {ok, error}}`. The frontend loads the list straight away with every dot grey (\"checking\u2026\"), then calls the status endpoint and turns each dot green (reachable) or red (not reachable, with the reason as a tooltip). It re-checks on a slow timer and when the tab becomes visible again.\n\n## Steps\n\n1. **`patchgoblin/hosts.py`**: add a `probe(project: dict) -> dict` helper next to `host_for`. It returns `{\"ok\": bool, \"error\": str}`:\n   - Local: `ok = os.path.isdir(path)`. If false, the error is `\"Directory does not exist: {path}\"`.\n   - SSH: one `_exec` round trip with a short timeout, e.g. `host._exec(f\"test -d {shlex.quote(path)}\", timeout=20)`. Exit code 255 means ssh itself failed, so report `\"SSH connection to {label} failed: {stderr}\"`. Any other non-zero exit means the directory is missing on the remote host. A timeout reports \"timed out\".\n   - Catch `HostError` / `OSError` (for example a bad `ssh_target` in `SSHHost.__init__`) and turn it into `ok: False` with the message. The helper must never raise.\n2. **`patchgoblin/app.py`**: add `@app.get(\"/api/projects/status\")` next to `list_projects` (around line 341). Run `probe` over `registry.list()` using `concurrent.futures.ThreadPoolExecutor(max_workers=min(8, n or 1))`, then `return jsonify(status={p[\"id\"]: result})`. Register this route before any `/api/projects/<pid>` GET route; in practice there is no conflict, because `<pid>` GETs all have a suffix.\n3. **`patchgoblin/static/app.js`**:\n   - Add `state.reach = {}` to the state object.\n   - In `renderProjects()` (line 215), put an `el(\"span\", { class: \"p-dot \" + cls, title })` in each `li`, placed before or inside the `p-title` row. `cls` is `ok`, `bad` or `checking`, based on `state.reach[p.id]`. `title` is \"Reachable\", the error text, or \"Checking\u2026\". Also set `aria-label` to the same text for accessibility.\n   - Add `async function loadReachability()`. It calls `api(\"GET\", \"/api/projects/status\")`, stores the result in `state.reach`, then calls `renderProjects()`. It swallows errors silently, because a failed status check shouldn't raise a toast every minute.\n   - Call it without awaiting at the end of `loadProjects()`, and after a project is added (around line 1329) or deleted (around line 422).\n   - In `init()` (line 1665), add `setInterval(() => { if (!document.hidden) loadReachability(); }, 60000)`, and call it from the existing `visibilitychange` handler. Guard with an in-flight flag so slow SSH checks don't pile up.\n4. **`patchgoblin/static/app.css`**: near line 139, make `.project-list li` a flex row, or make `.p-title` flex with a gap. Add `.p-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }` plus colour rules: `.ok` uses the existing green/done variable, `.bad` uses the existing danger/red variable, and `.checking` uses `var(--muted)`, optionally pulsing. Keep the ellipsis truncation on the title working (`min-width: 0` on the text element).\n5. **`README.md`**: if the README describes the sidebar, add one line about the indicator.\n\n## Verification\n\n- `tests/test_patchgoblin.py`, add to `ProjectTests`:\n  - `test_project_status_reports_reachability`: add a project and check that `/api/projects/status` returns `ok: True` for it. Then point the registry entry at a missing path, either by deleting the directory with `shutil.rmtree` (Windows-safe) or by editing the registry. Check that it now returns `ok: False` with a non-empty `error`.\n  - A unit test that `hosts.probe` returns `ok: False` without raising for an SSH project with an invalid target (e.g. `\"-bad\"`), so no real ssh is needed.\n- Run `python -m unittest tests.test_patchgoblin`, or the project's usual runner.\n- Manual check: start the app, rename one project folder, and wait up to 60 s or switch tabs. The dot should turn red with a \"Directory does not exist\" tooltip. Restore the folder and it should go green. If you have one, confirm an SSH project with a dead host goes red without stalling the rest of the UI.\n\n## Assumptions\n\n- \"Accessible\" means the project directory exists and can be reached: locally with `isdir`, remotely with an ssh round trip plus `test -d`. It does not check git or agent CLI health.\n- The check uses its own endpoint and runs in the background, so a slow SSH host never delays the project list.\n- A 60 s re-check interval, plus a check when the tab becomes visible, is frequent enough.\n- The indicator is a coloured dot with a tooltip, and a grey dot while checking. Unreachable projects stay clickable; the dot only informs.\n\n## Risks\n\n- With BatchMode, an SSH probe can take up to about 15\u201320 s per host. Keep it parallel and off the request path of other endpoints, and guard against overlapping polls.\n- Folders synced by Google Drive or other network drives (this repo lives on `G:`) can make `os.path.isdir` slow or flaky. Don't cache results aggressively on the server.\n- The 3 s `loadTasks` poll calls `renderProjects()` indirectly in some paths. Make sure a re-render keeps `state.reach` and doesn't reset dots to \"checking\".\n- Flask's dev server must be threaded (`threaded=True`, the default) so a slow status request doesn't block other API calls. Confirm how the app is served.\n\n## Questions for you\n\nNone.",
-      "status": "review",
+      "plan": "The only follow-up is in the CSS. The dot pulses only in its grey \"checking\u2026\" state, through a dedicated `p-dot-pulse` animation in `patchgoblin/static/app.css`. The green and red dots are already static, and the JS doesn't set any animation. Remove the animation and its keyframes and reduced-motion rule, and leave a solid muted-grey dot. It will still look different from the green and red states. No backend, JS or test changes are needed.\n\n## Steps\n\n1. **`patchgoblin/static/app.css` line 147**: change `.p-dot.checking { opacity: .5; animation: p-dot-pulse 1.4s ease-in-out infinite; }` to `.p-dot.checking { opacity: .5; }`. The base `.p-dot` rule on line 144 already sets the colour to `var(--muted)`. The `.5` opacity keeps \"checking\" visibly different from a real result.\n2. **`patchgoblin/static/app.css` line 148**: delete `@keyframes p-dot-pulse { 50% { opacity: .15; } }`.\n3. **`patchgoblin/static/app.css` line 149**: delete `@media (prefers-reduced-motion: reduce) { .p-dot.checking { animation: none; } }`, since nothing animates any more.\n4. Leave the shared `@keyframes pulse` (line 266) and its reduced-motion block (lines 267\u2013269) alone. They drive the queue-tab activity dot and the planning/running badges, which the feedback doesn't cover.\n\n## Verification\n\n- Search `app.css` for `p-dot-pulse`; there should be no matches.\n- Manual check: hard-refresh the app. On first load, each dot shows as a steady grey for a moment. It then turns green or red without any flashing. Rename a project folder and switch tabs to trigger a re-check. The dot should turn solid red with the \"Directory does not exist\" tooltip. The running and planning badges should still pulse.\n- Optionally run `python -m unittest tests.test_patchgoblin` to confirm nothing else changed. This is CSS only, so no test results should change.\n\n## Assumptions\n\n- \"Make the indicator static\" means removing the pulse from the grey \"checking\" state, the only state that animates. The dot and tooltip stay as they are.\n- The grey keeps `opacity: .5` so \"checking\" still looks different from the solid green and red states.\n- Re-checks don't need changes. `loadReachability` keeps the previous `state.reach` until new results arrive, so after the first load dots never go back to grey.\n\n## Risks\n\n- Don't touch the shared `pulse` keyframes or their reduced-motion rule. Other indicators still use them.\n- Browsers may serve cached CSS. Hard-refresh during manual checks, or bump the cache-busting query string if the app uses one.\n\n## Questions for you\n\nNone.",
+      "status": "planned",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "created_at": "2026-09-28T23:57:07+00:00",
-      "updated_at": "2026-09-29T11:33:20+00:00",
+      "updated_at": "2026-09-30T11:35:23+00:00",
       "queued_at": "2026-09-29T11:27:13+00:00",
       "started_at": "2026-09-29T11:27:13+00:00",
       "finished_at": "2026-09-29T11:33:20+00:00",
-      "output": "Each project in the sidebar now has a status dot. It starts grey and pulsing while checking, then turns green if the project's directory can be reached or red if it can't, with the reason shown on hover. All 119 tests pass, including two new ones, and `node --check` passes on `app.js`. I didn't open the app in a browser, so the manual steps in the plan (renaming a folder, trying a dead SSH host) haven't been done.\n\n- **Backend check (`hosts.py`, `app.py`):** a new `GET /api/projects/status` checks every project in parallel, up to 8 at a time. A local project is reachable if its folder exists. An SSH project gets one `test -d` over ssh with a 20 s timeout, and the red tooltip says whether the connection failed, timed out, or the folder is missing. A bad SSH target just shows red with the message instead of crashing the check. The normal project list doesn't wait for any of this.\n- **Sidebar (`app.js`):** the list appears straight away and the dots update when the check finishes. It re-checks every 60 s while the tab is visible, when you come back to the tab, after adding or removing a project, and after saving project settings (in case the path or host changed).\n- **Overlapping checks:** only one check runs at a time. If another is requested meanwhile, it runs once as soon as the first finishes, so slow SSH checks don't pile up. I added this re-run so a newly added project doesn't sit grey until the next 60 s check.\n- **Other refreshes:** they keep the current colours rather than resetting to grey, and a failed check doesn't pop up an error message.\n- **Styling (`app.css`):** green uses the app's accent colour and red its danger colour. Long project names still cut off with \"\u2026\", and the pulse is turned off if the system is set to reduce motion.\n- **`README.md`:** added a short note about the dot.\n\n**Tests:**\n- One adds a project, checks it reports as reachable, then renames its folder and checks it reports \"Directory does not exist\". I renamed the folder rather than deleting it because deleting git folders can fail on Windows.\n- The other covers the SSH check without needing a real server: an invalid target, a missing folder, a failed connection and a timeout.\n\nA slow SSH check won't hold up other requests: the app runs on waitress or Flask's threaded server (`run.py`).",
+      "output": "[2026-09-30T11:34:53+00:00] plan with claude in g:\\My Drive\\Projects\\PatchGoblin\n$ claude -p --output-format text --allowedTools Read,Glob,Grep --disallowedTools Edit,Write,NotebookEdit,Bash\nTitle: Make the sidebar \"checking\" reachability dot static instead of pulsing\n\nThe only follow-up is in the CSS. The dot pulses only in its grey \"checking\u2026\" state, through a dedicated `p-dot-pulse` animation in `patchgoblin/static/app.css`. The green and red dots are already static, and the JS doesn't set any animation. Remove the animation and its keyframes and reduced-motion rule, and leave a solid muted-grey dot. It will still look different from the green and red states. No backend, JS or test changes are needed.\n\n## Steps\n\n1. **`patchgoblin/static/app.css` line 147**: change `.p-dot.checking { opacity: .5; animation: p-dot-pulse 1.4s ease-in-out infinite; }` to `.p-dot.checking { opacity: .5; }`. The base `.p-dot` rule on line 144 already sets the colour to `var(--muted)`. The `.5` opacity keeps \"checking\" visibly different from a real result.\n2. **`patchgoblin/static/app.css` line 148**: delete `@keyframes p-dot-pulse { 50% { opacity: .15; } }`.\n3. **`patchgoblin/static/app.css` line 149**: delete `@media (prefers-reduced-motion: reduce) { .p-dot.checking { animation: none; } }`, since nothing animates any more.\n4. Leave the shared `@keyframes pulse` (line 266) and its reduced-motion block (lines 267\u2013269) alone. They drive the queue-tab activity dot and the planning/running badges, which the feedback doesn't cover.\n\n## Verification\n\n- Search `app.css` for `p-dot-pulse`; there should be no matches.\n- Manual check: hard-refresh the app. On first load, each dot shows as a steady grey for a moment. It then turns green or red without any flashing. Rename a project folder and switch tabs to trigger a re-check. The dot should turn solid red with the \"Directory does not exist\" tooltip. The running and planning badges should still pulse.\n- Optionally run `python -m unittest tests.test_patchgoblin` to confirm nothing else changed. This is CSS only, so no test results should change.\n\n## Assumptions\n\n- \"Make the indicator static\" means removing the pulse from the grey \"checking\" state, the only state that animates. The dot and tooltip stay as they are.\n- The grey keeps `opacity: .5` so \"checking\" still looks different from the solid green and red states.\n- Re-checks don't need changes. `loadReachability` keeps the previous `state.reach` until new results arrive, so after the first load dots never go back to grey.\n\n## Risks\n\n- Don't touch the shared `pulse` keyframes or their reduced-motion rule. Other indicators still use them.\n- Browsers may serve cached CSS. Hard-refresh during manual checks, or bump the cache-busting query string if the app uses one.\n\n## Questions for you\n\nNone.\n",
       "error": "",
       "commit": "",
-      "review_feedback": "",
+      "review_feedback": "right now it pulses, maybe make the indicator static",
       "history": [
         {
           "at": "2026-09-28T23:57:07+00:00",
@@ -1388,9 +1388,128 @@
         {
           "at": "2026-09-29T11:33:20+00:00",
           "event": "AI run finished; awaiting review"
+        },
+        {
+          "at": "2026-09-30T11:34:53+00:00",
+          "event": "Sent back after review with feedback"
+        },
+        {
+          "at": "2026-09-30T11:34:53+00:00",
+          "event": "AI re-planning started with review feedback"
+        },
+        {
+          "at": "2026-09-30T11:35:23+00:00",
+          "event": "Title rewritten by AI (was: Show a reachability status dot next to each project in the sidebar)"
+        },
+        {
+          "at": "2026-09-30T11:35:23+00:00",
+          "event": "AI plan ready"
+        }
+      ],
+      "prev_status": "review"
+    },
+    {
+      "id": 24,
+      "title": "Make git tracking an opt-in per-project setting that can be enabled later",
+      "description": "",
+      "plan": "New projects will start without git tracking. A new per-project boolean, `git_tracking`, controls whether PatchGoblin runs any git operation on the project: `git init`, the initial commit, checkpoint and task commits, the Commits and Sync views, remote settings and auto-sync. The add-project dialog gets a \"Track with git\" checkbox that is off by default. Project settings shows a \"Turn on git tracking\" button for untracked projects. That button calls a new endpoint that runs the existing `gitops.ensure_repo` and initial-commit logic and then sets the flag. Projects already registered have repos and will be migrated to `git_tracking: true`, so their behaviour doesn't change. When tracking is off, the two things that currently depend on git in `providers.py` need fallbacks: the OpenAI agent's `list_files` and `search` tools, and the \"planning must not edit files\" check. This matters most for a directory nested inside some other repo, where plain `git` commands would act on the parent repo.\n\n## Steps\n\n1. **`patchgoblin/store.py` \u2013 `Registry._migrate`**: for every project dict with no `\"git_tracking\"` key, set `p[\"git_tracking\"] = True` and mark `changed`. The existing `.bak` backup and save logic stays as it is. Update the docstring. New projects always get the key explicitly, so after migration the key is always present.\n\n2. **Add a helper `tracked(project) -> bool`** returning `project.get(\"git_tracking\") is True`, in the same style as the `auto_sync` checks. Put it in `gitops.py` so that `app.py`, `engine.py` and `providers.py` can all import it.\n\n3. **`patchgoblin/app.py`**\n   - `add_project`: read `track = data.get(\"git_tracking\") is True` and store `fields[\"git_tracking\"] = track`. Only run `gitops.ensure_repo(...)` and the `\"PatchGoblin: initial commit\"` when `track` is true. The `tasks.json` creation stays unconditional.\n   - New endpoint `POST /api/projects/<pid>/git/enable`:\n     - Reject with `ValueError` if `engine.busy(pid)` or any task is `LOCKED`, the same guard `sync_remote` uses.\n     - Run `created = gitops.ensure_repo(host, path)`. If a repo was created, or the repo has no HEAD yet, run `gitops.commit_all(host, path, \"PatchGoblin: initial commit\")`.\n     - Call `registry.update(pid, {\"git_tracking\": True})` and return the updated project.\n     - Do the git work before saving, so a git failure leaves `projects.json` untouched. This follows the pattern already used for `remote_url`.\n   - `update_project`:\n     - Accept `\"git_tracking\": false` to stop tracking. This only flips the flag; `.git` is never deleted.\n     - Reject `\"git_tracking\": true` here with a message pointing to the enable endpoint, so repo creation stays in one place.\n     - Reject `remote_url`, `auto_sync` and `sync_mode` edits while the project is untracked. Ignoring them would also work, but rejecting is clearer.\n   - `commits`, `get_remote`, `put_remote` and `sync_remote`: if `not tracked(project)`, raise `ValueError(\"Git tracking is off for this project.\")`. `commits` could instead return an empty list, but it should raise for consistency.\n   - `/api/projects/<pid>/tasks/<tid>/changes` (around line 792, `commit_files`): return `[]` when untracked.\n\n4. **`patchgoblin/engine.py`**\n   - `_execute`: wrap the pre-run checkpoint (lines 413\u2013415) and the post-run `commit_all`/auto-sync block (lines 439\u2013447) in `if gitops.tracked(project):`.\n   - For untracked projects, still move the task to review. Log the event `\"Git tracking off; nothing committed\"` and leave `current[\"commit\"]` as `\"\"`.\n   - `sync` and `_auto_sync`: return or raise early when untracked. The API layer checks too, but the engine should protect itself.\n\n5. **`patchgoblin/providers.py`**\n   - `_no_plan_edits`/`_fingerprint`: pass the project's tracking state through the call site (the `tracked` flag, or `None`). When the project is untracked, log `\"Git tracking is off; planning edits aren't checked.\\n\"` and return `None`. The check is then skipped, which is the existing \"never fail a plan because of git\" path.\n   - `OpenAIAgent`: take a `tracked` flag.\n     - When untracked, `search` uses `git grep --no-index --exclude-standard -n -I -E -e <pattern>`. `--no-index` stops git from resolving a parent repository.\n     - `list_files` needs a non-repo source. Add `gitops.list_files(host, path, tracked)`:\n       - Tracked: keep the current `ls-files --cached --others --exclude-standard`.\n       - Untracked: run `git grep --no-index --exclude-standard -l -I -e \"\"`, which lists text files that respect `.gitignore`, in one call that also works over SSH. Merge that with a filter that drops `.git/` and `.patchgoblin/`.\n   - Thread `project` or `tracked` through wherever `OpenAIAgent` is built.\n\n6. **`patchgoblin/templates/index.html`**\n   - In the add-project dialog, replace the \"A git repository is initialized\u2026\" note (line 327) with `<label class=\"check\"><input type=\"checkbox\" name=\"git_tracking\"> Track with git (initialize a repository and commit each finished task)</label>`, unchecked.\n   - In the project settings Git fieldset, add:\n     - a `#ps-git-off` block with the text \"Git tracking is off.\" and a `#ps-git-enable-btn` button labelled \"Turn on git tracking\".\n     - a \"Stop tracking (keeps .git)\" checkbox or button inside the tracked section.\n   - Update the empty-state copy (line 37) and the remove-project note so they no longer promise git.\n\n7. **`patchgoblin/static/app.js`**\n   - The add-project `onsubmit` (around line 1344) sends `git_tracking: form.git_tracking.checked`.\n   - `openProjectSettings` (around line 319) shows or hides the tracked controls based on `p.git_tracking === true`, and skips `loadSettingsRemote` when untracked.\n   - `saveProjectSettings` sends `auto_sync`, `sync_mode` and `remote_url` only when the project is tracked.\n   - The enable button: `api(\"POST\", `/api/projects/${pid}/git/enable`)`, then update `state` and re-render the dialog.\n   - In `selectProject`/project header rendering, hide `#commits-btn` and `#sync-btn` when untracked.\n\n8. **`README.md`**: document the default (untracked), how to turn tracking on later, and that turning it off keeps `.git`.\n\n## Verification\n- Tests in `tests/test_patchgoblin.py`:\n  - Change the `add_project` helper to send `git_tracking: True` by default, so the existing git and sync tests keep their meaning.\n  - `test_add_project_untracked_by_default`: posting without the field creates no `.git` and still creates `tasks.json`, and the project has `git_tracking` false.\n  - `test_untracked_project_nested_in_repo_is_not_committed`: `git init` the temp parent, add the project inside it untracked, run a task to review, and assert the parent repo's log and status index are unchanged.\n  - `test_enable_git_tracking_later`: with an untracked project, POST `/git/enable` creates `.git` and `.gitignore`, `git_log == [\"PatchGoblin: initial commit\"]`, the flag is true, and a subsequent task run records a commit.\n  - `test_enable_on_existing_repo_does_not_recommit`: covered by the existing repo-left-alone behaviour.\n  - `test_git_endpoints_rejected_when_untracked`: commits, remote and sync each return 400.\n  - `test_registry_migration`: extend it to assert that legacy entries get `git_tracking: True`.\n  - An OpenAI-agent tool test: `list_files` and `search` work in an untracked directory that is nested in a repo, and return only that directory's files.\n- Run `python -m unittest discover tests` (or the project's usual runner).\n- Manual check (the `run` skill):\n  - Add a project with the box unchecked. Confirm that Commits and Sync are hidden and that a task runs to review.\n  - Turn tracking on in Project settings. Confirm that Commits shows the initial commit.\n\n## Assumptions\n- The field is named `git_tracking`. New projects default to `false`, and existing registered projects are migrated to `true` because they already have repos and task commits.\n- Adding a folder that is already a repo root still defaults to untracked, as the task says. The user can turn tracking on later, and that won't create a new commit when HEAD exists.\n- Turning tracking off is allowed and never deletes `.git` or history. Turning it on goes through a dedicated endpoint because it has side effects.\n- Untracked projects skip the planning \"must not edit files\" check with a logged note, rather than reimplementing file fingerprinting without git.\n- Untracked projects still keep `.patchgoblin/tasks.json` in the project directory.\n- Tasks in untracked projects go to review with no `commit`. The task detail pane's changes view already hides itself when there's no commit.\n\n## Risks\n- **Parent-repo leakage**: without `.git` in the project, any unguarded `git` call (`status`, `add -A`, `commit`, `ls-files`, `grep`) runs against an enclosing repository. Audit every `gitops.`/`git(` call site; the nested-repo test above is the safety net.\n- Existing tests assume `add_project` creates a repo. Changing the helper default is required, and `test_existing_repo_is_left_alone` may need `git_tracking: True`.\n- `git grep --no-index -l -e \"\"` skips empty and binary files in the untracked `list_files`. That's acceptable for an AI file list, but note it in a comment.\n- The CLI agents (Claude Code, Codex, Cline) might run git themselves. The run prompt says \"changes are committed automatically\"; when a project is untracked, adjust or drop that sentence in `providers.py:102`.\n- If enabling fails partway (after `git init`, before the flag is saved), the flag stays false and a retry is safe because `ensure_repo` is idempotent.\n- The migration writes `projects.json.bak` only if it doesn't exist yet. A backup from an earlier migration will stay, which is fine.\n\n## Questions for you\nNone.",
+      "status": "review",
+      "provider": "",
+      "plan_model": "",
+      "code_model": "",
+      "plan_trust": "",
+      "created_at": "2026-09-30T11:27:43+00:00",
+      "updated_at": "2026-09-30T11:45:36+00:00",
+      "queued_at": "2026-09-30T11:32:37+00:00",
+      "started_at": "2026-09-30T11:32:37+00:00",
+      "finished_at": "2026-09-30T11:45:36+00:00",
+      "output": "I've made all the planned changes and verified them with the earlier full-suite run (which surfaced and I fixed two test fixture issues). The confirmation rerun is still executing in the background \u2014 I'll report its result once the completion notification arrives, rather than continue polling.",
+      "error": "",
+      "commit": "",
+      "review_feedback": "",
+      "history": [
+        {
+          "at": "2026-09-30T11:27:43+00:00",
+          "event": "Created"
+        },
+        {
+          "at": "2026-09-30T11:29:09+00:00",
+          "event": "AI planning started"
+        },
+        {
+          "at": "2026-09-30T11:30:58+00:00",
+          "event": "Title rewritten by AI (was: make tracking with git optional on a per project basis. default to non-tracking and allow adding tracking at a later time)"
+        },
+        {
+          "at": "2026-09-30T11:30:58+00:00",
+          "event": "AI plan ready"
+        },
+        {
+          "at": "2026-09-30T11:32:37+00:00",
+          "event": "Queued for AI"
+        },
+        {
+          "at": "2026-09-30T11:32:37+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-09-30T11:45:36+00:00",
+          "event": "AI run finished; awaiting review"
         }
       ],
       "prev_status": "unplanned"
+    },
+    {
+      "id": 25,
+      "title": "Add a button near Terminal that opens the project directory in vs code",
+      "description": "",
+      "plan": "",
+      "status": "unplanned",
+      "provider": "",
+      "plan_model": "",
+      "code_model": "",
+      "plan_trust": "",
+      "created_at": "2026-09-30T11:28:28+00:00",
+      "updated_at": "2026-09-30T11:28:28+00:00",
+      "queued_at": null,
+      "started_at": null,
+      "finished_at": null,
+      "output": "",
+      "error": "",
+      "commit": "",
+      "review_feedback": "",
+      "history": [
+        {
+          "at": "2026-09-30T11:28:28+00:00",
+          "event": "Created"
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "title": "Add the ability to see what is happening live in the ide",
+      "description": "",
+      "plan": "",
+      "status": "unplanned",
+      "provider": "",
+      "plan_model": "",
+      "code_model": "",
+      "plan_trust": "",
+      "created_at": "2026-09-30T11:36:03+00:00",
+      "updated_at": "2026-09-30T11:36:03+00:00",
+      "queued_at": null,
+      "started_at": null,
+      "finished_at": null,
+      "output": "",
+      "error": "",
+      "commit": "",
+      "review_feedback": "",
+      "history": [
+        {
+          "at": "2026-09-30T11:36:03+00:00",
+          "event": "Created"
+        }
+      ]
     }
   ]
 }

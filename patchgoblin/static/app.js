@@ -261,6 +261,8 @@ async function selectProject(pid) {
   $("#p-name").textContent = p.name;
   $("#p-where").textContent = p.location === "ssh"
     ? `${p.ssh_target}${p.ssh_port ? ":" + p.ssh_port : ""}:${p.path}` : p.path;
+  $("#commits-btn").hidden = p.git_tracking !== true;
+  $("#sync-btn").hidden = p.git_tracking !== true;
   renderProjectModel();
   renderProjectTrust();
   state.tasks = [];
@@ -339,10 +341,16 @@ function openProjectSettings() {
   form.sync_mode.value = SYNC_MODE_NAMES[p.sync_mode] ? p.sync_mode : "ff-only";
   form.remote_url.value = "";
   form.remote_url.disabled = true;
-  $("#ps-remote-status").textContent = "Loading…";
+  form.git_tracking_off.checked = false;
+  const tracked = p.git_tracking === true;
+  $("#ps-git-off").hidden = tracked;
+  $("#ps-git-on").hidden = !tracked;
   showError($("#ps-error"), "");
   state.settingsDirty = false;
-  loadSettingsRemote(p.id);
+  if (tracked) {
+    $("#ps-remote-status").textContent = "Loading…";
+    loadSettingsRemote(p.id);
+  }
 }
 
 const AUTO_MODES = ["auto_plan", "auto_queue"];
@@ -408,12 +416,18 @@ async function saveProjectSettings(ev) {
     plan_limit: form.plan_limit.value === "" ? 0 : Number(form.plan_limit.value),
     rewrite_titles: form.rewrite_titles.checked,
     plan_trust: form.plan_trust.value,
-    auto_sync: form.auto_sync.checked,
-    sync_mode: form.sync_mode.value,
   };
   for (const key of AUTO_MODES) fields[key] = { on: true, off: false }[form[key].value] ?? null;
-  if (form.dataset.remoteLoaded && form.remote_url.value.trim() !== form.dataset.remoteUrl) {
-    fields.remote_url = form.remote_url.value.trim();
+  if (p.git_tracking === true) {
+    if (form.git_tracking_off.checked) {
+      fields.git_tracking = false;
+    } else {
+      fields.auto_sync = form.auto_sync.checked;
+      fields.sync_mode = form.sync_mode.value;
+      if (form.dataset.remoteLoaded && form.remote_url.value.trim() !== form.dataset.remoteUrl) {
+        fields.remote_url = form.remote_url.value.trim();
+      }
+    }
   }
   const btn = $("#ps-save-btn");
   btn.disabled = true;
@@ -429,6 +443,8 @@ async function saveProjectSettings(ev) {
   renderProjects();
   if (currentProject() === p) {
     $("#p-name").textContent = p.name;
+    $("#commits-btn").hidden = p.git_tracking !== true;
+    $("#sync-btn").hidden = p.git_tracking !== true;
     renderProjectModel();
     renderProjectTrust();
   }
@@ -485,6 +501,33 @@ function setupProjectSettings() {
   $("#ps-back-btn").onclick = () => closeProjectSettings();
   $("#ps-cancel-btn").onclick = () => closeProjectSettings();
   $("#ps-remove-btn").onclick = removeProject;
+  $("#ps-git-enable-btn").onclick = async () => {
+    const p = state.projects.find(x => x.id === form.dataset.pid);
+    if (!p) return;
+    const btn = $("#ps-git-enable-btn");
+    btn.disabled = true;
+    showError($("#ps-error"), "");
+    try {
+      Object.assign(p, await api("POST", `/api/projects/${p.id}/git/enable`));
+      renderProjects();
+      if (currentProject() === p) {
+        $("#commits-btn").hidden = p.git_tracking !== true;
+        $("#sync-btn").hidden = p.git_tracking !== true;
+      }
+      $("#ps-git-off").hidden = true;
+      $("#ps-git-on").hidden = false;
+      form.auto_sync.checked = p.auto_sync === true;
+      form.sync_mode.value = SYNC_MODE_NAMES[p.sync_mode] ? p.sync_mode : "ff-only";
+      form.git_tracking_off.checked = false;
+      $("#ps-remote-status").textContent = "Loading…";
+      loadSettingsRemote(p.id);
+      toast("Git tracking turned on");
+    } catch (e) {
+      showError($("#ps-error"), e.message);
+    } finally {
+      btn.disabled = false;
+    }
+  };
 }
 
 /* ---------------- tasks & board ---------------- */
@@ -1348,6 +1391,7 @@ function setupProjectDialog() {
     btn.textContent = "Connecting…";
     const f = Object.fromEntries(new FormData(form));
     f.create = form.create.checked;
+    f.git_tracking = form.git_tracking.checked;
     try {
       const project = await api("POST", "/api/projects", f);
       dialog.close();

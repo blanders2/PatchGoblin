@@ -23,7 +23,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
-from . import opencode
+from . import gitops, opencode
 from .gitops import dirty_fingerprint, git
 from .hosts import HostError
 from .store import find_endpoint
@@ -100,6 +100,13 @@ RUN_INSTRUCTIONS = """\
 You are implementing a planned task in the project in the current working directory.
 Follow the plan, adapting it if the code requires. Keep changes focused on this task.
 Do not run git commit or push; the changes are committed automatically when you finish.
+Do not edit anything under .patchgoblin/.
+When you are done, reply with a short summary of what you changed and how you verified it.
+"""
+
+RUN_INSTRUCTIONS_UNTRACKED = """\
+You are implementing a planned task in the project in the current working directory.
+Follow the plan, adapting it if the code requires. Keep changes focused on this task.
 Do not edit anything under .patchgoblin/.
 When you are done, reply with a short summary of what you changed and how you verified it.
 """
@@ -215,8 +222,8 @@ def _review_section(feedback: str, commit: str = "") -> str:
             "needed on top of the current code; do not redo work that is already correct.")
 
 
-def run_prompt(task: dict) -> str:
-    parts = [RUN_INSTRUCTIONS, f"# Task #{task['id']}: {task['title']}"]
+def run_prompt(task: dict, tracked: bool = True) -> str:
+    parts = [RUN_INSTRUCTIONS if tracked else RUN_INSTRUCTIONS_UNTRACKED, f"# Task #{task['id']}: {task['title']}"]
     if task.get("description", "").strip():
         parts.append(f"## Description\n{task['description'].strip()}")
     plan = task.get("plan", "").strip() or "(No written plan: use the description.)"
@@ -245,18 +252,19 @@ def run_ai(provider: str, mode: str, prompt: str, *, host, project: dict, settin
     active in the project; opencode's plan check uses it to avoid blaming a run's edits on a plan.
     """
     timeout = float(settings["timeouts"][mode])
+    is_tracked = gitops.tracked(project)
     endpoint = find_endpoint(settings, provider)
     if endpoint is not None:
-        return OpenAIAgent(host, project["path"], endpoint, model, mode, job).run(prompt, timeout)
+        return OpenAIAgent(host, project["path"], endpoint, model, mode, job, tracked=is_tracked).run(prompt, timeout)
     if provider not in settings["commands"]:
         return Outcome(False, error=f"AI provider '{provider}' is not configured "
                                     "(it may have been removed in Settings).")
     if provider == "opencode":
         return run_opencode(settings["commands"][provider], mode, prompt, host=host, cwd=project["path"],
-                            model=model, timeout=timeout, job=job, run_marker=run_marker)
+                            model=model, timeout=timeout, job=job, run_marker=run_marker, tracked=is_tracked)
     if provider == "cline":
         return run_cline(settings["commands"][provider], mode, prompt, host=host, cwd=project["path"],
-                         model=model, timeout=timeout, job=job, run_marker=run_marker)
+                         model=model, timeout=timeout, job=job, run_marker=run_marker, tracked=is_tracked)
     return run_cli(settings["commands"][provider], mode, prompt, host=host, cwd=project["path"],
                    model=model, timeout=timeout, job=job)
 
@@ -280,7 +288,7 @@ def cli_argv(cfg: dict, mode: str, model: str) -> list[str]:
 
 
 def run_opencode(cfg: dict, mode: str, prompt: str, *, host, cwd: str, model: str,
-                 timeout: float, job, run_marker=None) -> Outcome:
+                 timeout: float, job, run_marker=None, tracked: bool = True) -> Outcome:
     """opencode, with checks for what its config can get wrong: the agent must be defined
     (opencode may otherwise fall back to its full-access default agent), and planning must
     leave the working tree as it was (changed files are reported, never reverted)."""
@@ -306,23 +314,24 @@ def run_opencode(cfg: dict, mode: str, prompt: str, *, host, cwd: str, model: st
         outcome.error = opencode.strip_ansi(outcome.error)
         return outcome
 
-    return _no_plan_edits(cfg, mode, run, host=host, cwd=cwd, job=job, run_marker=run_marker,
+    return _no_plan_edits(cfg, mode, run, host=host, cwd=cwd, job=job, run_marker=run_marker, tracked=tracked,
                           blame=lambda paths: f"opencode's plan agent modified files: {paths}. Review them, "
                                               f'and set agent.{agent} permissions edit/bash to "deny" in '
                                               "opencode.json.")
 
 
-def _no_plan_edits(cfg: dict, mode: str, run, *, host, cwd: str, job, run_marker, blame) -> Outcome:
+def _no_plan_edits(cfg: dict, mode: str, run, *, host, cwd: str, job, run_marker, blame,
+                   tracked: bool = True) -> Outcome:
     """``run()``, failing a plan (or chat) that left the working tree changed (the changed files
     are reported, never reverted) unless ``plan_must_not_edit`` is off. ``blame(paths)`` is the
-    error message."""
+    error message. Untracked projects skip the check entirely (there is no git to diff)."""
     check = mode == "plan" and cfg.get("plan_must_not_edit", True) is not False
-    before = _fingerprint(host, cwd, job) if check else None
+    before = _fingerprint(host, cwd, job, tracked) if check else None
     marker = run_marker() if before is not None and run_marker else None
     outcome = run()
     if before is None:
         return outcome
-    after = _fingerprint(host, cwd, job)
+    after = _fingerprint(host, cwd, job, tracked)
     if after is None:
         return outcome
     paths = sorted(p for p in before.keys() | after.keys() if before.get(p) != after.get(p))
@@ -335,9 +344,12 @@ def _no_plan_edits(cfg: dict, mode: str, run, *, host, cwd: str, job, run_marker
     return Outcome(False, outcome.text, blame(", ".join(paths)))
 
 
-def _fingerprint(host, cwd: str, job) -> dict | None:
-    """The working tree's dirty fingerprint, or None (logged) if git can't give one, so a
-    plan never fails because of git."""
+def _fingerprint(host, cwd: str, job, tracked: bool = True) -> dict | None:
+    """The working tree's dirty fingerprint, or None (logged) if git can't give one (or tracking
+    is off), so a plan never fails because of git."""
+    if not tracked:
+        job.write("Git tracking is off; planning edits aren't checked.\n")
+        return None
     try:
         return dirty_fingerprint(host, cwd)
     except HostError as exc:
@@ -377,7 +389,7 @@ def cline_reply(output: str) -> str:
 
 
 def run_cline(cfg: dict, mode: str, prompt: str, *, host, cwd: str, model: str,
-              timeout: float, job, run_marker=None) -> Outcome:
+              timeout: float, job, run_marker=None, tracked: bool = True) -> Outcome:
     """The Cline CLI: its output is cut down to the final reply, and since plan mode only
     blocks file-editing tools (commands can still change files), planning is checked too."""
 
@@ -388,7 +400,7 @@ def run_cline(cfg: dict, mode: str, prompt: str, *, host, cwd: str, model: str,
         outcome.error = opencode.strip_ansi(outcome.error)
         return outcome
 
-    return _no_plan_edits(cfg, mode, run, host=host, cwd=cwd, job=job, run_marker=run_marker,
+    return _no_plan_edits(cfg, mode, run, host=host, cwd=cwd, job=job, run_marker=run_marker, tracked=tracked,
                           blame=lambda paths: f"Cline modified files while planning: {paths}. Review them; "
                                               "the planning command should use plan mode (-p).")
 
@@ -546,8 +558,9 @@ def list_models(ep: dict) -> list[str]:
 
 
 class OpenAIAgent:
-    def __init__(self, host, root: str, cfg: dict, model: str, mode: str, job):
+    def __init__(self, host, root: str, cfg: dict, model: str, mode: str, job, tracked: bool = True):
         self.host, self.root, self.cfg, self.mode, self.job = host, root, cfg, mode, job
+        self.tracked = tracked
         self.name = endpoint_name(cfg)
         self.model = model or cfg.get("model", "")
         self.files = ProjectFiles(host, root)
@@ -570,15 +583,20 @@ class OpenAIAgent:
 
     def call_tool(self, name: str, args: dict) -> str:
         if name == "list_files":
-            res = git(self.host, self.root, "ls-files", "--cached", "--others", "--exclude-standard")
             prefix = (args.get("prefix") or "").strip("/")
-            names = [n for n in res.stdout.splitlines() if not prefix or n.startswith(prefix)]
+            names = [n for n in gitops.list_files(self.host, self.root, self.tracked)
+                     if not prefix or n.startswith(prefix)]
             return _clip("\n".join(names[:3000]) or "(no files)")
         if name == "read_file":
             text = self.host.read_text(self.files.resolve(args["path"]))
             return "(file not found)" if text is None else _clip(text, 100000)
         if name == "search":
-            res = git(self.host, self.root, "grep", "--untracked", "-n", "-I", "-E", "-e", args["pattern"])
+            if self.tracked:
+                res = git(self.host, self.root, "grep", "--untracked", "-n", "-I", "-E", "-e", args["pattern"])
+            else:
+                # --no-index stops git from resolving an enclosing repository.
+                res = git(self.host, self.root, "grep", "--no-index", "--exclude-standard",
+                         "-n", "-I", "-E", "-e", args["pattern"])
             return _clip(res.stdout) if res.stdout else "(no matches)"
         if name == "write_file" and self.mode == "run":
             self.host.write_text(self.files.resolve(args["path"], for_write=True), args["content"])

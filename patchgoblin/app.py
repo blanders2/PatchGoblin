@@ -380,6 +380,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     def add_project():
         data = body()
         fields = project_fields(data)
+        fields["git_tracking"] = data.get("git_tracking") is True
         host = host_for(fields)
         if fields["location"] == "ssh":
             host.check()
@@ -393,19 +394,44 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             if not data.get("create", True):
                 raise ValueError(f"Directory does not exist: {path}")
             host.ensure_dir(path)
-        created = gitops.ensure_repo(host, path)
+        if fields["git_tracking"]:
+            created = gitops.ensure_repo(host, path)
         tpath = tasks_path(fields, host)
         if host.read_text(tpath) is None:
             host.write_text(tpath, json.dumps(empty_doc(), indent=2) + "\n")
-        if created:
+        if fields["git_tracking"] and created:
             gitops.commit_all(host, path, "PatchGoblin: initial commit")
         return jsonify(registry.add(fields)), 201
+
+    @app.post("/api/projects/<pid>/git/enable")
+    def enable_git(pid):
+        """Turn on git tracking for a project that started untracked: create the repository
+        (or adopt an existing repo root) and its initial commit, then set the flag."""
+        project = project_or_404(pid)
+        if engine.busy(pid) or any(t["status"] in LOCKED for t in store.read(project, fresh=True)["tasks"]):
+            raise ValueError("Wait for this project's AI jobs to finish first.")
+        if gitops.tracked(project):
+            return jsonify(project)
+        host, path = host_for(project), project["path"]
+        created = gitops.ensure_repo(host, path)
+        if created or not gitops.recent_commits(host, path, limit=1):
+            gitops.commit_all(host, path, "PatchGoblin: initial commit")
+        updated = registry.update(project["id"], {"git_tracking": True})
+        return jsonify(updated)
 
     @app.patch("/api/projects/<pid>")
     def update_project(pid):
         project = project_or_404(pid)
         data = body()
         fields = {}
+        if "git_tracking" in data:
+            if data["git_tracking"] is True:
+                raise ValueError("Use POST /api/projects/<id>/git/enable to turn on git tracking.")
+            if data["git_tracking"] is not False:
+                raise ValueError("git_tracking must be true or false.")
+            fields["git_tracking"] = False
+        if not gitops.tracked(project) and any(k in data for k in ("remote_url", "auto_sync", "sync_mode")):
+            raise ValueError("Git tracking is off for this project; turn it on first.")
         if "name" in data:
             if not isinstance(data["name"], str) or not data["name"].strip():
                 raise ValueError("Project name can't be blank.")
@@ -486,6 +512,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     @app.get("/api/projects/<pid>/commits")
     def commits(pid):
         project = project_or_404(pid)
+        if not gitops.tracked(project):
+            raise ValueError("Git tracking is off for this project.")
         return jsonify(commits=gitops.recent_commits(host_for(project), project["path"]))
 
     def remote_view(project: dict, status: dict) -> dict:
@@ -495,11 +523,15 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     @app.get("/api/projects/<pid>/remote")
     def get_remote(pid):
         project = project_or_404(pid)
+        if not gitops.tracked(project):
+            raise ValueError("Git tracking is off for this project.")
         return jsonify(remote_view(project, gitops.remote_status(host_for(project), project["path"])))
 
     @app.put("/api/projects/<pid>/remote")
     def put_remote(pid):
         project = project_or_404(pid)
+        if not gitops.tracked(project):
+            raise ValueError("Git tracking is off for this project.")
         url = body().get("url") or ""
         if not isinstance(url, str):
             raise ValueError("url must be a string.")
@@ -510,6 +542,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     @app.post("/api/projects/<pid>/remote/sync")
     def sync_remote(pid):
         project = project_or_404(pid)
+        if not gitops.tracked(project):
+            raise ValueError("Git tracking is off for this project.")
         data = body()
         mode = sync_mode(data.get("mode") or project.get("sync_mode") or "ff-only")
         if engine.busy(pid) or any(t["status"] in LOCKED for t in store.read(project, fresh=True)["tasks"]):
@@ -786,7 +820,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         project = project_or_404(pid)
         task = find_task(store.read(project), tid) or abort(404)
         sha = task.get("commit") or ""
-        if not sha:
+        if not sha or not gitops.tracked(project):
             return jsonify(files=[])
         try:
             files = gitops.commit_files(host_for(project), project["path"], sha)

@@ -3,8 +3,9 @@
 A small Flask web app for queueing up AI work on your projects. Write tasks, get an
 AI (Claude Code, Codex, opencode, Cline, or any OpenAI-compatible API such as OpenAI, OpenRouter or
 Ollama) to help plan them, then queue them for the
-AI to implement. Projects can be local directories or directories on SSH hosts, and
-every completed task is committed to the project's own git repository.
+AI to implement. Projects can be local directories or directories on SSH hosts.
+Git tracking is opt-in per project (off by default for new projects); turn it on
+to have every completed task committed to the project's own git repository.
 
 ## Run
 
@@ -26,9 +27,17 @@ Then open <http://127.0.0.1:5050>. Set `PATCHGOBLIN_PORT` to change the port and
 **Projects.** Add a project by giving it a directory, either on this computer or
 on an SSH host. Type the path or use **Browse…** to pick a folder. The browser lists
 folders on whichever machine the project is on (drives on Windows, the remote file
-system over SSH), and you can add a new subfolder name to start a fresh project. If the directory doesn't exist it's created. If it isn't already the
-root of a git repository, `git init` is run there (with a basic `.gitignore`) and an
-initial commit is made. Existing repositories are left as they are. A dot next to
+system over SSH), and you can add a new subfolder name to start a fresh project. If the directory doesn't exist it's created.
+
+**Git tracking** is off by default for a newly added project; tick **Track with git** in
+the Add project dialog, or turn it on later from Project settings → Git. Turning it on
+runs `git init` there (with a basic `.gitignore`) and an initial commit, unless the
+directory is already the root of a git repository, in which case it's left as it is
+(and, if it has no commits yet, gets an initial commit). Turning tracking off again only
+stops PatchGoblin from running further git commands there; `.git` and its history are
+kept, and turning tracking back on never recreates the initial commit. Projects
+registered with an older version of PatchGoblin (which always tracked) keep git tracking
+on. A dot next to
 each project in the sidebar shows whether its directory can be reached right now
 (green), can't be (red; hover for the reason), or is still being checked (grey). It
 is re-checked every minute and when you return to the tab.
@@ -58,9 +67,11 @@ parallel. Planning jobs start straight away because they don't change files.
 **Project settings.** The **Project settings** button in the project header opens a
 full-page view in place of the board, with every per-project option: **General** (name,
 location and path), **AI** (provider and the planning, coding and chat models),
-**Planning** (plan limit, AI titles, plan trust), **Automation** (Auto-plan, Auto-queue), **Git** (`origin` URL, auto-sync, sync
-mode) and a **Danger zone** to remove the project (its files, `tasks.json` and git history
-are kept). Changes apply together when you click **Save**; **← Back to board**, Cancel or
+**Planning** (plan limit, AI titles, plan trust), **Automation** (Auto-plan, Auto-queue), **Git**
+(a **Turn on git tracking** button while tracking is off; once on, the `origin` URL,
+auto-sync, sync mode, and a **Stop tracking** checkbox that keeps `.git`) and a **Danger
+zone** to remove the project (its files, `tasks.json` and git history, if any, are kept).
+Changes apply together when you click **Save**; **← Back to board**, Cancel or
 Esc leave without saving (asking first if you edited anything). Settings are stored in
 PatchGoblin's local `projects.json`.
 
@@ -116,15 +127,16 @@ a single task. Tasks that don't qualify are skipped and listed in the result mes
 and the rest still go through. Batch-queued tasks run in id order. Selections stay
 within the current tab.
 
-**Git.** Before a run, any uncommitted changes you made are committed as a
-`checkpoint before task #N`, so the AI's commit contains only its own work. After a
-successful run, everything is committed as `PatchGoblin: task #N <title>` with the
-AI's summary. Nothing is pushed unless you sync (see below). The commit uses your git
-identity if it's set, otherwise `PatchGoblin <patchgoblin@localhost>`. Failed runs
-leave their changes uncommitted so you can inspect them. The **Commits** button shows
-recent history.
+**Git.** While a project has git tracking on: before a run, any uncommitted changes you
+made are committed as a `checkpoint before task #N`, so the AI's commit contains only
+its own work. After a successful run, everything is committed as `PatchGoblin: task #N
+<title>` with the AI's summary. Nothing is pushed unless you sync (see below). The
+commit uses your git identity if it's set, otherwise `PatchGoblin <patchgoblin@localhost>`.
+Failed runs leave their changes uncommitted so you can inspect them. The **Commits**
+button shows recent history. While tracking is off, runs go straight to Needs review
+with nothing committed, and the **Commits** and **Sync** buttons are hidden.
 
-**Remote sync.** Set the project's `origin` URL and sync mode in Project settings; the
+**Remote sync.** Requires git tracking. Set the project's `origin` URL and sync mode in Project settings; the
 **Sync** button then syncs with it, always using the saved mode.
 A sync commits any uncommitted changes (including `tasks.json`) as `checkpoint before
 sync`, fetches `origin`, brings in its commits for the current branch, then pushes

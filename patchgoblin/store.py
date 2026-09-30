@@ -205,7 +205,9 @@ class Registry:
             self._migrate()
 
     def _migrate(self) -> None:
-        """Split the old single project ``model`` into planning and coding models (once)."""
+        """Split the old single project ``model`` into planning and coding models, and default
+        ``git_tracking`` to True for projects registered before it existed (they already have
+        a repository and task commits, so their behaviour doesn't change). Both run once."""
         data = self.file.load()
         changed = False
         for p in data.get("projects", []):
@@ -213,6 +215,9 @@ class Registry:
                 model = p.pop("model") or ""
                 p["plan_model"] = p["code_model"] = model
                 p.setdefault("chat_model", "")
+                changed = True
+            if isinstance(p, dict) and "git_tracking" not in p:
+                p["git_tracking"] = True
                 changed = True
         if not changed:
             return

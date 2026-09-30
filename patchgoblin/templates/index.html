@@ -33,8 +33,9 @@
     <div id="empty-state" class="empty">
       <h1>Queue AI work on your projects</h1>
       <p>Add a local directory or an SSH project to start. Tasks are stored in
-        <code>.patchgoblin/tasks.json</code> inside each project, and every completed
-        task is committed to the project's git repository.</p>
+        <code>.patchgoblin/tasks.json</code> inside each project. Turn on git tracking
+        (at add time or later, in Project settings) to have every completed task
+        committed to the project's git repository.</p>
       <button id="empty-add-btn">Add a project</button>
     </div>
 
@@ -155,24 +156,33 @@
         </fieldset>
         <fieldset>
           <legend>Git</legend>
-          <label>Remote URL (origin)
-            <input name="remote_url" placeholder="git@github.com:me/repo.git or https://…" autocomplete="off">
-          </label>
-          <p class="muted small" id="ps-remote-status"></p>
-          <label class="check" title="After each successful task commit, pull and push to origin">
-            <input type="checkbox" name="auto_sync"> Auto-sync after each task commit
-          </label>
-          <label>Sync mode
-            <select name="sync_mode">
-              <option value="ff-only">Fast-forward only</option>
-              <option value="rebase">Rebase local commits</option>
-            </select>
-          </label>
+          <div id="ps-git-off">
+            <p class="muted small">Git tracking is off. Tasks are not committed, and Commits and Sync are unavailable.</p>
+            <button type="button" class="ghost" id="ps-git-enable-btn">Turn on git tracking</button>
+          </div>
+          <div id="ps-git-on">
+            <label>Remote URL (origin)
+              <input name="remote_url" placeholder="git@github.com:me/repo.git or https://…" autocomplete="off">
+            </label>
+            <p class="muted small" id="ps-remote-status"></p>
+            <label class="check" title="After each successful task commit, pull and push to origin">
+              <input type="checkbox" name="auto_sync"> Auto-sync after each task commit
+            </label>
+            <label>Sync mode
+              <select name="sync_mode">
+                <option value="ff-only">Fast-forward only</option>
+                <option value="rebase">Rebase local commits</option>
+              </select>
+            </label>
+            <label class="check" title="Stop committing tasks; .git and its history are kept">
+              <input type="checkbox" name="git_tracking_off"> Stop tracking (keeps .git)
+            </label>
+          </div>
         </fieldset>
         <fieldset class="danger-zone">
           <legend>Danger zone</legend>
           <button type="button" class="ghost danger" id="ps-remove-btn">Remove project…</button>
-          <span class="muted small">Files, tasks.json and git history are kept.</span>
+          <span class="muted small">Files, tasks.json and git history (if any) are kept.</span>
         </fieldset>
         <div id="ps-error" class="error" hidden></div>
         <div class="actions right ps-actions">
@@ -324,7 +334,7 @@
       <label class="grow">Coding Model <select name="code_model" data-no-project></select></label>
     </div>
     <label class="check"><input type="checkbox" name="create" checked> Create the directory if it doesn't exist</label>
-    <p class="muted small">A git repository is initialized in the directory if it isn't already a repo root.</p>
+    <label class="check"><input type="checkbox" name="git_tracking"> Track with git (initialize a repository and commit each finished task)</label>
     <div id="project-form-error" class="error" hidden></div>
     <div class="actions right">
       <button type="button" class="ghost" data-close="project-dialog">Cancel</button>
