@@ -79,7 +79,10 @@ automatically.
 | Needs review | The AI run finished and its work is committed. Approve it, send it back to the AI with feedback, or reopen it. |
 | Done | Approved by you. You can send it back to the AI with feedback, or reopen it. |
 | Failed | The run failed or was cancelled. You can re-queue it, replan it, or mark it planned. Failed tasks sit in their own **Failed** tab, which only shows while there is a failed task. |
-| Paused | Set aside by you; Auto-plan and Auto-queue never touch it. Resume returns it to the status it had. |
+
+**Pausing.** Pause is a flag, not a state: a paused task stays where it is, highlighted with a
+Paused chip, and Auto-plan, Auto-queue and the run queue skip it until you resume it. A paused
+queued task keeps its place in the queue. While paused, only Resume, editing and Delete work.
 
 Planning and implementation both run **in the project's directory, on the project's
 host**. Each project runs one task at a time, in queue order. Different projects run in
@@ -155,7 +158,7 @@ that apply to the ticked tasks: Plan with AI, Mark planned, Move to drafted, Que
 queue, Back to unplanned, Approve, Reopen, Pause, Resume, Cancel, Set AI and Delete. The same rules apply as for
 a single task. Tasks that don't qualify are skipped and listed in the result message,
 and the rest still go through. Batch-queued tasks run in id order. Selections stay
-within the current tab.
+within the current tab. Paused tasks only qualify for Resume, Set AI and Delete.
 
 **Git.** While a project has git tracking on: before a run, any uncommitted changes you
 made are committed as a `checkpoint before task #N`, so the AI's commit contains only

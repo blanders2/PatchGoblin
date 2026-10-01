@@ -769,31 +769,30 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         "dequeue": (("queued",), "planned", "Removed from queue"),
         "approve": (("review",), "done", "Approved by engineer"),
         "reopen": (("done", "review"), "planned", "Reopened"),
-        # Pause remembers the status in paused_from; resume restores it (target is dynamic).
-        "pause": (PAUSABLE, "paused", "Paused"),
-        "resume": (("paused",), None, "Resumed"),
+        # Pause and resume only set or clear the task's "paused" flag (no status change); they
+        # are handled in transition() and listed here for their allowed statuses.
+        "pause": (PAUSABLE, None, "Paused"),
+        "resume": (STATUSES, None, "Resumed"),
     }
 
     def transition(pid: str, task: dict, action: str, queued_at: str | None = None) -> bool:
         """Apply a simple state change; True if the task was queued (by hand or Auto-queue)."""
         allowed, status, message = TRANSITIONS[action]
         source = task["status"]
+        if action == "resume":
+            if not task.get("paused"):
+                raise ValueError(f"Cannot resume a task that is {source}.")
+            task["paused"] = False
+            log_event(task, message)
+            return source == "queued"
+        if task.get("paused"):
+            raise ValueError("Task is paused; resume it first.")
         if source not in allowed:
             raise ValueError(f"Cannot {action.replace('_', ' ')} a task that is {task['status']}.")
-        if action == "resume":
-            status = task.pop("paused_from", None)
-            if status not in PAUSABLE:
-                status = "unplanned"
-            if status == "planned":
-                status = ready_status(task.get("plan", ""))
-            if status == "queued":
-                task["queued_at"] = task.get("queued_at") or queued_at or now()
-            set_status(task, status, f"Resumed ({status})")
-            return status == "queued"
         if action == "pause":
-            task["paused_from"] = source
-            if source == "queued":
-                task["queued_at"] = None
+            task["paused"] = True
+            log_event(task, message)
+            return False
         if status == "planned":
             status = ready_status(task.get("plan", ""))
             if status == "drafted":

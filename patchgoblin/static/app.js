@@ -5,15 +5,14 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 const STATUS_LABEL = {
   unplanned: "Unplanned", planning: "Planning…", drafted: "Drafted", planned: "Planned", queued: "Queued",
-  running: "Running…", review: "Needs review", done: "Done", failed: "Failed", paused: "Paused",
+  running: "Running…", review: "Needs review", done: "Done", failed: "Failed",
 };
 const COLUMN_OF = {
   unplanned: "unplanned", planning: "unplanned", drafted: "drafted", planned: "planned",
   queued: "queue", running: "queue", review: "review", done: "finished", failed: "failed",
-  paused: "paused",
 };
 // Waiting on the user: not locked by the AI (LOCKED in app.py) and not done.
-const ACTIONABLE = new Set(["unplanned", "drafted", "planned", "queued", "review", "failed", "paused"]);
+const ACTIONABLE = new Set(["unplanned", "drafted", "planned", "queued", "review", "failed"]);
 const BUSY = new Set(["planning", "running"]);
 
 const state = {
@@ -797,7 +796,7 @@ function renderCard(t) {
   const p = currentProject();
   const selected = state.selected.has(t.id);
   return el("div", {
-    class: `card status-${t.status}${t.id === state.openTid ? " open" : ""}${selected ? " selected" : ""}`,
+    class: `card status-${t.status}${t.paused ? " paused" : ""}${t.id === state.openTid ? " open" : ""}${selected ? " selected" : ""}`,
     tabindex: "0",
     "data-tid": String(t.id),
     onclick: () => openDrawer(t.id),
@@ -819,6 +818,7 @@ function renderCard(t) {
   el("div", { class: "card-title" }, t.title),
   t.active && t.activity ? el("div", { class: "card-activity", title: t.activity }, `▶ ${t.activity}`) : null,
   el("div", { class: "card-meta" },
+    t.paused ? el("span", { class: "chip paused", title: "Automation won't touch this task" }, "Paused") : null,
     t.provider && t.provider !== p.provider ? el("span", { class: "chip" }, providerName(t.provider)) : null,
     t.plan_model ? el("span", { class: "chip", title: "Planning model for this task" }, `plan: ${t.plan_model}`) : null,
     t.code_model ? el("span", { class: "chip", title: "Coding model for this task" }, `code: ${t.code_model}`) : null,
@@ -842,8 +842,7 @@ async function createTask(ev) {
     $("#nt-desc").value = "";
     renderImagePreviews($("#nt-desc"), $("#nt-desc-img"));
     state.tasks.push(task);
-    const tab = paused ? "paused" : "unplanned";
-    if (state.tab !== tab) selectTab(tab);
+    if (state.tab !== "unplanned") selectTab("unplanned");
     else renderBoard();
   } catch (e) { toast(e.message, true); }
 }
@@ -851,7 +850,7 @@ async function createTask(ev) {
 /* ---------------- batch actions ---------------- */
 
 // Mirrors the drawer's per-status buttons and TRANSITIONS in app.py. An optional `when`
-// narrows the eligible tasks further.
+// narrows the eligible tasks further. Paused tasks only accept Resume (and edits/delete).
 const BATCH_ACTIONS = [
   { action: "plan", label: "Plan with AI", from: ["unplanned", "drafted", "planned", "failed"] },
   { action: "mark_planned", label: "Mark planned", from: ["unplanned", "drafted", "failed"] },
@@ -862,10 +861,11 @@ const BATCH_ACTIONS = [
   { action: "approve", label: "Approve", from: ["review"] },
   { action: "reopen", label: "Reopen", from: ["done", "review"] },
   { action: "pause", label: "Pause", from: ["unplanned", "drafted", "planned", "queued", "failed"] },
-  { action: "resume", label: "Resume", from: ["paused"] },
+  { action: "resume", label: "Resume", from: ["unplanned", "drafted", "planned", "queued", "failed"],
+    when: t => t.paused },
   { action: "cancel", label: "Cancel", from: ["planning", "running"], cls: "danger" },
-];
-const NOT_BUSY = ["unplanned", "drafted", "planned", "queued", "review", "done", "failed", "paused"];
+].map(a => a.action === "resume" ? a : { ...a, when: t => !t.paused && (!a.when || a.when(t)) });
+const NOT_BUSY = ["unplanned", "drafted", "planned", "queued", "review", "done", "failed"];
 const BATCH_VERB = { delete: "Deleted", set_provider: "Updated", set_models: "Updated", plan: "Started planning",
   mark_planned: "Marked planned", mark_drafted: "Moved to drafted", queue: "Queued", dequeue: "Removed from queue",
   unplan: "Moved back", reopen: "Reopened", approve: "Approved", send_back: "Sent back",
@@ -1250,6 +1250,10 @@ function renderDrawer(fillForm) {
 
   const A = [];
   const act = action => () => doAction(action);
+  if (t.paused) {
+    A.push(actionButton("Resume", act("resume"), "primary", "Let automation and the run queue pick the task up again"));
+    A.push(el("span", { class: "muted small" }, "Paused: automation won't touch it; resume to continue."));
+  } else {
   switch (t.status) {
     case "unplanned":
       A.push(actionButton(planLabel, act("plan"), asking ? "ghost" : "primary", planTip));
@@ -1302,11 +1306,7 @@ function renderDrawer(fillForm) {
       A.push(actionButton("Mark planned (skip AI)", act("mark_planned"), "ghost", skipTip));
       A.push(pauseButton());
       break;
-    case "paused":
-      A.push(actionButton("Resume", act("resume"), "primary", "Put the task back where it was"));
-      A.push(el("span", { class: "muted small" },
-        `Returns to ${STATUS_LABEL[t.paused_from || "unplanned"]}; automation won't touch it while paused.`));
-      break;
+  }
   }
   $("#d-flow-actions").replaceChildren(...A);
   $("#d-danger-actions").replaceChildren(...(locked ? []

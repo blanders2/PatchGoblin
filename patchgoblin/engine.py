@@ -222,6 +222,8 @@ class Engine:
                 task = find_task(doc, tid)
                 if task is None:
                     raise KeyError(tid)
+                if task.get("paused"):
+                    raise ValueError("Task is paused; resume it first.")
                 allowed = ("review", "done") if review else ("unplanned", "drafted", "planned", "failed")
                 if task["status"] not in allowed:
                     raise ValueError(f"Cannot {'send back' if review else 'plan'} a task that is "
@@ -266,8 +268,8 @@ class Engine:
     def maybe_auto_queue(self, pid: str, task: dict) -> bool:
         """Queue a just-planned task if Auto-queue is on. Call inside ``store.edit``; the
         caller kicks the runner after leaving it."""
-        # Paused tasks are skipped on purpose: only "planned" tasks match (see AUTO_TARGETS).
-        if task["status"] != "planned" or not self.auto(pid, "auto_queue"):
+        # Paused tasks are skipped on purpose, even when "planned".
+        if task["status"] != "planned" or task.get("paused") or not self.auto(pid, "auto_queue"):
             return False
         task["queued_at"] = now()
         set_status(task, "queued", "Auto-queued")
@@ -291,9 +293,9 @@ class Engine:
             if "auto_run" in keys:
                 self.kick(pid)
             if "auto_plan" in keys:
-                # Only "unplanned" tasks are picked, so paused ones are left alone on purpose.
+                # Only unpaused "unplanned" tasks are picked; paused ones are left alone on purpose.
                 ids = [t["id"] for t in self.store.read(project, fresh=True)["tasks"]
-                       if t["status"] == "unplanned"]
+                       if t["status"] == "unplanned" and not t.get("paused")]
                 for tid in ids:
                     try:  # planning threads wait for a slot, so plan_limit still applies
                         self.start_planning(project, tid, auto=True)
@@ -411,7 +413,7 @@ class Engine:
             return None  # Auto-run is off: queued tasks wait until it is turned back on
         try:
             with self.store.edit(project) as doc:
-                queued = sorted((t for t in doc["tasks"] if t["status"] == "queued"),
+                queued = sorted((t for t in doc["tasks"] if t["status"] == "queued" and not t.get("paused")),
                                 key=lambda t: (t.get("queued_at") or "", t["id"]))
                 if not queued:
                     return None

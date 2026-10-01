@@ -286,6 +286,7 @@ button.link:hover { filter: none; }
   box-shadow: var(--shadow);
 }
 .card:hover { border-color: var(--accent); }
+.card.paused { background: var(--b-paused); box-shadow: inset 3px 0 0 var(--t-paused); }
 .card.open { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .card.selected { background: var(--b-planned); border-color: var(--accent); }
 .card input.select { width: auto; margin: 0; flex-shrink: 0; cursor: pointer; order: -1; }
@@ -296,6 +297,7 @@ button.link:hover { filter: none; }
 .card-meta:empty { display: none; }
 .card .badge { order: 3; }
 .chip { background: var(--panel-2); border-radius: 5px; padding: 1px 6px; }
+.chip.paused { background: var(--t-paused); color: var(--b-paused); font-weight: 600; }
 .chip.warn { color: var(--warn); }
 .chip.question { background: var(--b-queued); color: var(--t-queued); font-weight: 600; }
 

@@ -85,7 +85,7 @@
       <div class="image-previews" id="nt-desc-img" hidden></div>
 
       <div class="queue-tabs" role="tablist" aria-label="Task queues">
-        {% for col, label in [("unplanned", "Unplanned"), ("drafted", "Drafted"), ("planned", "Planned"), ("queue", "AI queue"), ("review", "Review"), ("finished", "Finished"), ("failed", "Failed"), ("paused", "Paused")] %}
+        {% for col, label in [("unplanned", "Unplanned"), ("drafted", "Drafted"), ("planned", "Planned"), ("queue", "AI queue"), ("review", "Review"), ("finished", "Finished"), ("failed", "Failed")] %}
         <button type="button" class="queue-tab" role="tab" id="tab-{{ col }}" data-col="{{ col }}" data-label="{{ label }}" aria-controls="col-{{ col }}"{% if col == "failed" %} hidden{% endif %}>
           {{ label }} <span class="activity" hidden></span><span class="count empty"></span>
         </button>
@@ -114,7 +114,7 @@
         <button type="button" class="ghost small" id="batch-clear" title="Clear selection (Esc)">✕</button>
       </div>
       <div class="board">
-        {% for col in ["unplanned", "drafted", "planned", "queue", "review", "finished", "failed", "paused"] %}
+        {% for col in ["unplanned", "drafted", "planned", "queue", "review", "finished", "failed"] %}
         <div class="column" id="col-{{ col }}" data-col="{{ col }}" role="tabpanel" aria-labelledby="tab-{{ col }}"><div class="cards"></div></div>
         {% endfor %}
       </div>

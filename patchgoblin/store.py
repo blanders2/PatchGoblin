@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from .gitops import DEFAULT_GITIGNORE
 from .hosts import host_for
 
-STATUSES = ("unplanned", "planning", "drafted", "planned", "queued", "running", "review", "done", "failed", "paused")
+STATUSES = ("unplanned", "planning", "drafted", "planned", "queued", "running", "review", "done", "failed")
 CLI_PROVIDERS = ("claude", "codex", "opencode", "cline")
 CLI_NAMES = {"claude": "Claude Code", "codex": "Codex", "opencode": "opencode", "cline": "Cline"}
 # Suggestions for the model dropdowns; any other model name can still be entered as "Custom…".
@@ -105,8 +105,8 @@ DEFAULT_SETTINGS = {
 # (None or missing inherits). Each maps to the status of the tasks it acts on when turned on.
 AUTO_MODES = ("auto_plan", "auto_queue", "auto_run")
 AUTO_TARGETS = {"auto_plan": "unplanned", "auto_queue": "planned", "auto_run": "queued"}
-# Statuses a task can be paused from; "paused" never matches AUTO_TARGETS (so Auto-plan, Auto-queue
-# and Auto-run all leave it alone).
+# Statuses where a task's "paused" flag can be set; Auto-plan, Auto-queue, Auto-run and the run
+# queue skip flagged tasks, which otherwise keep their status.
 PAUSABLE = ("unplanned", "drafted", "planned", "queued", "failed")
 
 
@@ -318,6 +318,19 @@ def rename_task_providers(doc: dict, renames: dict) -> bool:
     return changed
 
 
+def migrate_paused(doc: dict) -> bool:
+    """Convert the old 'paused' status (version < 7) into the task's paused flag, restoring the
+    status it was paused from. Changes ``doc`` in place; True if any task changed."""
+    changed = False
+    for task in doc.get("tasks", []):
+        if task.get("status") == "paused":
+            origin = task.pop("paused_from", None)
+            task["status"] = origin if origin in PAUSABLE else "unplanned"
+            task["paused"] = True
+            changed = True
+    return changed
+
+
 class Settings:
     def __init__(self, data_dir: str):
         self.file = JsonFile(os.path.join(data_dir, "settings.json"), {})
@@ -386,7 +399,8 @@ class Settings:
 # 4: a task provider "opencode" means the opencode CLI; older files meant an endpoint with that
 # id, which was renamed (TaskStore applies Settings' provider_renames when loading them).
 # 5: likewise for "cline" (the Cline CLI). 6: the 'paused' status exists.
-DOC_VERSION = 6
+# 7: paused is a task flag, not a status (migrate_paused converts older files).
+DOC_VERSION = 7
 # The tasks.json version from which each CLI id means the CLI rather than an endpoint.
 RESERVED_SINCE = {"opencode": 4, "cline": 5}
 
@@ -441,6 +455,7 @@ class TaskStore:
         doc.setdefault("tasks", [])
         doc.setdefault("next_id", max((t["id"] for t in doc["tasks"]), default=0) + 1)
         rename_task_providers(doc, self.provider_renames)
+        migrate_paused(doc)
         return doc
 
     def read(self, project: dict, fresh: bool = False) -> dict:
@@ -490,6 +505,7 @@ def new_task(doc: dict, title: str, description: str = "", provider: str = "",
         "plan_model": plan_model,
         "code_model": code_model,
         "plan_trust": plan_trust,  # "" = the project's level
+        "paused": paused,  # automation and the run queue skip paused tasks
         "created_at": ts,
         "updated_at": ts,
         "queued_at": None,
@@ -507,9 +523,6 @@ def new_task(doc: dict, title: str, description: str = "", provider: str = "",
     }
     doc["next_id"] += 1
     doc["tasks"].append(task)
-    if paused:
-        task["status"] = "paused"
-        task["paused_from"] = "unplanned"
     log_event(task, "Created (paused)" if paused else "Created")
     return task
 

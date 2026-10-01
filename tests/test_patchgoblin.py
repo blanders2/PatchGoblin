@@ -729,7 +729,7 @@ class WorkflowTests(AppTestCase):
         doc = store.read(project, fresh=True)
         self.assertEqual([t["status"] for t in doc["tasks"]], ["drafted", "planned"])
         self.assertEqual(doc["tasks"][0]["history"][-1]["event"], "Plan has open questions")
-        self.assertEqual(doc["version"], 6)
+        self.assertEqual(doc["version"], 7)
 
         stamp = seed(2,[ASKING_PLAN, ASKING_PLAN])
         engine.reconcile(project)  # already migrated: planned tasks keep their questions
@@ -1074,15 +1074,18 @@ class AutomationTests(AppTestCase):
         for status in ("unplanned", "drafted", "planned", "queued", "failed"):
             tid = make(status)
             kick.reset_mock()
+            before = self.client.get(f"/api/projects/{pid}/tasks").get_json()["tasks"]
+            queued_at = next(t for t in before if t["id"] == tid)["queued_at"]
             task = self.action(pid, tid, "pause").get_json()
-            self.assertEqual((task["status"], task["paused_from"]), ("paused", status))
-            self.assertIsNone(task["queued_at"])
+            self.assertEqual((task["status"], task["paused"]), (status, True))
+            self.assertEqual(task["queued_at"], queued_at)
+            self.assertFalse(kick.called)
             task = self.action(pid, tid, "resume").get_json()
-            self.assertEqual(task["status"], status)
-            self.assertNotIn("paused_from", task)
+            self.assertEqual((task["status"], task["paused"]), (status, False))
+            self.assertEqual(task["queued_at"], queued_at)
             self.assertEqual(bool(task["queued_at"]), status == "queued")
             self.assertEqual(kick.called, status == "queued")
-            self.assertEqual(self.events(task)[-1], f"Resumed ({status})")
+            self.assertEqual(self.events(task)[-2:], ["Paused", "Resumed"])
 
         tid = make("unplanned")
         for status in ("review", "done", "planning", "running"):
@@ -1092,28 +1095,51 @@ class AutomationTests(AppTestCase):
         self.assertEqual(self.action(pid, tid, "resume").status_code, 400)
 
         self.action(pid, tid, "pause")
-        self.assertEqual(self.action(pid, tid, "plan").status_code, 400)
+        self.assertEqual(self.action(pid, tid, "pause").status_code, 400)
+        for blocked in ("plan", "queue", "mark_planned"):
+            res = self.action(pid, tid, blocked)
+            self.assertEqual(res.status_code, 400, blocked)
+            self.assertIn("paused", res.get_json()["error"])
         res = self.client.patch(f"/api/projects/{pid}/tasks/{tid}", headers=H, json={"title": "renamed"})
         self.assertEqual(res.status_code, 200)
         self.assertEqual(self.client.delete(f"/api/projects/{pid}/tasks/{tid}", headers=H).status_code, 200)
 
-    def test_resume_planned_with_questions_lands_in_drafted(self):
-        self.hold_runner()
+    def test_paused_queued_task_is_not_claimed_until_resumed(self):
         pid = self.add_project()["id"]
-        tid = self.post_task(pid, "t")["id"]
-        self.client.patch(f"/api/projects/{pid}/tasks/{tid}", headers=H, json={"plan": "do it"})
-        self.action(pid, tid, "mark_planned")
+        self.set_project(pid, auto_run=False)
+        tid = self.post_task(pid, "Create output file", "Make agent_output.txt")["id"]
+        self.action(pid, tid, "plan")
+        self.wait_for(pid, tid, {"planned"})
+        self.action(pid, tid, "queue")
         self.action(pid, tid, "pause")
-        self.client.patch(f"/api/projects/{pid}/tasks/{tid}", headers=H, json={"plan": ASKING_PLAN})
-        self.assertEqual(self.action(pid, tid, "resume").get_json()["status"], "drafted")
+        self.set_project(pid, auto_run=True)
+        time.sleep(0.5)
+        task = self.wait_for(pid, tid, {"queued"})
+        self.assertTrue(task["paused"])
+        self.assertFalse(self.app.config["ENGINE"].jobs)
+
+        self.action(pid, tid, "resume")
+        self.assertEqual(self.wait_for(pid, tid, {"review", "failed"})["status"], "review")
+
+    def test_legacy_paused_status_migrates_on_load(self):
+        from patchgoblin.store import migrate_paused
+        doc = {"version": 6, "tasks": [
+            {"id": 1, "status": "paused", "paused_from": "planned"},
+            {"id": 2, "status": "paused"},
+            {"id": 3, "status": "paused", "paused_from": "review"},
+            {"id": 4, "status": "queued"}]}
+        self.assertTrue(migrate_paused(doc))
+        self.assertEqual([(t["status"], t.get("paused"), "paused_from" in t) for t in doc["tasks"]],
+                         [("planned", True, False), ("unplanned", True, False),
+                          ("unplanned", True, False), ("queued", None, False)])
+        self.assertFalse(migrate_paused(doc))
 
     def test_paused_skipped_by_automation(self):
         self.hold_runner()
         pid = self.add_project()["id"]
         paused = self.client.post(f"/api/projects/{pid}/tasks", headers=H,
                                   json={"title": "Paused", "paused": True}).get_json()
-        self.assertEqual(paused["status"], "paused")
-        self.assertEqual(paused["paused_from"], "unplanned")
+        self.assertEqual((paused["status"], paused["paused"]), ("unplanned", True))
         self.assertEqual(self.events(paused), ["Created (paused)"])
         planned = self.post_task(pid, "Planned")["id"]
         self.client.patch(f"/api/projects/{pid}/tasks/{planned}", headers=H, json={"plan": "do it"})
@@ -1124,11 +1150,11 @@ class AutomationTests(AppTestCase):
         self.set_global(auto_plan=True, auto_queue=True)
         time.sleep(0.3)
         tasks = self.client.get(f"/api/projects/{pid}/tasks").get_json()["tasks"]
-        self.assertEqual([t["status"] for t in tasks], ["paused", "paused"])
+        self.assertEqual([(t["status"], t["paused"]) for t in tasks], [("unplanned", True), ("planned", True)])
         self.assertFalse([e for t in tasks for e in self.events(t) if e.startswith("Auto-")])
 
         res = self.client.post(f"/api/projects/{pid}/tasks", headers=H, json={"title": "New", "paused": True})
-        self.assertEqual(res.get_json()["status"], "paused")
+        self.assertEqual((res.get_json()["status"], res.get_json()["paused"]), ("unplanned", True))
 
     def test_batch_pause_and_resume(self):
         kick = self.hold_runner()
@@ -2367,7 +2393,7 @@ class OpencodeTests(AppTestCase):
         client.patch("/api/projects/old/tasks/2", headers=H, json={"provider": "opencode"})
         with open(os.path.join(old_dir, ".patchgoblin", "tasks.json"), encoding="utf-8") as fh:
             doc = json.load(fh)
-        self.assertEqual((doc["version"], [t["provider"] for t in doc["tasks"]]), (6, ["opencode-api", "opencode"]))
+        self.assertEqual((doc["version"], [t["provider"] for t in doc["tasks"]]), (7, ["opencode-api", "opencode"]))
         client.patch("/api/projects/old", headers=H, json={"provider": "opencode"})
 
         stamp = os.stat(settings_path).st_mtime_ns
