@@ -212,7 +212,7 @@ def _has_head(host, path: str) -> bool:
     return git(host, path, "rev-parse", "--verify", "--quiet", "HEAD").ok
 
 
-def remote_status(host, path: str) -> dict:
+def remote_status(host, path: str, ignore_metadata: bool = False) -> dict:
     """Remote, branch and ahead/behind counts from local refs only (never fetches)."""
     url = get_remote(host, path)
     res = git(host, path, "symbolic-ref", "--quiet", "--short", "HEAD")
@@ -229,7 +229,15 @@ def remote_status(host, path: str) -> dict:
         res = git(host, path, "rev-list", "--count", "HEAD")
         ahead = int(res.stdout.strip() or 0) if res.ok else 0
     return {"url": url, "branch": branch, "upstream": upstream, "ahead": ahead, "behind": behind,
-            "dirty": has_changes(host, path)}
+            "dirty": has_changes(host, path, ignore_metadata)}
+
+
+def vcs_summary(host, path: str) -> dict:
+    """What the sidebar shows: is there a remote, and has everything reached it. PatchGoblin's
+    own .patchgoblin/ files don't count as unpushed changes."""
+    st = remote_status(host, path, ignore_metadata=True)
+    return {"kind": "git", "remote": bool(st["url"]), "upstream": st["upstream"],
+            "ahead": st["ahead"], "behind": st["behind"], "dirty": st["dirty"]}
 
 
 def sync(host, path: str, mode: str = "ff-only", push: bool = True, checkpoint: bool = True,

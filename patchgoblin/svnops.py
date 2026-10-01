@@ -74,6 +74,11 @@ def status_entries(host, path: str) -> dict[str, str]:
     return entries
 
 
+def vcs_summary(host, path: str) -> dict:
+    """A working copy always has a repository; "pushed" means nothing is waiting to be checked in."""
+    return {"kind": "svn", "remote": True, "pending": len(status_entries(host, path))}
+
+
 def dirty_fingerprint(host, path: str) -> dict[str, str]:
     """``{path: "item blob"}`` for every changed file. Comparing two fingerprints also catches
     edits to files that were already modified. Blobs come from ``git hash-object``."""

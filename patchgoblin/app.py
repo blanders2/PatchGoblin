@@ -366,8 +366,20 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     def projects_status():
         # Separate from list_projects: an SSH probe can take ~20 s, so check in parallel.
         projects = registry.list()
+        def status_of(project: dict) -> dict:
+            result = probe(project)
+            if not result.get("ok"):
+                return result
+            ops = gitops if gitops.tracked(project) else svnops if svnops.tracked(project) else None
+            if ops:
+                try:
+                    result = {**result, "vcs": ops.vcs_summary(host_for(project), project["path"])}
+                except (HostError, OSError, ValueError):
+                    pass  # a broken repo must not break the reachability dot
+            return result
+
         with ThreadPoolExecutor(max_workers=min(8, len(projects) or 1)) as pool:
-            results = list(pool.map(probe, projects))
+            results = list(pool.map(status_of, projects))
         return jsonify(status={p["id"]: r for p, r in zip(projects, results)})
 
     def project_fields(data: dict) -> dict:

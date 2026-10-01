@@ -306,11 +306,13 @@ class ProjectTests(AppTestCase):
     def test_project_status_reports_reachability(self):
         pid = self.add_project()["id"]
         status = self.client.get("/api/projects/status").get_json()["status"]
-        self.assertEqual(status[pid], {"ok": True, "error": ""})
+        self.assertTrue(status[pid]["ok"])
+        self.assertEqual(status[pid]["error"], "")
         os.rename(self.proj_dir, self.proj_dir + "-moved")  # rename: .git files are read-only on Windows
         status = self.client.get("/api/projects/status").get_json()["status"]
         self.assertFalse(status[pid]["ok"])
         self.assertIn("Directory does not exist", status[pid]["error"])
+        self.assertNotIn("vcs", status[pid])
 
     def test_probe_ssh_never_raises(self):
         bad = probe({"location": "ssh", "ssh_target": "-bad", "path": "/srv/p"})
@@ -1261,6 +1263,38 @@ class RemoteTests(AppTestCase):
         res = self.client.put(f"/api/projects/{pid}/remote", headers=H, json={"url": ""})
         self.assertEqual(res.get_json()["url"], "")
         self.assertEqual(self.sync(pid).status_code, 502)
+
+    def vcs(self, pid):
+        return self.client.get("/api/projects/status").get_json()["status"][pid]["vcs"]
+
+    def test_project_status_vcs_summary(self):
+        pid = self.add_project()["id"]
+        v = self.vcs(pid)
+        self.assertEqual(v["kind"], "git")
+        self.assertFalse(v["remote"])
+        self.client.put(f"/api/projects/{pid}/remote", headers=H, json={"url": self.bare})
+        v = self.vcs(pid)
+        self.assertTrue(v["remote"])
+        self.assertGreater(v["ahead"], 0)
+        res = self.sync(pid, push=True)
+        self.assertEqual(res.status_code, 200, res.get_json())
+        v = self.vcs(pid)
+        self.assertEqual((v["ahead"], v["behind"], v["dirty"]), (0, 0, False))
+        # PatchGoblin's own metadata is not an unpushed change; real edits are.
+        meta = os.path.join(self.proj_dir, ".patchgoblin")
+        os.makedirs(meta, exist_ok=True)
+        with open(os.path.join(meta, "tasks.json"), "w") as fh:
+            fh.write("[]")
+        self.assertFalse(self.vcs(pid)["dirty"])
+        with open(os.path.join(self.proj_dir, "edited.txt"), "w") as fh:
+            fh.write("x")
+        self.assertTrue(self.vcs(pid)["dirty"])
+
+    def test_project_status_untracked_has_no_vcs(self):
+        pid = self.add_project(git_tracking=False)["id"]
+        status = self.client.get("/api/projects/status").get_json()["status"][pid]
+        self.assertTrue(status["ok"])
+        self.assertNotIn("vcs", status)
 
     def test_set_remote_rejects_option_like_url(self):
         pid = self.add_project()["id"]

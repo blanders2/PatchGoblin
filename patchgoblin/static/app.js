@@ -31,7 +31,7 @@ const state = {
   view: "board", // "board" or "settings" (the full-page Project settings view)
   settingsDirty: false,
   automation: {}, // the global automation defaults, for the project settings' "Default (…)" labels
-  reach: {}, // pid -> {ok, error} from /api/projects/status; missing means still checking
+  reach: {}, // pid -> {ok, error, vcs?} from /api/projects/status; missing means still checking
 };
 
 function validTab(col) { return Object.values(COLUMN_OF).includes(col) ? col : "unplanned"; }
@@ -263,12 +263,57 @@ function reachDot(p) {
   return el("span", { class: `p-dot ${cls}`, title: label, "aria-label": label, role: "img" });
 }
 
+// Static glyphs (never user data) in the same stroke style as the other inline SVGs; el() can't build SVG.
+const svgIcon = body => `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" ` +
+  `stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+const VCS_LOCAL_ICON = svgIcon('<circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="12" r="2.5"/><path d="M6 8.5v7M8.5 6C14 6 18 7 18 9.5"/>');
+const CLOUD = '<path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 8.5a4.75 4.75 0 0 1-.5 9.5z"/>';
+const VCS_REMOTE_ICONS = {
+  synced: svgIcon(CLOUD + '<path d="m9.5 13 2 2 3.5-4"/>'),
+  unpushed: svgIcon(CLOUD + '<path d="M12 16v-5M9.8 12.8 12 10.6l2.2 2.2"/>'),
+  behind: svgIcon(CLOUD + '<path d="M12 10v5M9.8 13.2 12 15.4l2.2-2.2"/>'),
+};
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+// 0-2 small icons after a project's name: has a local repository, and (if it has a remote) whether all is pushed.
+function vcsIcons(p) {
+  const v = (state.reach[p.id] || {}).vcs;
+  if (!v) return [];
+  const icon = (cls, label, html, count) => {
+    const span = el("span", { class: `p-vcs ${cls}`, title: label, "aria-label": label, role: "img" });
+    span.innerHTML = html;
+    if (count) span.append(el("span", { class: "count" }, String(count)));
+    return span;
+  };
+  const icons = [icon("local", v.kind === "svn" ? "SVN working copy" : "Local git repository", VCS_LOCAL_ICON)];
+  if (!v.remote) return icons;
+  let state_, label, count = 0;
+  if (v.kind === "svn") {
+    state_ = v.pending ? "unpushed" : "synced";
+    label = v.pending ? `${plural(v.pending, "change")} pending check-in` : "All changes checked in";
+  } else if (!v.ahead && !v.behind && !v.dirty) {
+    state_ = "synced";
+    label = "All changes pushed to origin";
+  } else if (!v.ahead && !v.dirty) {
+    state_ = "behind";
+    label = `${plural(v.behind, "commit")} on origin not pulled (as of last fetch)`;
+  } else {
+    state_ = "unpushed";
+    count = v.ahead;
+    label = [v.ahead ? `${plural(v.ahead, "commit")} not pushed` : "", v.dirty ? "uncommitted changes" : ""]
+      .filter(Boolean).join(" · ");
+  }
+  icons.push(icon(`remote ${state_}`, label, VCS_REMOTE_ICONS[state_], count));
+  return icons;
+}
+
 function renderProjects() {
   const list = $("#project-list");
   list.replaceChildren(...state.projects.map(p => el("li", {
     class: p.id === state.pid ? "active" : "",
     onclick: () => selectProject(p.id),
-  }, el("div", { class: "p-title" }, reachDot(p), el("span", { class: "p-name" }, p.name)),
+  }, el("div", { class: "p-title" }, reachDot(p), el("span", { class: "p-name" }, p.name), ...vcsIcons(p)),
      el("div", { class: "p-sub" }, p.location === "ssh" ? `ssh · ${p.ssh_target}` : "local"))));
   const has = state.projects.length > 0;
   if (!has) state.view = "board";
@@ -559,6 +604,7 @@ function setupProjectSettings() {
     try {
       Object.assign(p, await api("POST", `/api/projects/${p.id}/svn/enable`));
       renderProjects();
+      loadReachability();
       if (currentProject() === p) updateVcsButtons(p);
       $("#ps-git-off").hidden = true;
       $("#ps-svn").hidden = false;
@@ -584,6 +630,7 @@ function setupProjectSettings() {
     try {
       Object.assign(p, await api("POST", `/api/projects/${p.id}/git/enable`, {secrets_ack: true}));
       renderProjects();
+      loadReachability();
       if (currentProject() === p) {
         updateVcsButtons(p);
       }
@@ -1909,6 +1956,7 @@ async function submitCheckin() {
     $("#checkin-dialog").close();
     toast(data.revision ? `Checked in as ${data.revision}` : "Nothing to check in");
     loadTasks();
+    loadReachability();
   } catch (e) {
     showError($("#ci-error"), e.message);
     btn.disabled = false;
@@ -1961,6 +2009,7 @@ function setupRemoteDialog() {
       $("#r-log").textContent = r.log.join("\n");
       $("#r-log").hidden = false;
       toast("Synced");
+      loadReachability();
     } catch (e) {
       showError($("#r-error"), e.message);
       toast(e.message, true);

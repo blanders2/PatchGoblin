@@ -177,6 +177,11 @@ button.icon-btn { padding: 6px; line-height: 0; display: inline-flex; align-item
 .p-dot.checking { opacity: .5; animation: p-dot-pulse 1.4s ease-in-out infinite; }
 @keyframes p-dot-pulse { 50% { opacity: .15; } }
 @media (prefers-reduced-motion: reduce) { .p-dot.checking { animation: none; } }
+.p-vcs { flex-shrink: 0; display: inline-flex; align-items: center; gap: 1px; color: var(--muted); line-height: 0; }
+.p-name + .p-vcs { margin-left: auto; }
+.p-vcs.synced { color: var(--accent); }
+.p-vcs.unpushed { color: var(--warn); }
+.p-vcs .count { font-size: 10px; font-weight: 600; line-height: 1; }
 .p-sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 main { flex: 1; min-width: 0; overflow: auto; padding: 18px 22px; }
 
