@@ -1,5 +1,5 @@
 {
-  "version": 6,
+  "version": 7,
   "next_id": 42,
   "tasks": [
     {
@@ -2279,13 +2279,13 @@
       "code_model": "",
       "plan_trust": "",
       "created_at": "2026-10-01T21:16:11+00:00",
-      "updated_at": "2026-10-01T21:29:44+00:00",
+      "updated_at": "2026-10-01T21:29:50+00:00",
       "queued_at": "2026-10-01T21:17:53+00:00",
       "started_at": "2026-10-01T21:23:19+00:00",
       "finished_at": "2026-10-01T21:29:44+00:00",
       "output": "The model lists are now editable per CLI, new names are remembered, and Cline has a live catalog route. The full suite passes (222 tests, 9 skipped); I didn't run the Cline route against a real Cline install.\n\n- **Suggestions:** each CLI block in `store.py` has a `models` list. A new `cli_model_suggestions` combines the built-in models, the saved list and the plan/code defaults. `model_suggestions` uses it for every CLI. `claude-sonnet-5` is now `claude-sonnet-5-5`.\n- **Parsing:** `model_list` in `app.py` takes a string or a list, removes duplicates and rejects multi-line names. `clean_commands` and `clean_endpoints` both use it.\n- **Remembering:** `Settings.remember_models` appends names that aren't suggestions yet, for claude, codex and cline only, and saves only when something was added. Project add/update, task create/update and batch `set_models` all call it, and a failure there is logged but never fails the request.\n- **Cline catalog:** `cline.py` is new. It sends a small Node script on stdin to the project's host. The script reads only `lastUsedProvider` from `providers.json` and imports `@cline/llms` from the npm global root. The new `GET /api/projects/<pid>/cline/models` route caches successes and supports `?refresh`. On any failure it returns the static and saved suggestions with the message in `error`.\n- **UI:** a \"Model suggestions\" input on all four CLI fieldsets, `cline` added to `PER_PROJECT_MODELS`, and the Custom\u2026 choice now adds the name to the in-memory lists. The README has a short paragraph on this.\n\nI didn't edit the checked-in `.patchgoblin/tasks.json`, which was already modified before I started.\n\n- **Tests:** a new `CliModelListTests` class has 9 tests. They cover parsing, suggestions including the defaults, remembering for projects, tasks and batch, opencode and endpoints left untouched, a failing `remember_models` not failing the request, and the Cline route for success, caching, command failure, bad output and an unknown project.\n- **Not run:** the manual check on a machine with cline 3.0.67.\n- **Existing data:** projects and tasks that already use `claude-sonnet-5` are not migrated. They still work, because a current value not in the list is shown.\n- **Concurrent edits:** if the Settings dialog is open while a model gets remembered, saving the dialog overwrites that list with its older copy.",
       "error": "",
-      "commit": "",
+      "commit": "548ec2e8287c58b923be7077714053858e081b29",
       "changes": [],
       "summary": "",
       "checkin_pending": false,
@@ -2319,6 +2319,10 @@
         {
           "at": "2026-10-01T21:29:44+00:00",
           "event": "AI run finished; awaiting review"
+        },
+        {
+          "at": "2026-10-01T21:29:50+00:00",
+          "event": "Committed 548ec2e828"
         }
       ],
       "prev_status": "unplanned"
