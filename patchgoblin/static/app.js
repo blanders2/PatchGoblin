@@ -9,7 +9,7 @@ const STATUS_LABEL = {
 };
 const COLUMN_OF = {
   unplanned: "unplanned", planning: "unplanned", drafted: "drafted", planned: "planned",
-  queued: "queue", running: "queue", review: "review", done: "finished", failed: "finished",
+  queued: "queue", running: "queue", review: "review", done: "finished", failed: "failed",
   paused: "paused",
 };
 // Waiting on the user: not locked by the AI (LOCKED in app.py) and not done.
@@ -21,6 +21,7 @@ const state = {
   pid: localStorageGet("pg.pid"),
   tab: validTab(localStorageGet("pg.tab")),
   tasks: [],
+  tasksLoaded: false, // true once the current project's tasks have been fetched
   openTid: null,
   formStamp: null, // server values of the editable fields when the drawer form was filled
   questionStamp: null, // questions shown in the drawer, so polling doesn't wipe typed answers
@@ -293,6 +294,7 @@ async function selectProject(pid) {
   renderProjectModel();
   renderProjectTrust();
   state.tasks = [];
+  state.tasksLoaded = false;
   renderBoard();
   loadChat();
   await loadTasks();
@@ -605,6 +607,7 @@ async function loadTasks() {
     const data = await api("GET", `/api/projects/${pid}/tasks`);
     if (pid !== state.pid) return;
     state.tasks = data.tasks;
+    state.tasksLoaded = true;
     updateCheckinCount();
     showError($("#p-error"), "");
   } catch (e) {
@@ -621,11 +624,19 @@ function sortTasks(col, tasks) {
     return tasks.sort((a, b) => (a.status === "running" ? -1 : b.status === "running" ? 1 : by("queued_at")(a, b)));
   }
   if (col === "review") return tasks.sort(by("finished_at"));
-  if (col === "finished") return tasks.sort(by("finished_at", -1));
+  if (col === "finished" || col === "failed") return tasks.sort(by("finished_at", -1));
   return tasks.sort((a, b) => a.id - b.id);
 }
 
 function renderBoard() {
+  // The Failed tab only shows while a task is failed; fall back to Finished once it empties
+  // (but not before this project's tasks have loaded, or a remembered tab would be lost).
+  const hasFailed = state.tasks.some(t => t.status === "failed");
+  if (state.tab === "failed" && !hasFailed && state.tasksLoaded) {
+    state.tab = "finished";
+    localStorageSet("pg.tab", state.tab);
+    clearSelection(false);
+  }
   for (const column of $$(".column")) {
     const col = column.dataset.col;
     const tasks = sortTasks(col, state.tasks.filter(t => COLUMN_OF[t.status] === col));
@@ -636,6 +647,7 @@ function renderBoard() {
 
     // The badge counts only tasks the user can act on; the tooltip gives the full breakdown.
     const tab = $(`.queue-tab[data-col="${col}"]`);
+    tab.hidden = col === "failed" && !hasFailed && !active;
     const actionable = tasks.filter(t => ACTIONABLE.has(t.status)).length;
     const byStatus = {};
     for (const t of tasks) byStatus[t.status] = (byStatus[t.status] || 0) + 1;
@@ -713,7 +725,7 @@ function selectTab(col, focus = false) {
 }
 
 function onTabKeydown(e) {
-  const tabs = $$(".queue-tab").map(b => b.dataset.col);
+  const tabs = $$(".queue-tab").filter(b => !b.hidden).map(b => b.dataset.col);
   const i = tabs.indexOf(state.tab);
   const next = { ArrowLeft: tabs[(i - 1 + tabs.length) % tabs.length],
     ArrowRight: tabs[(i + 1) % tabs.length], Home: tabs[0], End: tabs[tabs.length - 1] }[e.key];
@@ -884,6 +896,7 @@ async function doBatch(action, extra = {}) {
   } catch (e) { toast(e.message, true); return; }
 
   state.tasks = data.tasks;
+  state.tasksLoaded = true;
   const ok = data.results.filter(r => r.ok);
   const failed = data.results.filter(r => !r.ok);
   for (const r of ok) state.selected.delete(r.id);

@@ -229,6 +229,8 @@ button.link:hover { filter: none; }
   font-size: 11px; font-weight: 600; min-width: 18px; padding: 1px 6px; text-align: center;
 }
 .queue-tab .count.empty { display: none; }
+.queue-tab[hidden] { display: none; }
+.queue-tab[data-col="failed"] .count { background: var(--danger); color: var(--danger-ink); }
 .queue-tab .activity {
   width: 7px; height: 7px; border-radius: 50%; background: var(--t-running);
   animation: pulse 1.2s ease-in-out infinite;

@@ -76,7 +76,7 @@ automatically.
 | Running… | The AI is working in the project directory. Live output is shown in the task panel. |
 | Needs review | The AI run finished and its work is committed. Approve it, send it back to the AI with feedback, or reopen it. |
 | Done | Approved by you. You can send it back to the AI with feedback, or reopen it. |
-| Failed | The run failed or was cancelled. You can re-queue it, replan it, or mark it planned. |
+| Failed | The run failed or was cancelled. You can re-queue it, replan it, or mark it planned. Failed tasks sit in their own **Failed** tab, which only shows while there is a failed task. |
 | Paused | Set aside by you; Auto-plan and Auto-queue never touch it. Resume returns it to the status it had. |
 
 Planning and implementation both run **in the project's directory, on the project's

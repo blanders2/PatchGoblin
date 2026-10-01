@@ -313,7 +313,7 @@ class ProjectTests(AppTestCase):
 
     def test_index_has_queue_tabs(self):
         html = self.client.get("/").get_data(as_text=True)
-        for col in ("unplanned", "drafted", "planned", "queue", "review", "finished"):
+        for col in ("unplanned", "drafted", "planned", "queue", "review", "finished", "failed"):
             self.assertIn(f'role="tab" id="tab-{col}" data-col="{col}"', html)
             self.assertIn(f'id="col-{col}" data-col="{col}" role="tabpanel" aria-labelledby="tab-{col}"', html)
 
