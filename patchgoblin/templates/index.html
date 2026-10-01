@@ -190,6 +190,10 @@
           <legend>Version control</legend>
           <div id="ps-git-off">
             <p class="muted small">Version control tracking is off. Tasks are not committed, and Commits, Check in and Sync are unavailable.</p>
+            <div class="secrets-warning">
+              <p>Every file in this directory will be committed to git. Don't use a directory that contains secrets such as API keys, <code>.env</code> files, credentials or private keys. Move them out or add them to <code>.gitignore</code> first.</p>
+              <label class="check"><input type="checkbox" name="git_secrets_ack"> I confirm this directory contains no secrets that should not be committed</label>
+            </div>
             <button type="button" class="ghost" id="ps-git-enable-btn">Turn on git tracking</button>
             <button type="button" class="ghost" id="ps-svn-enable-btn" title="The project folder must already be the root of an SVN working copy">Use existing SVN working copy</button>
           </div>
@@ -387,6 +391,10 @@
     </div>
     <label class="check"><input type="checkbox" name="create" checked> Create the directory if it doesn't exist</label>
     <label class="check"><input type="checkbox" name="git_tracking"> Track with git (initialize a repository and commit each finished task)</label>
+    <div id="pf-git-warning" class="secrets-warning" hidden>
+      <p>Every file in this directory will be committed to git. Don't use a directory that contains secrets such as API keys, <code>.env</code> files, credentials or private keys. Move them out or add them to <code>.gitignore</code> first.</p>
+      <label class="check"><input type="checkbox" name="secrets_ack"> I confirm this directory contains no secrets that should not be committed</label>
+    </div>
     <div id="project-form-error" class="error" hidden></div>
     <div class="actions right">
       <button type="button" class="ghost" data-close="project-dialog">Cancel</button>

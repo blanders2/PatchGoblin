@@ -385,6 +385,11 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         }
         return fields
 
+    def require_secrets_ack(data: dict) -> None:
+        if data.get("secrets_ack") is not True:
+            raise ValueError("Confirm that this directory contains no secrets (API keys, .env files, "
+                             "credentials) before PatchGoblin creates a git repository and commits it.")
+
     @app.post("/api/browse")
     def browse():
         """List folders on the machine a project would live on (for the folder picker)."""
@@ -400,6 +405,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         data = body()
         fields = project_fields(data)
         fields["git_tracking"] = data.get("git_tracking") is True
+        if fields["git_tracking"]:
+            require_secrets_ack(data)
         host = host_for(fields)
         if fields["location"] == "ssh":
             host.check()
@@ -427,6 +434,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     def enable_git(pid):
         """Turn on git tracking for a project that started untracked: create the repository
         (or adopt an existing repo root) and its initial commit, then set the flag."""
+        data = body()
         project = project_or_404(pid)
         if engine.busy(pid) or any(t["status"] in LOCKED for t in store.read(project, fresh=True)["tasks"]):
             raise ValueError("Wait for this project's AI jobs to finish first.")
@@ -434,6 +442,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             return jsonify(project)
         if svnops.tracked(project):
             raise ValueError("This project is tracked with SVN; stop SVN tracking before using git.")
+        require_secrets_ack(data)
         host, path = host_for(project), project["path"]
         created = gitops.ensure_repo(host, path, settings.get()["git"]["gitignore"])
         if created or not gitops.recent_commits(host, path, limit=1):

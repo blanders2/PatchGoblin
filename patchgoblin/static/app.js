@@ -371,6 +371,7 @@ function openProjectSettings() {
   form.remote_url.value = "";
   form.remote_url.disabled = true;
   form.git_tracking_off.checked = false;
+  form.git_secrets_ack.checked = false;
   form.svn_tracking_off.checked = false;
   const tracked = p.git_tracking === true;
   const svn = p.svn_tracking === true;
@@ -573,10 +574,15 @@ function setupProjectSettings() {
     const p = state.projects.find(x => x.id === form.dataset.pid);
     if (!p) return;
     const btn = $("#ps-git-enable-btn");
+    if (!form.git_secrets_ack.checked) {
+      showError($("#ps-error"), "Tick the confirmation that this directory contains no secrets first.");
+      form.git_secrets_ack.focus();
+      return;
+    }
     btn.disabled = true;
     showError($("#ps-error"), "");
     try {
-      Object.assign(p, await api("POST", `/api/projects/${p.id}/git/enable`));
+      Object.assign(p, await api("POST", `/api/projects/${p.id}/git/enable`, {secrets_ack: true}));
       renderProjects();
       if (currentProject() === p) {
         updateVcsButtons(p);
@@ -1634,8 +1640,13 @@ function setupProjectDialog() {
   const dialog = $("#project-dialog");
   const form = $("#project-form");
   const resetBrowser = setupFolderBrowser(form);
+  const syncGitWarning = () => {
+    $("#pf-git-warning").hidden = !form.git_tracking.checked;
+    form.secrets_ack.required = form.git_tracking.checked;
+  };
   const open = () => {
     form.reset();
+    syncGitWarning();
     for (const select of [form.plan_model, form.code_model]) {
       fillModelSelectLive(select, form.provider.value, "", () => dialog.open, "Global default");
     }
@@ -1649,6 +1660,7 @@ function setupProjectDialog() {
     form.ssh_target.required = ssh;
     resetBrowser();
   };
+  form.git_tracking.onchange = syncGitWarning;
   $("#add-project-btn").onclick = open;
   $("#empty-add-btn").onclick = open;
   $$("input[name=location]", form).forEach(r => { r.onchange = syncLocation; });
@@ -1674,6 +1686,7 @@ function setupProjectDialog() {
     const f = Object.fromEntries(new FormData(form));
     f.create = form.create.checked;
     f.git_tracking = form.git_tracking.checked;
+    f.secrets_ack = form.git_tracking.checked && form.secrets_ack.checked;
     try {
       const project = await api("POST", "/api/projects", f);
       dialog.close();

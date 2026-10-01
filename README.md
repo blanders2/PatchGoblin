@@ -32,7 +32,7 @@ folders on whichever machine the project is on (drives on Windows, the remote fi
 system over SSH), and you can add a new subfolder name to start a fresh project. If the directory doesn't exist it's created.
 
 **Git tracking** is off by default for a newly added project; tick **Track with git** in
-the Add project dialog, or turn it on later from Project settings → Git. Turning it on
+the Add project dialog, or turn it on later from Project settings → Git. Turning it on commits the whole directory, so you must confirm it contains no secrets (API keys, `.env` files, credentials) first. It
 runs `git init` there (with a basic `.gitignore` taken from Settings → New repositories, which ignores
 `.patchgoblin/` by default; remove that line to commit and sync tasks, and note that an
 existing `.gitignore` is never overwritten) and an initial commit, unless the

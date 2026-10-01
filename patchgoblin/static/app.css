@@ -492,3 +492,12 @@ legend { padding: 0 4px; font-weight: 600; }
 .image-previews { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
 .image-previews[hidden] { display: none; }
 .image-previews img { height: 72px; max-width: 160px; object-fit: cover; border: 1px solid var(--border, #8884); border-radius: 4px; cursor: zoom-in; }
+
+.secrets-warning {
+  border-left: 4px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, var(--panel));
+  padding: 8px 12px;
+  margin: 8px 0;
+  border-radius: 4px;
+}
+.secrets-warning p { margin: 0 0 6px; }

@@ -41,9 +41,28 @@ class AppTestCase(unittest.TestCase):
 
     def add_project(self, **extra):
         res = self.client.post("/api/projects", headers=H,
-                               json={"path": self.proj_dir, "provider": "claude", "git_tracking": True, **extra})
+                               json={"path": self.proj_dir, "provider": "claude", "git_tracking": True,
+                                     "secrets_ack": True, **extra})
         self.assertEqual(res.status_code, 201, res.get_json())
         return res.get_json()
+
+    def test_git_tracking_requires_secrets_ack(self):
+        res = self.client.post("/api/projects", headers=H,
+                               json={"path": self.proj_dir, "provider": "claude", "git_tracking": True})
+        self.assertEqual(res.status_code, 400)
+        self.assertFalse(os.path.exists(self.proj_dir))
+
+    def test_enable_git_requires_secrets_ack(self):
+        project = self.add_project(git_tracking=False)
+        res = self.client.post(f"/api/projects/{project['id']}/git/enable", headers=H)
+        self.assertEqual(res.status_code, 400)
+        self.assertFalse(os.path.exists(os.path.join(self.proj_dir, ".git")))
+        self.assertIs(self.client.get("/api/projects", headers=H).get_json()["projects"][0]["git_tracking"], False)
+
+    def test_untracked_add_needs_no_secrets_ack(self):
+        res = self.client.post("/api/projects", headers=H,
+                               json={"path": self.proj_dir, "provider": "claude", "git_tracking": False})
+        self.assertEqual(res.status_code, 201)
 
     def post_task(self, pid, title, description=""):
         res = self.client.post(f"/api/projects/{pid}/tasks", headers=H,
@@ -129,7 +148,8 @@ class ProjectTests(AppTestCase):
     def test_enable_git_uses_gitignore_setting(self):
         self.client.put("/api/settings", headers=H, json={"git": {"gitignore": "custom/\n"}})
         pid = self.add_project(git_tracking=False)["id"]
-        self.assertEqual(self.client.post(f"/api/projects/{pid}/git/enable", headers=H).status_code, 200)
+        self.assertEqual(self.client.post(f"/api/projects/{pid}/git/enable", headers=H,
+                                                json={"secrets_ack": True}).status_code, 200)
         self.assertEqual(self.read_gitignore(), "custom/\n")
 
     def test_add_project_untracked_by_default(self):
@@ -172,7 +192,7 @@ class ProjectTests(AppTestCase):
         project = self.add_project(git_tracking=False)
         pid = project["id"]
         url = f"/api/projects/{pid}/git/enable"
-        res = self.client.post(url, headers=H)
+        res = self.client.post(url, headers=H, json={"secrets_ack": True})
         self.assertEqual(res.status_code, 200, res.get_json())
         updated = res.get_json()
         self.assertIs(updated["git_tracking"], True)
@@ -195,7 +215,8 @@ class ProjectTests(AppTestCase):
                         "commit", "--allow-empty", "-q", "-m", "pre-existing"],
                        cwd=self.proj_dir, check=True)
         project = self.add_project(git_tracking=False)
-        res = self.client.post(f"/api/projects/{project['id']}/git/enable", headers=H)
+        res = self.client.post(f"/api/projects/{project['id']}/git/enable", headers=H,
+                               json={"secrets_ack": True})
         self.assertEqual(res.status_code, 200, res.get_json())
         self.assertEqual(git_log(self.proj_dir), ["pre-existing"])
 
@@ -218,7 +239,8 @@ class ProjectTests(AppTestCase):
         self.assertIs(res.get_json()["git_tracking"], False)
         self.assertTrue(os.path.isdir(os.path.join(self.proj_dir, ".git")))  # .git is kept
         self.assertEqual(self.client.get(f"/api/projects/{pid}/commits").status_code, 400)
-        res = self.client.post(f"/api/projects/{pid}/git/enable", headers=H)
+        res = self.client.post(f"/api/projects/{pid}/git/enable", headers=H,
+                               json={"secrets_ack": True})
         self.assertEqual(res.status_code, 200, res.get_json())
         self.assertIs(res.get_json()["git_tracking"], True)
         self.assertEqual(git_log(self.proj_dir), ["PatchGoblin: initial commit"])  # not recommitted
@@ -261,7 +283,7 @@ class ProjectTests(AppTestCase):
         project = self.add_project()
         url = f"/api/projects/{project['id']}/terminal"
         with mock.patch("patchgoblin.hosts.subprocess.Popen") as popen:
-            res = self.client.post(url, headers=H)
+            res = self.client.post(url, headers=H, json={"secrets_ack": True})
         self.assertEqual(res.status_code, 200, res.get_json())
         self.assertEqual(popen.call_count, 1)
         argv, kwargs = popen.call_args[0][0], popen.call_args[1]
@@ -274,7 +296,7 @@ class ProjectTests(AppTestCase):
         url = f"/api/projects/{project['id']}/vscode"
         with mock.patch("patchgoblin.hosts.subprocess.Popen") as popen, \
                 mock.patch("patchgoblin.hosts.shutil.which", return_value="/usr/bin/code"):
-            res = self.client.post(url, headers=H)
+            res = self.client.post(url, headers=H, json={"secrets_ack": True})
             self.assertEqual(res.status_code, 200, res.get_json())
             self.assertEqual(popen.call_count, 1)
             self.assertIn(self.proj_dir, popen.call_args[0][0])
