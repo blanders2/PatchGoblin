@@ -219,6 +219,14 @@ a default planning and coding model for Claude Code, Codex, opencode, Cline and 
 opencode's model dropdown lists the models in the project's opencode config (or, if it
 names none, `opencode models`).
 
+Each CLI's dropdown combines its built-in suggestions, the **Model suggestions** list in
+Settings (space or comma separated) and its default models. A model name you save for
+Claude Code, Codex or Cline that isn't a suggestion yet is added to that list
+automatically (remove it in Settings). Cline's dropdown also lists the models in the
+installed Cline's bundled catalog for the provider chosen with `cline auth`, read on the
+project's host with `node`; if that fails, the saved suggestions are used and the
+dropdown's tooltip shows the error.
+
 The model for a job is the first one set of:
 
 1. the task's own planning/coding model;
@@ -311,7 +319,7 @@ Install and log in to the Cline CLI on the machine that hosts the project
 (`npm i -g cline`, then `cline auth`). PatchGoblin runs `cline -p --auto-approve true`
 for planning and chat and `cline --auto-approve true` for runs, with the prompt on stdin.
 Model overrides are passed with `-m` and are ids for the provider you set up with
-`cline auth`; there is no built-in model list, so pick **Custom…** to enter one.
+`cline auth`; pick **Custom…** to enter one not in the list.
 
 Cline prints its thinking and tool calls along with its answer. PatchGoblin keeps all of
 it in the job log, but only Cline's final reply becomes the plan or chat answer.

@@ -13,12 +13,12 @@ from urllib.parse import urlparse
 
 from flask import Flask, Response, abort, jsonify, render_template, request
 
-from . import gitops, opencode, svnops
+from . import cline, gitops, opencode, svnops
 from .engine import Engine
 from .hosts import HostError, host_for, open_terminal, open_vscode, probe
 from .providers import IMAGE_MIME, PLAN_TRUST_LEVELS, endpoint_key, list_models, plan_questions, ready_status
 from .store import (ATTACHMENT_NAME, AUTO_MODES, CLI_PROVIDERS, MODELS, PAUSABLE, STATUSES, Registry, Settings,
-                    TaskStore, attachment_path, empty_doc, find_endpoint, find_task, log_event, new_task, now,
+                    TaskStore, attachment_path, cli_model_suggestions, empty_doc, find_endpoint, find_task, log_event, new_task, now,
                     provider_choices, resolve_auto, save_attachment, set_status, tasks_path, valid_provider)
 
 EDITABLE = ("title", "description", "plan", "provider", "plan_model", "code_model", "plan_trust")
@@ -36,10 +36,7 @@ COMMAND_FLAGS = ("require_agents", "plan_must_not_edit", "prompt_arg")
 def model_suggestions(settings: dict) -> dict:
     """Model dropdown suggestions per provider id (endpoint lists, and opencode's per project,
     are extended live in the UI)."""
-    out = {p: list(MODELS[p]) for p in CLI_PROVIDERS}
-    opencode_cfg = settings["commands"].get("opencode") or {}
-    out["opencode"] += [m for m in (opencode_cfg.get("plan_model"), opencode_cfg.get("code_model"))
-                        if isinstance(m, str) and m and m not in out["opencode"]]
+    out = {p: cli_model_suggestions(settings, p) for p in CLI_PROVIDERS}
     for ep in settings["endpoints"]:
         builtin = list(MODELS["openai"]) if ep["id"] == "openai" else []
         own = [m for m in (ep["model"], ep.get("code_model", "")) if m]
@@ -56,6 +53,15 @@ def model_name(value, what: str = "model") -> str:
     return value.strip()
 
 
+def model_list(value, what: str) -> list[str]:
+    """Model names from a space/comma separated string or a list of strings, deduplicated."""
+    if isinstance(value, str):
+        value = value.replace(",", " ").split()
+    if not isinstance(value, list) or not all(isinstance(m, str) for m in value):
+        raise ValueError(f"The {what} must be a list of names.")
+    return list(dict.fromkeys(m for m in (model_name(m, what) for m in value) if m))
+
+
 def clean_commands(commands) -> dict:
     """Check the CLI settings sent by the Settings form (their model defaults must be names)."""
     if not isinstance(commands, dict):
@@ -65,6 +71,8 @@ def clean_commands(commands) -> dict:
             for key in MODEL_KEYS:
                 if key in cfg:
                     cfg[key] = model_name(cfg[key], "default model")
+            if "models" in cfg:
+                cfg["models"] = model_list(cfg["models"] or [], f"{name} model suggestions")
             for key in ("plan_agent", "run_agent"):
                 if key in cfg:
                     value = cfg[key].strip() if isinstance(cfg[key], str) else ""
@@ -154,11 +162,7 @@ def clean_endpoints(values, saved: list[dict]) -> list[dict]:
                 isinstance(k, str) and isinstance(v, str) and k.strip()
                 and not any(c in k + v for c in "\r\n") for k, v in headers.items()):
             raise ValueError(f"{name}: headers must be single-line 'Name: value' strings.")
-        models = raw.get("models") or []
-        if isinstance(models, str):
-            models = models.replace(",", " ").split()
-        if not isinstance(models, list) or not all(isinstance(m, str) for m in models):
-            raise ValueError(f"{name}: model suggestions must be a list of names.")
+        models = model_list(raw.get("models") or [], f"{name}: model suggestions")
         key = raw.get("api_key") or ""
         if not isinstance(key, str) or any(c in key for c in "\r\n"):
             raise ValueError(f"{name}: the API key must be a single line.")
@@ -171,7 +175,7 @@ def clean_endpoints(values, saved: list[dict]) -> list[dict]:
             "headers": {k.strip(): v.strip() for k, v in headers.items()},
             "model": str(raw.get("model") or "").strip(),
             "code_model": str(raw.get("code_model") or "").strip(),
-            "models": list(dict.fromkeys(m.strip() for m in models if m.strip())),
+            "models": models,
             "allow_commands": bool(raw.get("allow_commands")),
             "max_steps": max_steps,
         })
@@ -213,6 +217,13 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     @app.errorhandler(ValueError)
     def value_error(exc):
         return jsonify(error=str(exc)), 400
+
+    def remember(provider: str, names) -> None:
+        """Save new CLI model names as suggestions; never fails the request."""
+        try:
+            settings.remember_models(provider, list(names))
+        except Exception as exc:
+            app.logger.warning("Could not remember models: %s", exc)
 
     def body() -> dict:
         return request.get_json(silent=True) or {}
@@ -348,6 +359,29 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         defaults = model_suggestions(settings.get())["opencode"]
         return jsonify({**found, "models": list(dict.fromkeys(defaults + found["models"]))})
 
+    # ---- Cline ----------------------------------------------------------------
+    cline_cache: dict[str, tuple[float, tuple[str, list[str]]]] = {}
+
+    @app.get("/api/projects/<pid>/cline/models")
+    def cline_models(pid):
+        """Cline's bundled model catalog for its active provider, plus the saved suggestions.
+        Any failure falls back to the suggestions and is reported in ``error``."""
+        project = project_or_404(pid)
+        with models_lock:
+            cached = cline_cache.get(pid)
+        provider, error = "", ""
+        if cached and not request.args.get("refresh") and time.monotonic() - cached[0] < MODELS_CACHE_SECONDS:
+            provider, live = cached[1]
+        else:
+            try:
+                provider, live = cline.catalog_models(host_for(project), project["path"])
+                with models_lock:
+                    cline_cache[pid] = (time.monotonic(), (provider, live))
+            except (HostError, RuntimeError) as exc:
+                live, error = [], str(exc)
+        defaults = model_suggestions(settings.get())["cline"]
+        return jsonify(models=list(dict.fromkeys(defaults + live)), provider=provider, error=error)
+
     @app.post("/api/endpoints/test")
     def test_endpoint():
         ep = clean_endpoints([body()], settings.get()["endpoints"])[0]
@@ -440,7 +474,9 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             host.write_text(tpath, json.dumps(empty_doc(), indent=2) + "\n")
         if fields["git_tracking"] and created:
             gitops.commit_all(host, path, "PatchGoblin: initial commit")
-        return jsonify(registry.add(fields)), 201
+        added = registry.add(fields)
+        remember(fields["provider"], [fields[k] for k in PROJECT_MODEL_KEYS])
+        return jsonify(added), 201
 
     @app.post("/api/projects/<pid>/git/enable")
     def enable_git(pid):
@@ -535,6 +571,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
                 gitops.set_remote(host, project["path"], remote_url)
         before = auto_values()
         updated = registry.update(project["id"], fields)
+        remember(fields.get("provider", project.get("provider") or "claude"),
+                 [fields[k] for k in PROJECT_MODEL_KEYS if k in fields])
         apply_turned_on(before)
         return jsonify(updated)
 
@@ -716,6 +754,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         with store.edit(project) as doc:
             task = new_task(doc, title, (data.get("description") or "").strip(), provider, **models,
                             plan_trust=trust, paused=paused)
+        remember(provider or project.get("provider") or "claude", models.values())
         if not paused and engine.auto(pid, "auto_plan"):
             try:
                 engine.start_planning(project, task["id"], auto=True)
@@ -747,6 +786,9 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
                 task[key] = data[key].strip() if key == "title" else data[key]
             if changed:
                 log_event(task, "Edited " + ", ".join(changed))
+            provider = task.get("provider") or project.get("provider") or "claude"
+            edited = [task[k] for k in MODEL_KEYS if k in changed]
+        remember(provider, edited)
         return jsonify(task_view(pid, task))
 
     @app.delete("/api/projects/<pid>/tasks/<int:tid>")
@@ -891,6 +933,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
 
         errors: dict[int, str] = {}
         queued: list[int] = []
+        model_providers: set[str] = set()
 
         def each(fn) -> None:
             for tid in ids:
@@ -923,6 +966,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
                     elif action == "set_models":
                         changed = [k for k, v in models.items() if task.get(k, "") != v]
                         task.update(models)
+                        model_providers.add(task.get("provider") or project.get("provider") or "claude")
                         if changed:
                             log_event(task, "Edited models")
                     elif task.get("provider", "") != provider:
@@ -931,6 +975,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
                         task["plan_model"] = task["code_model"] = ""
                         log_event(task, "Edited provider")
                 each(edit_one)
+            for name in model_providers:
+                remember(name, models.values())
             if queued:
                 engine.kick(pid)
 

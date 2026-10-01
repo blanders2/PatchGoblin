@@ -473,6 +473,7 @@
         <label class="grow">Default planning model <input name="claude.plan_model" placeholder="CLI default"></label>
         <label class="grow">Default coding model <input name="claude.code_model" placeholder="CLI default"></label>
       </div>
+      <label>Model suggestions <input name="claude.models" placeholder="space or comma separated"></label>
     </fieldset>
     <fieldset>
       <legend>Codex</legend>
@@ -482,6 +483,7 @@
         <label class="grow">Default planning model <input name="codex.plan_model" placeholder="CLI default"></label>
         <label class="grow">Default coding model <input name="codex.code_model" placeholder="CLI default"></label>
       </div>
+      <label>Model suggestions <input name="codex.models" placeholder="space or comma separated"></label>
     </fieldset>
     <fieldset>
       <legend>opencode</legend>
@@ -499,7 +501,8 @@
         <label class="grow">Default planning model <input name="opencode.plan_model" placeholder="opencode default"></label>
         <label class="grow">Default coding model <input name="opencode.code_model" placeholder="opencode default"></label>
       </div>
-      <p class="muted small">Models are <code>provider/model</code>, e.g. <code>anthropic/claude-sonnet-5</code>.
+      <label>Model suggestions <input name="opencode.models" placeholder="space or comma separated"></label>
+      <p class="muted small">Models are <code>provider/model</code>, e.g. <code>anthropic/claude-sonnet-5-5</code>.
         Each project's model list comes from its opencode config.</p>
       <label class="check" title="opencode might otherwise fall back to its default agent, which can edit files and run commands">
         <input type="checkbox" name="opencode.require_agents"> Refuse to run if a custom agent isn't defined</label>
@@ -514,7 +517,9 @@
         <label class="grow">Default planning model <input name="cline.plan_model" placeholder="Cline default"></label>
         <label class="grow">Default coding model <input name="cline.code_model" placeholder="Cline default"></label>
       </div>
-      <p class="muted small">Models are ids for the provider set up with <code>cline auth</code>.</p>
+      <label>Model suggestions <input name="cline.models" placeholder="space or comma separated"></label>
+      <p class="muted small">Models are ids for the provider set up with <code>cline auth</code>; each
+        project's list comes from the installed Cline's catalog for that provider.</p>
       <label class="check" title="Cline's plan mode blocks file edits but can still run commands. Changed files are kept for you to review, not reverted">
         <input type="checkbox" name="cline.plan_must_not_edit"> Fail planning if Cline changes files</label>
     </fieldset>

@@ -24,17 +24,19 @@ STATUSES = ("unplanned", "planning", "drafted", "planned", "queued", "running", 
 CLI_PROVIDERS = ("claude", "codex", "opencode", "cline")
 CLI_NAMES = {"claude": "Claude Code", "codex": "Codex", "opencode": "opencode", "cline": "Cline"}
 # Suggestions for the model dropdowns; any other model name can still be entered as "Custom…".
-# "openai" is only used for the built-in endpoint with that id. opencode's models come from
-# each project's opencode config (see opencode.py), and Cline's from whichever provider the
-# user set up with `cline auth`, so neither has a fixed list.
+# "openai" is only used for the built-in endpoint with that id. These are extended by each CLI's
+# saved "models" list (Settings, plus names remembered when saved), opencode's per-project config
+# (see opencode.py) and Cline's live catalog (see cline.py).
 MODELS = {
-    "claude": ("opus", "sonnet", "haiku", "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5",
+    "claude": ("opus", "sonnet", "haiku", "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5",
                "claude-haiku-4-5"),
     "codex": ("gpt-5-codex", "gpt-5", "gpt-5-mini"),
     "opencode": (),
     "cline": (),
     "openai": ("gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1"),
 }
+# CLIs whose model names are remembered when saved (opencode and endpoints have live lists).
+REMEMBERED_PROVIDERS = ("claude", "codex", "cline")
 TASKS_DIR = ".patchgoblin"
 TASKS_FILE = "tasks.json"
 ATTACHMENTS_DIR = "attachments"
@@ -60,6 +62,7 @@ DEFAULT_SETTINGS = {
             "model_flag": "--model",
             "plan_model": "",
             "code_model": "",
+            "models": [],
         },
         "codex": {
             "plan": "codex exec --sandbox read-only --color never -",
@@ -67,6 +70,7 @@ DEFAULT_SETTINGS = {
             "model_flag": "-m",
             "plan_model": "",
             "code_model": "",
+            "models": [],
         },
         "opencode": {
             # {agent} is replaced by plan_agent (planning and chat) or run_agent (runs).
@@ -77,6 +81,7 @@ DEFAULT_SETTINGS = {
             "model_flag": "-m",
             "plan_model": "",
             "code_model": "",
+            "models": [],
             "require_agents": True,  # refuse to start if a custom agent isn't defined
             "plan_must_not_edit": True,  # fail a plan (or chat) that changed files
         },
@@ -87,6 +92,7 @@ DEFAULT_SETTINGS = {
             "model_flag": "-m",
             "plan_model": "",
             "code_model": "",
+            "models": [],
             "plan_must_not_edit": True,  # fail a plan (or chat) that changed files
         },
     },
@@ -166,6 +172,14 @@ def global_model(settings: dict, provider: str, key: str) -> str:
     if key == "code_model":
         return ep.get("code_model") or ep.get("model") or ""
     return ep.get("model") or ""
+
+
+def cli_model_suggestions(settings: dict, provider: str) -> list[str]:
+    """A CLI's dropdown suggestions: built-in models, the saved ``models`` and its Settings defaults."""
+    cfg = settings.get("commands", {}).get(provider) or {}
+    saved = cfg.get("models") if isinstance(cfg.get("models"), list) else []
+    names = [*MODELS.get(provider, ()), *saved, cfg.get("plan_model"), cfg.get("code_model")]
+    return list(dict.fromkeys(m for m in names if isinstance(m, str) and m.strip()))
 
 
 def provider_choices(settings: dict) -> list[dict]:
@@ -375,6 +389,11 @@ class Settings:
         out = _merge(DEFAULT_SETTINGS, saved)
         endpoints = out["endpoints"] if isinstance(out["endpoints"], list) else []
         out["endpoints"] = [_endpoint(ep) for ep in endpoints if isinstance(ep, dict) and ep.get("id")]
+        for name in CLI_PROVIDERS:
+            cfg = out["commands"].get(name)
+            if isinstance(cfg, dict):
+                models = cfg.get("models") if isinstance(cfg.get("models"), list) else []
+                cfg["models"] = [m for m in models if isinstance(m, str) and m.strip()]
         if not isinstance(out.get("provider_renames"), dict):
             out["provider_renames"] = {}
         return out
@@ -383,6 +402,26 @@ class Settings:
         with self.file.lock:
             self.file.save(_merge(self.file.load(), values))
         return self.get()
+
+    def remember_models(self, provider: str, names) -> list[str]:
+        """Add model names that aren't suggestions yet to a CLI's saved ``models``; returns those added."""
+        if provider not in REMEMBERED_PROVIDERS:
+            return []
+        with self.file.lock:
+            known = set(cli_model_suggestions(self.get(), provider))
+            new = []
+            for name in names:
+                name = name.strip() if isinstance(name, str) else ""
+                if name and not any(c in name for c in "\r\n") and name not in known and name not in new:
+                    new.append(name)
+            if not new:
+                return []
+            data = self.file.load()
+            cfg = data.setdefault("commands", {}).setdefault(provider, {})
+            saved = cfg.get("models") if isinstance(cfg.get("models"), list) else []
+            cfg["models"] = [*saved, *new]
+            self.file.save(data)
+            return new
 
     def save_endpoints(self, endpoints: list[dict]) -> dict:
         """Replace the whole endpoint list (``_merge`` would replace lists anyway)."""

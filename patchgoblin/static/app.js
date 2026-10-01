@@ -126,8 +126,9 @@ const MODELS = JSON.parse(document.body.dataset.models || "{}");
 let PROVIDERS = JSON.parse(document.body.dataset.providers || "[]");
 const CUSTOM_MODEL = "\u0000custom";
 const CLI = new Set(["claude", "codex", "opencode", "cline"]);
-// opencode's models come from each project's own opencode config, so they are listed per project.
-const PER_PROJECT_MODELS = new Set(["opencode"]);
+// opencode's models come from each project's own opencode config, and Cline's from its installed
+// catalog on the project's host, so they are listed per project.
+const PER_PROJECT_MODELS = new Set(["opencode", "cline"]);
 
 // Live model lists are fetched once per session and merged into MODELS, under modelKey().
 const modelFetch = new Map(); // model key -> Promise
@@ -224,6 +225,10 @@ function pickModel(select, provider) {
   }
   const name = (prompt("Model name:", select.dataset.value) || "").trim();
   if (!name) { select.value = select.dataset.value; return null; }
+  // Remember it (the server saves it too) so other dropdowns list it without a reload.
+  for (const key of new Set([provider, modelKey(provider, selectPid(select))])) {
+    if (key === provider || key in MODELS) MODELS[key] = [...new Set([...(MODELS[key] || []), name])];
+  }
   fillModelSelect(select, provider, name);
   return name;
 }
@@ -1782,6 +1787,7 @@ function setupProjectDialog() {
 const SETTING_FIELDS = [
   "claude.plan", "claude.run", "codex.plan", "codex.run",
   "claude.plan_model", "claude.code_model", "codex.plan_model", "codex.code_model",
+  "claude.models", "codex.models", "opencode.models", "cline.models",
   "opencode.plan", "opencode.run", "opencode.plan_agent", "opencode.run_agent",
   "opencode.plan_model", "opencode.code_model", "opencode.require_agents", "opencode.plan_must_not_edit",
   "cline.plan", "cline.run", "cline.plan_model", "cline.code_model", "cline.plan_must_not_edit",

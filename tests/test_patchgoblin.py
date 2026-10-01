@@ -3017,6 +3017,102 @@ class ImageTests(AppTestCase):
         with mock.patch.object(host, "_exec", return_value=Result(44, "", "", False)):
             self.assertIsNone(host.read_bytes("/srv/missing.png"))
 
+class CliModelListTests(AppTestCase):
+    @property
+    def settings(self):
+        return self.app.config["SETTINGS"]
+
+    def saved(self, provider="claude"):
+        return self.settings.get()["commands"][provider]["models"]
+
+    def put_models(self, **models):
+        return self.client.put("/api/settings", headers=H,
+                               json={"commands": {p: {"models": m} for p, m in models.items()}})
+
+    def test_clean_commands_models(self):
+        from patchgoblin.app import clean_commands
+        self.assertEqual(clean_commands({"claude": {"models": "a, b a"}})["claude"]["models"], ["a", "b"])
+        self.assertEqual(clean_commands({"claude": {"models": ["a", " b", "a", ""]}})["claude"]["models"], ["a", "b"])
+        self.assertEqual(clean_commands({"claude": {"models": ""}})["claude"]["models"], [])
+        with self.assertRaises(ValueError):
+            clean_commands({"claude": {"models": ["x\ny"]}})
+        with self.assertRaises(ValueError):
+            clean_commands({"claude": {"models": [1]}})
+        res = self.put_models(claude=["x\ny"])
+        self.assertEqual(res.status_code, 400)
+
+    def test_suggestions_include_saved_and_defaults(self):
+        self.assertEqual(self.put_models(claude="mine, opus", codex="", cline="c1").status_code, 200)
+        self.settings.update({"commands": {"claude": {"plan_model": "p", "code_model": "mine"},
+                                           "cline": {"code_model": "c2"}}})
+        models = self.client.get("/api/settings").get_json()["models"]
+        self.assertIn("claude-sonnet-5-5", models["claude"])
+        self.assertNotIn("claude-sonnet-5", models["claude"])
+        self.assertEqual(models["claude"].count("opus"), 1)
+        self.assertEqual(models["claude"].count("mine"), 1)
+        self.assertIn("p", models["claude"])
+        self.assertEqual(models["cline"], ["c1", "c2"])
+
+    def test_project_and_task_models_are_remembered(self):
+        project = self.add_project(plan_model="my-model", code_model="opus")
+        self.assertEqual(self.saved(), ["my-model"])
+        pid = project["id"]
+        res = self.client.patch(f"/api/projects/{pid}", headers=H, json={"chat_model": "chat-m"})
+        self.assertEqual(res.status_code, 200)
+        task = self.post_task(pid, "t")
+        res = self.client.post(f"/api/projects/{pid}/tasks", headers=H,
+                               json={"title": "u", "provider": "codex", "plan_model": "codex-x", "code_model": ""})
+        self.assertEqual(res.status_code, 201)
+        res = self.client.patch(f"/api/projects/{pid}/tasks/{task['id']}", headers=H, json={"code_model": "task-m"})
+        self.assertEqual(res.status_code, 200)
+        res = self.client.post(f"/api/projects/{pid}/tasks/batch", headers=H,
+                               json={"action": "set_models", "ids": [task["id"]], "plan_model": "batch-m"})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(self.saved(), ["my-model", "chat-m", "task-m", "batch-m"])
+        self.assertEqual(self.saved("codex"), ["codex-x"])
+        self.assertIn("batch-m", self.client.get("/").data.decode())
+
+    def test_opencode_and_endpoints_are_not_remembered(self):
+        self.settings.update({"endpoints": [{"id": "ep", "name": "EP", "base_url": "http://x/v1"}]})
+        self.add_project(provider="opencode", plan_model="a/b")
+        pid = self.client.get("/api/projects").get_json()["projects"][0]["id"]
+        res = self.client.post(f"/api/projects/{pid}/tasks", headers=H,
+                               json={"title": "u", "provider": "ep", "plan_model": "ep-model"})
+        self.assertEqual(res.status_code, 201)
+        before = self.settings.get()
+        self.assertEqual(self.settings.remember_models("opencode", ["x/y"]), [])
+        self.assertEqual(self.settings.get(), before)
+        for provider in ("claude", "codex", "opencode", "cline"):
+            self.assertEqual(self.saved(provider), [])
+
+    def test_remember_failure_does_not_fail_request(self):
+        with mock.patch("patchgoblin.store.Settings.remember_models", side_effect=OSError("disk")):
+            project = self.add_project(plan_model="boom")
+            res = self.client.post(f"/api/projects/{project['id']}/tasks", headers=H,
+                                   json={"title": "t", "plan_model": "boom"})
+            self.assertEqual(res.status_code, 201)
+
+    def test_cline_models_route(self):
+        pid = self.add_project(provider="cline")["id"]
+        self.put_models(cline="saved-m")
+        url = f"/api/projects/{pid}/cline/models"
+        ok = Result(0, '{"provider":"anthropic","models":["m1","m2"]}\n', "")
+        with mock.patch("patchgoblin.hosts.LocalHost.run", return_value=ok) as run:
+            data = self.client.get(url).get_json()
+            self.assertEqual(data, {"models": ["saved-m", "m1", "m2"], "provider": "anthropic", "error": ""})
+            self.assertEqual(run.call_args.args[0], ["node", "--input-type=module", "-"])
+            self.assertEqual(self.client.get(url).get_json(), data)
+            self.assertEqual(run.call_count, 1)  # cached
+        bad = Result(1, "", "Cannot find module")
+        with mock.patch("patchgoblin.hosts.LocalHost.run", return_value=bad):
+            data = self.client.get(url + "?refresh=1").get_json()
+        self.assertEqual(data["models"], ["saved-m"])
+        self.assertEqual(data["provider"], "")
+        self.assertIn("Cannot find module", data["error"])
+        with mock.patch("patchgoblin.hosts.LocalHost.run", return_value=Result(0, "not json\n", "")):
+            self.assertIn("unexpected", self.client.get(url + "?refresh=1").get_json()["error"])
+        self.assertEqual(self.client.get("/api/projects/nope/cline/models").status_code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()
