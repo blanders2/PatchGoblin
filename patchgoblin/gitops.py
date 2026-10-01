@@ -18,6 +18,9 @@ __pycache__/
 .env
 .env.*
 .DS_Store
+
+# PatchGoblin's task metadata. Remove this line to commit and sync tasks.
+.patchgoblin/
 """
 
 FALLBACK_IDENTITY = ["-c", "user.name=PatchGoblin", "-c", "user.email=patchgoblin@localhost"]
@@ -111,8 +114,9 @@ def commit_all(host, path: str, message: str) -> str:
     return _check(git(host, path, "rev-parse", "HEAD"), "rev-parse").stdout.strip()
 
 
-def ensure_repo(host, path: str) -> bool:
+def ensure_repo(host, path: str, template: str = DEFAULT_GITIGNORE) -> bool:
     """Make ``path`` the root of its own repository. Returns True if one was created.
+    A new repository gets ``template`` as its .gitignore unless the folder already has one.
 
     A directory nested inside some other repository still gets its own repo, so
     PatchGoblin's ``git add -A`` can never sweep up files outside the project.
@@ -122,7 +126,7 @@ def ensure_repo(host, path: str) -> bool:
     _check(git(host, path, "init", "-q"), "init")
     gitignore = host.join(path, ".gitignore")
     if host.read_text(gitignore) is None:
-        host.write_text(gitignore, DEFAULT_GITIGNORE)
+        host.write_text(gitignore, template)
     return True
 
 

@@ -17,6 +17,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
+from .gitops import DEFAULT_GITIGNORE
 from .hosts import host_for
 
 STATUSES = ("unplanned", "planning", "drafted", "planned", "queued", "running", "review", "done", "failed", "paused")
@@ -49,6 +50,7 @@ LEGACY_CLAUDE_COMMANDS = {
 }
 
 DEFAULT_SETTINGS = {
+    "git": {"gitignore": DEFAULT_GITIGNORE},  # the .gitignore written into repositories PatchGoblin creates
     "commands": {
         "claude": {
             "plan": "claude -p --output-format stream-json --verbose --allowedTools Read,Glob,Grep "

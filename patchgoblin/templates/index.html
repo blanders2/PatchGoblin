@@ -556,6 +556,13 @@
       <label class="check" title="Let the AI start queued tasks. Turn this off to keep queued tasks waiting; a run already in progress finishes. Turning it back on starts the waiting queue.">
         <input type="checkbox" name="automation.auto_run"> Auto-run queued tasks</label>
     </fieldset>
+    <fieldset>
+      <legend>New repositories</legend>
+      <label>.gitignore template
+        <textarea name="git.gitignore" rows="8" class="mono" spellcheck="false"></textarea></label>
+      <p class="muted small">Written as .gitignore when PatchGoblin creates a git repository (existing
+        .gitignore files are kept). Remove <code>.patchgoblin/</code> to commit task metadata.</p>
+    </fieldset>
     <div id="settings-error" class="error" hidden></div>
     <div class="actions right">
       <button type="button" class="ghost" data-close="settings-dialog">Cancel</button>

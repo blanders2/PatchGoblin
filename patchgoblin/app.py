@@ -91,6 +91,19 @@ def clean_automation(values) -> dict:
     return out
 
 
+def clean_git(values) -> dict:
+    """The git settings sent by the Settings form: the .gitignore template for new repositories."""
+    if not isinstance(values, dict):
+        raise ValueError("git must be an object.")
+    out = {}
+    if "gitignore" in values:
+        text = str(values["gitignore"]).replace("\r\n", "\n")
+        if len(text.encode("utf-8")) > 64 * 1024:
+            raise ValueError("The .gitignore template must be under 64 KB.")
+        out["gitignore"] = text if not text or text.endswith("\n") else text + "\n"
+    return out
+
+
 def auto_override(value, key: str) -> bool | None:
     """A project's automation override: True/False, or None to use the global default."""
     if value is None or value == "":
@@ -273,6 +286,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             allowed["commands"] = clean_commands(allowed["commands"])
         if "automation" in data:
             allowed["automation"] = clean_automation(data["automation"])
+        if "git" in data:
+            allowed["git"] = clean_git(data["git"])
         endpoints = clean_endpoints(data["endpoints"], settings.get()["endpoints"]) if "endpoints" in data else None
         before = auto_values()
         updated = settings.update(allowed)
@@ -400,7 +415,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
                 raise ValueError(f"Directory does not exist: {path}")
             host.ensure_dir(path)
         if fields["git_tracking"]:
-            created = gitops.ensure_repo(host, path)
+            created = gitops.ensure_repo(host, path, settings.get()["git"]["gitignore"])
         tpath = tasks_path(fields, host)
         if host.read_text(tpath) is None:
             host.write_text(tpath, json.dumps(empty_doc(), indent=2) + "\n")
@@ -420,7 +435,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         if svnops.tracked(project):
             raise ValueError("This project is tracked with SVN; stop SVN tracking before using git.")
         host, path = host_for(project), project["path"]
-        created = gitops.ensure_repo(host, path)
+        created = gitops.ensure_repo(host, path, settings.get()["git"]["gitignore"])
         if created or not gitops.recent_commits(host, path, limit=1):
             gitops.commit_all(host, path, "PatchGoblin: initial commit")
         updated = registry.update(project["id"], {"git_tracking": True})

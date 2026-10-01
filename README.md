@@ -33,7 +33,9 @@ system over SSH), and you can add a new subfolder name to start a fresh project.
 
 **Git tracking** is off by default for a newly added project; tick **Track with git** in
 the Add project dialog, or turn it on later from Project settings → Git. Turning it on
-runs `git init` there (with a basic `.gitignore`) and an initial commit, unless the
+runs `git init` there (with a basic `.gitignore` taken from Settings → New repositories, which ignores
+`.patchgoblin/` by default; remove that line to commit and sync tasks, and note that an
+existing `.gitignore` is never overwritten) and an initial commit, unless the
 directory is already the root of a git repository, in which case it's left as it is
 (and, if it has no commits yet, gets an initial commit). Turning tracking off again only
 stops PatchGoblin from running further git commands there; `.git` and its history are

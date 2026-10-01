@@ -84,6 +84,54 @@ class ProjectTests(AppTestCase):
         self.assertEqual(git_log(self.proj_dir), [])
         self.assertFalse(os.path.exists(os.path.join(self.proj_dir, ".gitignore")))
 
+    def tracked_files(self):
+        return subprocess.run(["git", "ls-files"], cwd=self.proj_dir, capture_output=True, text=True,
+                              check=True).stdout.split()
+
+    def read_gitignore(self):
+        with open(os.path.join(self.proj_dir, ".gitignore"), encoding="utf-8", newline="") as fh:
+            return fh.read()
+
+    def test_new_repo_ignores_patchgoblin_by_default(self):
+        defaults = self.client.get("/api/settings").get_json()["git"]["gitignore"]
+        self.assertIn(".patchgoblin/", defaults.splitlines())
+        self.add_project()
+        self.assertEqual(self.read_gitignore(), defaults)
+        self.assertEqual(self.tracked_files(), [".gitignore"])
+        self.assertEqual(git_log(self.proj_dir), ["PatchGoblin: initial commit"])
+
+    def test_gitignore_template_is_configurable(self):
+        res = self.client.put("/api/settings", headers=H, json={"git": {"gitignore": "build/\r\n*.log"}})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertEqual(res.get_json()["git"]["gitignore"], "build/\n*.log\n")
+        self.add_project()
+        self.assertEqual(self.read_gitignore(), "build/\n*.log\n")
+        self.assertIn(".patchgoblin/tasks.json", self.tracked_files())
+
+    def test_cleared_gitignore_template_stays_empty(self):
+        self.client.put("/api/settings", headers=H, json={"git": {"gitignore": ""}})
+        self.assertEqual(self.client.get("/api/settings").get_json()["git"]["gitignore"], "")
+        self.add_project()
+        self.assertEqual(self.read_gitignore(), "")
+
+    def test_gitignore_template_validation(self):
+        for bad in ({"gitignore": "x" * (64 * 1024 + 1)}, "nope"):
+            res = self.client.put("/api/settings", headers=H, json={"git": bad})
+            self.assertEqual(res.status_code, 400)
+
+    def test_existing_gitignore_is_kept(self):
+        os.makedirs(self.proj_dir)
+        with open(os.path.join(self.proj_dir, ".gitignore"), "w", encoding="utf-8", newline="") as fh:
+            fh.write("mine/\n")
+        self.add_project()
+        self.assertEqual(self.read_gitignore(), "mine/\n")
+
+    def test_enable_git_uses_gitignore_setting(self):
+        self.client.put("/api/settings", headers=H, json={"git": {"gitignore": "custom/\n"}})
+        pid = self.add_project(git_tracking=False)["id"]
+        self.assertEqual(self.client.post(f"/api/projects/{pid}/git/enable", headers=H).status_code, 200)
+        self.assertEqual(self.read_gitignore(), "custom/\n")
+
     def test_add_project_untracked_by_default(self):
         res = self.client.post("/api/projects", headers=H, json={"path": self.proj_dir, "provider": "claude"})
         self.assertEqual(res.status_code, 201, res.get_json())

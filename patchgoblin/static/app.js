@@ -1698,7 +1698,7 @@ const SETTING_FIELDS = [
   "opencode.plan_model", "opencode.code_model", "opencode.require_agents", "opencode.plan_must_not_edit",
   "cline.plan", "cline.run", "cline.plan_model", "cline.code_model", "cline.plan_must_not_edit",
   "timeouts.plan", "timeouts.run", "automation.auto_plan", "automation.auto_queue",
-  "automation.auto_run",
+  "automation.auto_run", "git.gitignore",
 ];
 
 /* ---------------- OpenAI-compatible endpoints ---------------- */
@@ -1827,7 +1827,7 @@ function setupSettingsDialog() {
   };
   form.onsubmit = async ev => {
     ev.preventDefault();
-    const out = { commands: Object.fromEntries([...CLI].map(p => [p, {}])), timeouts: {}, automation: {},
+    const out = { commands: Object.fromEntries([...CLI].map(p => [p, {}])), timeouts: {}, automation: {}, git: {},
       endpoints: $$("#endpoint-list .endpoint").map(readEndpoint) };
     for (const name of SETTING_FIELDS) {
       const [obj, key] = settingPath(name, out);
