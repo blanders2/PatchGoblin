@@ -288,6 +288,8 @@ class Engine:
                     queued = [t for t in doc["tasks"] if self.maybe_auto_queue(pid, t)]
                 if queued:
                     self.kick(pid)
+            if "auto_run" in keys:
+                self.kick(pid)
             if "auto_plan" in keys:
                 # Only "unplanned" tasks are picked, so paused ones are left alone on purpose.
                 ids = [t["id"] for t in self.store.read(project, fresh=True)["tasks"]
@@ -405,6 +407,8 @@ class Engine:
 
     def _claim(self, project: dict):
         pid, key, job = project["id"], None, Job("run")
+        if not self.auto(pid, "auto_run"):
+            return None  # Auto-run is off: queued tasks wait until it is turned back on
         try:
             with self.store.edit(project) as doc:
                 queued = sorted((t for t in doc["tasks"] if t["status"] == "queued"),

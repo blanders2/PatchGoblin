@@ -96,14 +96,15 @@ DEFAULT_SETTINGS = {
         "model": "gpt-5",
     }],
     "timeouts": {"plan": 900, "run": 3600},
-    "automation": {"auto_plan": False, "auto_queue": False},
+    "automation": {"auto_plan": False, "auto_queue": False, "auto_run": True},
 }
 
 # Automation modes: a global default in Settings, overridden per project by True/False
 # (None or missing inherits). Each maps to the status of the tasks it acts on when turned on.
-AUTO_MODES = ("auto_plan", "auto_queue")
-AUTO_TARGETS = {"auto_plan": "unplanned", "auto_queue": "planned"}
-# Statuses a task can be paused from; "paused" never matches AUTO_TARGETS or the runner's "queued".
+AUTO_MODES = ("auto_plan", "auto_queue", "auto_run")
+AUTO_TARGETS = {"auto_plan": "unplanned", "auto_queue": "planned", "auto_run": "queued"}
+# Statuses a task can be paused from; "paused" never matches AUTO_TARGETS (so Auto-plan, Auto-queue
+# and Auto-run all leave it alone).
 PAUSABLE = ("unplanned", "drafted", "planned", "queued", "failed")
 
 

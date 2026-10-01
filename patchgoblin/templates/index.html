@@ -79,7 +79,7 @@
       <form id="new-task" class="new-task">
         <input id="nt-title" placeholder="New task title…" autocomplete="off" required>
         <input id="nt-desc" placeholder="Details (optional, paste images)" autocomplete="off">
-        <label class="check" title="Keep Auto-plan / Auto-queue from touching the new task"><input type="checkbox" id="nt-paused"> Add paused</label>
+        <label class="check" title="Keep Auto-plan / Auto-queue / Auto-run from touching the new task"><input type="checkbox" id="nt-paused"> Add paused</label>
         <button type="submit">Add task</button>
       </form>
       <div class="image-previews" id="nt-desc-img" hidden></div>
@@ -89,6 +89,10 @@
         <button type="button" class="queue-tab" role="tab" id="tab-{{ col }}" data-col="{{ col }}" data-label="{{ label }}" aria-controls="col-{{ col }}">
           {{ label }} <span class="activity" hidden></span><span class="count empty"></span>
         </button>
+        {% set flow = {"unplanned": ("auto_plan", "Auto-plan"), "planned": ("auto_queue", "Auto-queue"), "queue": ("auto_run", "Auto-run")}.get(col) %}
+        {% if flow %}
+        <button type="button" class="auto-flow" data-mode="{{ flow[0] }}" data-label="{{ flow[1] }}" aria-label="{{ flow[1] }}" aria-pressed="false" disabled><span class="dot"></span></button>
+        {% endif %}
         {% endfor %}
       </div>
       <div id="batch-bar" class="batch-bar" hidden role="toolbar" aria-label="Batch actions">
@@ -172,6 +176,11 @@
             </label>
             <label title="Queue a task for the AI as soon as it is first planned (AI plan or Mark planned; not after answering questions). Turning this on queues every Planned task now. With Auto-plan also on, AI work runs without you reviewing the plan.">Auto-queue
               <select name="auto_queue" class="auto-select">
+                <option value="">Default</option><option value="on">On</option><option value="off">Off</option>
+              </select>
+            </label>
+            <label title="Let the AI start queued tasks. When Off, queued tasks wait in the AI queue; a run already in progress finishes. Turning this on starts the waiting queue now.">Auto-run
+              <select name="auto_run" class="auto-select">
                 <option value="">Default</option><option value="on">On</option><option value="off">Off</option>
               </select>
             </label>
@@ -544,6 +553,8 @@
         <input type="checkbox" name="automation.auto_plan"> Auto-plan new tasks</label>
       <label class="check" title="Queue a task for the AI as soon as it is first planned (AI plan or Mark planned; not after answering questions). Turning this on queues every Planned task now. With Auto-plan also on, AI work runs without you reviewing the plan.">
         <input type="checkbox" name="automation.auto_queue"> Auto-queue planned tasks</label>
+      <label class="check" title="Let the AI start queued tasks. Turn this off to keep queued tasks waiting; a run already in progress finishes. Turning it back on starts the waiting queue.">
+        <input type="checkbox" name="automation.auto_run"> Auto-run queued tasks</label>
     </fieldset>
     <div id="settings-error" class="error" hidden></div>
     <div class="actions right">

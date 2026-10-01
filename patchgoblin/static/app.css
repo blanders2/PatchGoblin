@@ -234,6 +234,17 @@ button.link:hover { filter: none; }
   animation: pulse 1.2s ease-in-out infinite;
 }
 .queue-tab .activity[hidden] { display: none; }
+/* Automation toggle that sits between two tabs, raised toward the top of the tab row. */
+.auto-flow {
+  flex: none; align-self: flex-start; width: 18px; height: 18px; margin: 2px -2px 0; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent; border: 1px solid transparent; border-radius: 50%;
+}
+.auto-flow .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); opacity: .55; }
+.auto-flow.on .dot { background: var(--accent); opacity: 1; box-shadow: 0 0 0 2px var(--panel-2); }
+.auto-flow:hover:not(:disabled) { background: var(--panel-2); border-color: var(--line); filter: none; }
+.auto-flow:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.auto-flow:disabled { cursor: default; }
 /* Batch toolbar: appears once any card is ticked, and stays in view while scrolling. */
 .batch-bar {
   position: sticky; top: 0; z-index: 5;

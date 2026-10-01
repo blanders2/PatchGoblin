@@ -397,7 +397,7 @@ function updateCheckinCount() {
   $("#checkin-btn").textContent = n ? `Check in (${n})` : "Check in";
 }
 
-const AUTO_MODES = ["auto_plan", "auto_queue"];
+const AUTO_MODES = ["auto_plan", "auto_queue", "auto_run"];
 
 // Shows what "Default" means for each automation select, from the global settings.
 function renderAutoDefaults() {
@@ -411,6 +411,7 @@ async function loadAutomation() {
   try {
     state.automation = (await api("GET", "/api/settings")).automation || {};
     renderAutoDefaults();
+    renderAutoFlow();
   } catch { /* the labels just say "Default (Off)" */ }
 }
 
@@ -486,6 +487,7 @@ async function saveProjectSettings(ev) {
     btn.disabled = false;
   }
   renderProjects();
+  renderAutoFlow();
   if (currentProject() === p) {
     $("#p-name").textContent = p.name;
     updateVcsButtons(p);
@@ -651,7 +653,55 @@ function renderBoard() {
     tab.classList.toggle("active", active);
     tab.tabIndex = active ? 0 : -1;
   }
+  renderAutoFlow();
   renderBatchBar();
+}
+
+// The effective automation mode for a project: its own override, else the global default.
+function effectiveAuto(p, key) {
+  return typeof p[key] === "boolean" ? p[key] : state.automation[key] === true;
+}
+
+const AUTO_FLOW_HINT = {
+  auto_plan: "plans every Unplanned task now",
+  auto_queue: "queues every Planned task now",
+  auto_run: "starts the waiting AI queue now",
+};
+
+// Lights each Auto-plan / Auto-queue / Auto-run indicator between the tabs for the current project.
+function renderAutoFlow() {
+  const p = currentProject();
+  for (const btn of $$(".auto-flow")) {
+    const mode = btn.dataset.mode, label = btn.dataset.label;
+    const on = !!p && effectiveAuto(p, mode);
+    btn.classList.toggle("on", on);
+    btn.setAttribute("aria-pressed", String(on));
+    btn.disabled = !p || btn.dataset.busy === "1";
+    if (!p) { btn.title = label; continue; }
+    const source = typeof p[mode] === "boolean" ? "project override" : "default";
+    btn.title = `${label}: ${on ? "On" : "Off"} (${source}) — click to turn ${on ? "off" : `on (${AUTO_FLOW_HINT[mode]})`}`;
+    btn.setAttribute("aria-label", btn.title);
+  }
+}
+
+async function toggleAutoFlow(btn) {
+  const p = currentProject();
+  if (!p) return;
+  const mode = btn.dataset.mode;
+  btn.dataset.busy = "1";
+  btn.disabled = true;
+  try {
+    Object.assign(p, await api("PATCH", `/api/projects/${p.id}`, { [mode]: !effectiveAuto(p, mode) }));
+    if (state.view === "settings" && settingsForm().dataset.pid === p.id) {
+      for (const key of AUTO_MODES) settingsForm()[key].value = p[key] === true ? "on" : p[key] === false ? "off" : "";
+    }
+    loadTasks(); // turning a mode on may have moved tasks
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    delete btn.dataset.busy;
+    renderAutoFlow();
+  }
 }
 
 function selectTab(col, focus = false) {
@@ -1635,6 +1685,7 @@ const SETTING_FIELDS = [
   "opencode.plan_model", "opencode.code_model", "opencode.require_agents", "opencode.plan_must_not_edit",
   "cline.plan", "cline.run", "cline.plan_model", "cline.code_model", "cline.plan_must_not_edit",
   "timeouts.plan", "timeouts.run", "automation.auto_plan", "automation.auto_queue",
+  "automation.auto_run",
 ];
 
 /* ---------------- OpenAI-compatible endpoints ---------------- */
@@ -1776,6 +1827,7 @@ function setupSettingsDialog() {
       applyProviderSettings(saved);
       state.automation = saved.automation || {};
       renderAutoDefaults();
+      renderAutoFlow();
       dialog.close();
       toast("Settings saved");
       loadTasks(); // turning an automation mode on may have moved tasks
@@ -1928,6 +1980,7 @@ function init() {
   };
   for (const btn of $$(".queue-tab")) btn.onclick = () => selectTab(btn.dataset.col);
   $(".queue-tabs").onkeydown = onTabKeydown;
+  for (const btn of $$(".auto-flow")) btn.onclick = () => toggleAutoFlow(btn);
   // The chat drawer's model is a quick override that saves immediately.
   $("#c-model").onchange = async e => {
     const model = pickModel(e.target, currentProject().provider || "claude");

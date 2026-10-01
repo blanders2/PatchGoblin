@@ -868,8 +868,9 @@ class AutomationTests(AppTestCase):
     def test_settings_round_trip_and_resolution(self):
         from patchgoblin.store import resolve_auto
         self.assertEqual(self.client.get("/api/settings").get_json()["automation"],
-                         {"auto_plan": False, "auto_queue": False})
-        self.assertEqual(self.set_global(auto_queue=True), {"auto_plan": False, "auto_queue": True})
+                         {"auto_plan": False, "auto_queue": False, "auto_run": True})
+        self.assertEqual(self.set_global(auto_queue=True),
+                         {"auto_plan": False, "auto_queue": True, "auto_run": True})
         bad = self.client.put("/api/settings", headers=H, json={"automation": {"auto_plan": "yes"}})
         self.assertEqual(bad.status_code, 400)
 
@@ -883,6 +884,25 @@ class AutomationTests(AppTestCase):
         self.assertTrue(resolve_auto({"auto_queue": None}, settings, "auto_queue"))
         self.assertFalse(resolve_auto({"auto_queue": False}, settings, "auto_queue"))
         self.assertFalse(resolve_auto({}, settings, "auto_plan"))
+
+    def test_auto_run_off_holds_queue_until_turned_on(self):
+        pid = self.add_project()["id"]
+        for value in (True, False, None):
+            self.assertIs(self.set_project(pid, auto_run=value)["auto_run"], value)
+        self.assertEqual(self.client.patch(f"/api/projects/{pid}", headers=H,
+                                           json={"auto_run": "on"}).status_code, 400)
+
+        self.set_project(pid, auto_run=False)
+        tid = self.post_task(pid, "Create output file", "Make agent_output.txt")["id"]
+        self.action(pid, tid, "plan")
+        self.wait_for(pid, tid, {"planned"})
+        self.assertEqual(self.action(pid, tid, "queue").status_code, 200)
+        time.sleep(0.5)
+        self.assertEqual(self.wait_for(pid, tid, {"queued"})["status"], "queued")
+        self.assertFalse(self.app.config["ENGINE"].jobs)
+
+        self.set_project(pid, auto_run=True)  # turning it on starts the waiting queue
+        self.assertEqual(self.wait_for(pid, tid, {"review", "failed"})["status"], "review")
 
     def test_auto_plan_on_create(self):
         pid = self.add_project()["id"]
