@@ -91,7 +91,7 @@
         </button>
         {% set flow = {"unplanned": ("auto_plan", "Auto-plan"), "planned": ("auto_queue", "Auto-queue"), "queue": ("auto_run", "Auto-run")}.get(col) %}
         {% if flow %}
-        <button type="button" class="auto-flow" data-mode="{{ flow[0] }}" data-label="{{ flow[1] }}" aria-label="{{ flow[1] }}" aria-pressed="false" disabled><span class="dot"></span></button>
+        <button type="button" class="auto-flow" data-mode="{{ flow[0] }}" data-label="{{ flow[1] }}" aria-label="{{ flow[1] }}" aria-pressed="false" disabled><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path class="arrow" d="M2 8h10M8 4l4 4-4 4"/><line class="strike" x1="3" y1="13" x2="13" y2="3"/></svg></button>
         {% endif %}
         {% endfor %}
       </div>

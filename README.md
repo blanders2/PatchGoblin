@@ -134,9 +134,9 @@ off by default; Auto-run is on by default.
 - **Auto-run** lets the AI start queued tasks. Turn it off and queued tasks wait in the AI
   queue (a run already in progress finishes); turning it back on starts the waiting queue.
 
-The board shows a small dot between the tabs for each mode: after Unplanned (Auto-plan),
-after Planned (Auto-queue) and after AI queue (Auto-run). A lit dot means the mode is on
-for the current project. Click it to turn the mode on or off for that project; this sets
+The board shows a small arrow between the tabs for each mode: after Unplanned (Auto-plan),
+after Planned (Auto-queue) and after AI queue (Auto-run). A coloured arrow means the mode is on
+for the current project; a red line through it means it is off. Click it to turn the mode on or off for that project; this sets
 a project override, and turning on Auto-plan or Auto-queue applies it to existing tasks
 right away, like a Settings save.
 

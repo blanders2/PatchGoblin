@@ -247,8 +247,11 @@ button.link:hover { filter: none; }
   display: flex; align-items: center; justify-content: center;
   background: transparent; border: 1px solid transparent; border-radius: 50%;
 }
-.auto-flow .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); opacity: .55; }
-.auto-flow.on .dot { background: var(--accent); opacity: 1; box-shadow: 0 0 0 2px var(--panel-2); }
+.auto-flow svg { width: 14px; height: 14px; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.auto-flow .arrow { stroke: var(--muted); opacity: .6; }
+.auto-flow.on .arrow { stroke: var(--accent); opacity: 1; }
+.auto-flow .strike { stroke: var(--danger); }
+.auto-flow.on .strike { display: none; }
 .auto-flow:hover:not(:disabled) { background: var(--panel-2); border-color: var(--line); filter: none; }
 .auto-flow:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .auto-flow:disabled { cursor: default; }

@@ -733,7 +733,7 @@ const AUTO_FLOW_HINT = {
   auto_run: "starts the waiting AI queue now",
 };
 
-// Lights each Auto-plan / Auto-queue / Auto-run indicator between the tabs for the current project.
+// Colours (or strikes through) each Auto-plan / Auto-queue / Auto-run indicator between the tabs for the current project.
 function renderAutoFlow() {
   const p = currentProject();
   for (const btn of $$(".auto-flow")) {
