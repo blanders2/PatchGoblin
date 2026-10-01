@@ -153,4 +153,8 @@ def default_checkin_message(tasks: list[dict]) -> str:
         if len(summary) > 400:
             summary = summary[:400].rstrip() + "…"
         lines += [f"  {ln}" if ln.strip() else "" for ln in summary.splitlines()]
+        note = (t.get("approval_note") or "").strip()
+        if note:
+            first, *rest = note.splitlines()
+            lines += ["", f"  Approval note: {first}"] + [f"    {ln}" if ln.strip() else "" for ln in rest]
     return "\n".join(lines) + "\n"

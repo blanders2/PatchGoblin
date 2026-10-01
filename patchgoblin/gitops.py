@@ -114,6 +114,21 @@ def commit_all(host, path: str, message: str) -> str:
     return _check(git(host, path, "rev-parse", "HEAD"), "rev-parse").stdout.strip()
 
 
+def note_commit(host, path: str, message: str) -> str:
+    """Record an empty commit (same tree as HEAD) carrying ``message``. Returns its hash, or ""
+    when the repository has no commits yet. Leaves the index and working tree alone, and fails
+    rather than overwrite HEAD if it moved meanwhile."""
+    if not _has_head(host, path):
+        return ""
+    message = message.replace("\0", "")
+    old = _check(git(host, path, "rev-parse", "HEAD"), "rev-parse").stdout.strip()
+    tree = _check(git(host, path, "rev-parse", "HEAD^{tree}"), "rev-parse").stdout.strip()
+    sha = _check(git(host, path, *_identity(host, path), "commit-tree", tree, "-p", old, "-m", message),
+                 "commit-tree").stdout.strip()
+    _check(git(host, path, "update-ref", "-m", "PatchGoblin: approval note", "HEAD", sha, old), "update-ref")
+    return sha
+
+
 def ensure_repo(host, path: str, template: str = DEFAULT_GITIGNORE) -> bool:
     """Make ``path`` the root of its own repository. Returns True if one was created.
     A new repository gets ``template`` as its .gitignore unless the folder already has one.

@@ -365,6 +365,8 @@ button.link:hover { filter: none; }
   background: var(--b-review); padding: 8px 12px;
 }
 .review-feedback[hidden] { display: none; }
+#d-approval-wrap[hidden] { display: none; }
+.review-feedback p.muted { margin-top: 4px; font-size: 12px; }
 .review-feedback h4 { margin: 0 0 4px; font-size: 13px; color: var(--t-review); }
 .review-feedback p { margin: 0; white-space: pre-wrap; }
 .changes-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }

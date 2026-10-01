@@ -289,6 +289,15 @@
         <textarea id="d-feedback" rows="2" placeholder="e.g. Use the existing API client instead of adding a new one. (Paste images too.)"></textarea></label>
       <div class="image-previews" id="d-feedback-img" hidden></div>
     </div>
+    <div id="d-approval-wrap" hidden>
+      <label>Approval note <span class="muted">(optional, committed to the repository)</span>
+        <textarea id="d-approval-note" rows="2" placeholder="e.g. Checked on mobile; follow-up tracked separately."></textarea></label>
+    </div>
+    <div id="d-approval" class="review-feedback" hidden>
+      <h4>Approval note</h4>
+      <p id="d-approval-text"></p>
+      <p id="d-approval-commit" class="muted" hidden></p>
+    </div>
     <div class="actions flow-actions" id="d-flow-actions"></div>
     <div id="d-commit" class="muted" hidden></div>
     <details id="d-changes" class="changes" open hidden>

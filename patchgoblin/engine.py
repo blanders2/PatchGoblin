@@ -581,23 +581,50 @@ class Engine:
             self.store.forget(pid)  # a pull may have replaced tasks.json
             lock.release()
 
-    def _auto_sync(self, project: dict, tid: int, job: Job) -> None:
-        """Sync after a task's commit. Failures are logged on the task, never fail it."""
+    def record_approval(self, project: dict, tid: int, title: str, note: str) -> None:
+        """Commit an approval note as an empty commit, in the background so the request doesn't
+        wait on git or a push. Failures are logged on the task, never undo the approval."""
+        threading.Thread(target=self._record_approval, args=(project, tid, title, note),
+                         name=f"pg-approve-{project['id']}-{tid}", daemon=True).start()
+
+    def _record_approval(self, project: dict, tid: int, title: str, note: str) -> None:
         pid = project["id"]
         host, path = host_for(project), project["path"]
         try:
+            with self._sync_lock(pid):
+                sha = gitops.note_commit(host, path, f"PatchGoblin: approve task #{tid} {title}\n\n{note}\n")
+            event = f"Approval note committed {sha[:10]}" if sha \
+                else "No commits yet; approval note kept on the task only"
+        except HostError as exc:
+            sha, event = "", f"Approval note not committed: {exc}"
+        with self.store.edit(project) as doc:
+            current = find_task(doc, tid)
+            if current is not None:
+                if sha:
+                    current["approval_commit"] = sha
+                log_event(current, event)
+        if sha and project.get("auto_sync") is True:
+            self._auto_sync(project, tid, message=f"PatchGoblin: record task #{tid} approval")
+
+    def _auto_sync(self, project: dict, tid: int, job: Job | None = None,
+                   message: str | None = None) -> None:
+        """Sync after a task's commit. Failures are logged on the task, never fail it."""
+        pid = project["id"]
+        host, path = host_for(project), project["path"]
+        write = job.write if job is not None else (lambda _text: None)
+        try:
             if not gitops.tracked(project) or not gitops.get_remote(host, path):
                 return
-            job.write(f"[{now()}] Auto-sync with origin\n")
+            write(f"[{now()}] Auto-sync with origin\n")
             # Recording the commit hash left tasks.json changed; commit it before pulling.
             with self._sync_lock(pid):
                 result = gitops.sync(host, path, mode=project.get("sync_mode") or "ff-only", push=True,
-                                     message=f"PatchGoblin: record task #{tid} result",
+                                     message=message or f"PatchGoblin: record task #{tid} result",
                                      guard=self.store.lock(pid))
-            job.write("".join(f"  {line}\n" for line in result["log"]))
+            write("".join(f"  {line}\n" for line in result["log"]))
             event = "Synced with origin"
         except (HostError, ValueError) as exc:
-            job.write(f"Auto-sync failed: {exc}\n")
+            write(f"Auto-sync failed: {exc}\n")
             event = f"Auto-sync failed: {exc}"
         finally:
             self.store.forget(pid)

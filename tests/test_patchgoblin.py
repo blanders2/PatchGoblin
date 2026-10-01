@@ -1316,6 +1316,79 @@ class RemoteTests(AppTestCase):
             fh.write("x")
         self.assertTrue(self.vcs(pid)["dirty"])
 
+    def wait_event(self, pid, tid, prefix, timeout=15):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            tasks = self.client.get(f"/api/projects/{pid}/tasks").get_json()["tasks"]
+            task = next(t for t in tasks if t["id"] == tid)
+            if any(h["event"].startswith(prefix) for h in task["history"]):
+                return task
+            time.sleep(0.2)
+        self.fail(f"no event starting with {prefix!r}")
+
+    def test_approval_note_commits_empty_commit(self):
+        pid = self.add_project()["id"]
+        task = self.run_task(pid)
+        self.assertEqual(task["status"], "review", task["error"])
+        tid = task["id"]
+        before = git(self.proj_dir, "rev-parse", "HEAD")
+        count = int(git(self.proj_dir, "rev-list", "--count", "HEAD"))
+        with open(os.path.join(self.proj_dir, "dirty.txt"), "w") as fh:
+            fh.write("wip\n")
+        res = self.action(pid, tid, "approve", note="  Looks good\nShip it  ")
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertEqual(res.get_json()["approval_note"], "Looks good\nShip it")
+        done = self.wait_event(pid, tid, "Approval note committed")
+        self.assertEqual(int(git(self.proj_dir, "rev-list", "--count", "HEAD")), count + 1)
+        self.assertEqual(git(self.proj_dir, "rev-parse", "HEAD^"), before)
+        self.assertEqual(git(self.proj_dir, "rev-parse", "HEAD^{tree}"), git(self.proj_dir, "rev-parse", before + "^{tree}"))
+        self.assertEqual(git(self.proj_dir, "log", "-1", "--format=%s"), f"PatchGoblin: approve task #{tid} {done['title']}")
+        self.assertEqual(git(self.proj_dir, "log", "-1", "--format=%b"), "Looks good\nShip it")
+        self.assertEqual(done["approval_commit"], git(self.proj_dir, "rev-parse", "HEAD"))
+        self.assertIn("?? dirty.txt", git(self.proj_dir, "status", "--porcelain"))
+
+    def test_approve_without_note_makes_no_commit(self):
+        pid = self.add_project()["id"]
+        task = self.run_task(pid)
+        before = git(self.proj_dir, "rev-parse", "HEAD")
+        res = self.action(pid, task["id"], "approve")
+        self.assertEqual(res.get_json()["status"], "done")
+        time.sleep(0.5)
+        self.assertEqual(git(self.proj_dir, "rev-parse", "HEAD"), before)
+
+    def test_approve_rejects_non_string_note(self):
+        pid = self.add_project()["id"]
+        task = self.run_task(pid)
+        self.assertEqual(self.action(pid, task["id"], "approve", note=5).status_code, 400)
+        self.assertEqual(self.action(pid, task["id"], "approve", note=["x"]).status_code, 400)
+
+    def test_approve_note_without_head_or_tracking(self):
+        from patchgoblin import gitops
+        pid = self.add_project()["id"]
+        task = self.run_task(pid)
+        with mock.patch.object(gitops, "_has_head", return_value=False):
+            res = self.action(pid, task["id"], "approve", note="hello")
+            self.assertEqual(res.status_code, 200, res.get_json())
+            self.wait_event(pid, task["id"], "No commits yet")
+        self.assertEqual(res.get_json()["approval_note"], "hello")
+
+    def test_approve_note_with_git_tracking_off(self):
+        pid = self.add_project(git_tracking=False)["id"]
+        tid = self.post_task(pid, "Plain")["id"]
+        store = self.app.config["STORE"]
+        with store.edit(self.app.config["REGISTRY"].get(pid)) as doc:
+            next(t for t in doc["tasks"] if t["id"] == tid)["status"] = "review"
+        res = self.action(pid, tid, "approve", note="kept")
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertEqual(res.get_json()["approval_note"], "kept")
+        self.assertEqual(res.get_json()["status"], "done")
+
+    def test_checkin_message_includes_approval_note(self):
+        from patchgoblin import svnops
+        msg = svnops.default_checkin_message(
+            [{"id": 3, "title": "T", "summary": "did it", "approval_note": "fine\nreally"}])
+        self.assertIn("  Approval note: fine\n    really", msg)
+
     def test_project_status_untracked_has_no_vcs(self):
         pid = self.add_project(git_tracking=False)["id"]
         status = self.client.get("/api/projects/status").get_json()["status"][pid]

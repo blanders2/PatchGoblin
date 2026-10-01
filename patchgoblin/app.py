@@ -824,6 +824,21 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         elif action == "cancel":
             if not engine.cancel(pid, tid):
                 raise ValueError("No AI job is running for this task.")
+        elif action == "approve":  # optional per-task note; batch approve sends none
+            note = data.get("note") or ""
+            if not isinstance(note, str):
+                raise ValueError("note must be a string.")
+            note = note.replace("\0", "").strip()[:4000]
+            with store.edit(project) as doc:
+                task = find_task(doc, tid)
+                if task is None:
+                    raise KeyError(tid)
+                queued = transition(pid, task, "approve")
+                task["approval_note"] = note
+                title = task["title"]
+            if note and gitops.tracked(project):
+                engine.record_approval(project, tid, title, note)
+            return queued
         elif action in TRANSITIONS:
             with store.edit(project) as doc:
                 task = find_task(doc, tid)

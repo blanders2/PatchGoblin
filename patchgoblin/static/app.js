@@ -1036,6 +1036,7 @@ function openDrawer(tid) {
   state.questionStamp = null;
   $("#d-feedback").value = "";
   renderImagePreviews($("#d-feedback"), $("#d-feedback-img"));
+  $("#d-approval-note").value = "";
   $("#drawer").hidden = false;
   renderDrawer(true);
   renderBoard();
@@ -1247,6 +1248,12 @@ function renderDrawer(fillForm) {
   const reviewFeedback = (t.review_feedback || "").trim();
   $("#d-review-feedback").hidden = !reviewFeedback || reviewing;
   $("#d-review-feedback-text").textContent = reviewFeedback;
+  $("#d-approval-wrap").hidden = t.status !== "review";
+  const approvalNote = (t.approval_note || "").trim();
+  $("#d-approval").hidden = !approvalNote;
+  $("#d-approval-text").textContent = approvalNote;
+  $("#d-approval-commit").hidden = !t.approval_commit;
+  $("#d-approval-commit").textContent = t.approval_commit ? `Note committed as ${t.approval_commit.slice(0, 10)}` : "";
   renderQuestions(t, canPlan);
   renderEditActions();
   const hasPlan = (t.plan || "").trim().length > 0;
@@ -1311,7 +1318,7 @@ function renderDrawer(fillForm) {
       A.push(actionButton("Cancel run", act("cancel"), "danger"));
       break;
     case "review":
-      A.push(actionButton("Approve → Finished", act("approve"), "primary", "The work is good; move it to Finished"));
+      A.push(actionButton("Approve → Finished", act("approve"), "primary", "The work is good; move it to Finished. A note is committed to the repository."));
       A.push(sendBack());
       A.push(actionButton("Reopen", act("reopen"), "ghost", "Back to Planned without asking the AI"));
       break;
@@ -1422,9 +1429,11 @@ async function doAction(action, extra = {}) {
   if (state.dirty && action !== "cancel" && !(await saveTask(true))) return;
   const body = { action, ...extra };
   if (action === "plan" || action === "send_back") body.feedback = $("#d-feedback").value;
+  if (action === "approve") body.note = $("#d-approval-note").value;
   try {
     const updated = await api("POST", `/api/projects/${state.pid}/tasks/${t.id}/action`, body);
     Object.assign(t, updated);
+    if (action === "approve") $("#d-approval-note").value = "";
     if (action === "plan" || action === "send_back") {
       $("#d-feedback").value = "";
       renderImagePreviews($("#d-feedback"), $("#d-feedback-img"));
