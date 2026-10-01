@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import posixpath
@@ -128,17 +129,41 @@ Reply to the user's latest message in Markdown, concisely.
 
 MAX_CHAT_CONTEXT = 40000
 
+IMAGE_REF = re.compile(r"!\[[^\]]*\]\((\.patchgoblin/attachments/[0-9a-f]{32}\.(?:png|jpg|gif|webp))\)")
+MAX_IMAGES = 10
+IMAGE_MIME = {"png": "image/png", "jpg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"}
+
+
+def image_refs(*texts: str) -> list[str]:
+    """Unique attachment paths referenced by Markdown images in ``texts``, in order."""
+    found: list[str] = []
+    for text in texts:
+        for path in IMAGE_REF.findall(text or ""):
+            if path not in found:
+                found.append(path)
+    return found[:MAX_IMAGES]
+
+
+def _images_section(paths: list[str]) -> str:
+    return ("## Attached images\nThe text above references these image files (paths relative to the "
+            "project root). Open each one with your file-reading tool to view it:\n"
+            + "\n".join(f"- {p}" for p in paths))
+
 
 def chat_prompt(messages: list[dict]) -> str:
     """The conversation so far (oldest turns dropped if long), ending with the user's message."""
-    turns, size = [], 0
+    turns, size, user_texts = [], 0, []
     for msg in reversed(messages):
         turn = f"### {'User' if msg['role'] == 'user' else 'Assistant'}\n{msg['text'].strip()}"
         if turns and size + len(turn) > MAX_CHAT_CONTEXT:
             break
         turns.insert(0, turn)
+        if msg["role"] == "user":
+            user_texts.insert(0, msg["text"])
         size += len(turn)
-    return CHAT_INSTRUCTIONS + "\n# Conversation\n\n" + "\n\n".join(turns) + "\n"
+    prompt = CHAT_INSTRUCTIONS + "\n# Conversation\n\n" + "\n\n".join(turns) + "\n"
+    images = image_refs(*user_texts)
+    return prompt + "\n" + _images_section(images) + "\n" if images else prompt
 
 
 _QUESTIONS_HEADING = re.compile(r"^#{1,6}\s*(open\s+)?questions\b", re.IGNORECASE)
@@ -218,6 +243,9 @@ def plan_prompt(task: dict, feedback: str = "", answers: list[dict] | None = Non
                      "Produce a revised, complete plan that addresses this feedback.")
     if review_feedback.strip():
         parts.append(_review_section(review_feedback, commit))
+    images = image_refs(task.get("description", ""), feedback, review_feedback)
+    if images:
+        parts.append(_images_section(images))
     return "\n\n".join(parts) + "\n"
 
 
@@ -240,6 +268,9 @@ def run_prompt(task: dict, vcs: str = "git") -> str:
     parts.append(f"## Plan\n{plan}")
     if (task.get("review_feedback") or "").strip():
         parts.append(_review_section(task["review_feedback"], task.get("commit", "")))
+    images = image_refs(task.get("description", ""), task.get("review_feedback") or "")
+    if images:
+        parts.append(_images_section(images))
     return "\n\n".join(parts) + "\n"
 
 
@@ -787,6 +818,22 @@ class OpenAIAgent:
             return ""
         return f"{env} is not set in PatchGoblin's environment and no key is saved for {self.name}."
 
+    def _user_content(self, prompt: str):
+        """The first user message: plain text, or text plus inline images the prompt references."""
+        parts = []
+        for path in image_refs(prompt):
+            try:
+                data = self.host.read_bytes(self.files.resolve(path))
+            except (ValueError, HostError, OSError):
+                data = None
+            if data:
+                mime = IMAGE_MIME[path.rsplit(".", 1)[1]]
+                url = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+                parts.append({"type": "image_url", "image_url": {"url": url}})
+        if not parts:
+            return prompt
+        return [{"type": "text", "text": prompt}, *parts]
+
     def run(self, prompt: str, timeout: float) -> Outcome:
         if not self.model:
             return Outcome(False, error=f"No model configured for {self.name} (Settings or project).")
@@ -799,7 +846,7 @@ class OpenAIAgent:
             system += " You are in read-only planning mode."
         elif not self.allow_commands:
             system += " You cannot run commands; verify by reading code."
-        messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": self._user_content(prompt)}]
         self.job.write(f"{self.name} agent: model {self.model}, mode {self.mode}\n")
         for step in range(int(self.cfg.get("max_steps", 40))):
             if self.job.cancelled:

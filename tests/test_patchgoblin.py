@@ -2710,5 +2710,90 @@ class ClaudeMigrationTests(unittest.TestCase):
         self.assertIn("stream-json", got["run"])
 
 
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+
+class ImageTests(AppTestCase):
+    def upload(self, pid, data, **kw):
+        import base64
+        raw = data if isinstance(data, str) else "data:image/png;base64," + base64.b64encode(data).decode()
+        return self.client.post(f"/api/projects/{pid}/attachments", headers=kw.get("headers", H), json={"data": raw})
+
+    def test_upload_and_fetch_roundtrip(self):
+        pid = self.add_project()["id"]
+        res = self.upload(pid, PNG)
+        self.assertEqual(res.status_code, 201, res.get_json())
+        path = res.get_json()["path"]
+        self.assertRegex(path, r"^\.patchgoblin/attachments/[0-9a-f]{32}\.png$")
+        self.assertTrue(os.path.isfile(os.path.join(self.proj_dir, *path.split("/"))))
+        got = self.client.get(res.get_json()["url"])
+        self.assertEqual((got.status_code, got.mimetype, got.data), (200, "image/png", PNG))
+        self.assertEqual(got.headers["X-Content-Type-Options"], "nosniff")
+
+    def test_bad_uploads(self):
+        pid = self.add_project()["id"]
+        self.assertEqual(self.upload(pid, b"hello world").status_code, 400)
+        self.assertEqual(self.upload(pid, "!!!not base64!!!").status_code, 400)
+        self.assertEqual(self.upload(pid, b"RIFF\x00\x00\x00\x00WAVE").status_code, 400)
+        self.assertEqual(self.upload(pid, PNG + b"\x00" * (8 * 1024 * 1024)).status_code, 400)
+        self.assertEqual(self.upload(pid, PNG, headers={}).status_code, 403)
+
+    def test_get_rejects_bad_names(self):
+        pid = self.add_project()["id"]
+        for name in ("..%2Ftasks.json", "tasks.json", "abc.png", "../tasks.json"):
+            self.assertEqual(self.client.get(f"/api/projects/{pid}/attachments/{name}").status_code, 404)
+        self.assertEqual(self.client.get(f"/api/projects/{pid}/attachments/{'0' * 32}.png").status_code, 404)
+
+    def test_prompts_list_images_once(self):
+        from patchgoblin.providers import chat_prompt, image_refs, plan_prompt, run_prompt
+        a, b = (f".patchgoblin/attachments/{c * 32}.png" for c in "ab")
+        task = {"id": 1, "title": "T", "description": f"see ![image]({a}) and ![x]({a})", "plan": "p"}
+        for prompt in (plan_prompt(task, feedback=f"![image]({b})"), run_prompt(task)):
+            self.assertEqual(prompt.count("## Attached images"), 1)
+            self.assertEqual(prompt.count(f"- {a}"), 1)
+        self.assertIn(f"- {b}", plan_prompt(task, feedback=f"![image]({b})"))
+        self.assertNotIn("Attached images", plan_prompt({**task, "description": "none"}))
+        self.assertNotIn("Attached images", run_prompt({**task, "description": "none"}))
+        chat = chat_prompt([{"role": "user", "text": f"![image]({a})"}, {"role": "assistant", "text": f"![i]({b})"}])
+        self.assertIn(f"- {a}", chat.split("## Attached images")[1])
+        self.assertNotIn(f"- {b}", chat)
+        self.assertNotIn("Attached images", chat_prompt([{"role": "user", "text": "hi"}]))
+        self.assertEqual(image_refs("![x](http://e.com/a.png) ![y](../.patchgoblin/attachments/x.png) "
+                                    "![z](.patchgoblin/tasks.json)"), [])
+
+    def test_openai_agent_sends_image_parts(self):
+        with tempfile.TemporaryDirectory() as root:
+            rel = f".patchgoblin/attachments/{'c' * 32}.png"
+            os.makedirs(os.path.join(root, ".patchgoblin", "attachments"))
+            with open(os.path.join(root, *rel.split("/")), "wb") as fh:
+                fh.write(PNG)
+            job = FakeJob()
+            agent = OpenAIAgent(LocalHost(), root, {"base_url": "http://x", "model": "m", "max_steps": 2},
+                                "", "plan", job)
+            reply = {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+            with mock.patch.object(agent, "_request", return_value=reply) as req:
+                agent.run(f"look ![image]({rel}) and ![gone](.patchgoblin/attachments/{'d' * 32}.png)", 60)
+            content = req.call_args.args[0][1]["content"]
+            self.assertEqual([p["type"] for p in content], ["text", "image_url"])
+            self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+            with mock.patch.object(agent, "_request", return_value=reply) as req:
+                agent.run("plain", 60)
+            self.assertEqual(req.call_args.args[0][1]["content"], "plain")
+
+    def test_ssh_byte_scripts(self):
+        import base64
+        host = SSHHost("me@box")
+        with mock.patch.object(host, "_exec", return_value=Result(0, "", "", False)) as ex:
+            host.write_bytes("/srv/p/.patchgoblin/attachments/a.png", PNG)
+        self.assertIn("base64 -d > /srv/p/.patchgoblin/attachments/a.png.tmp", ex.call_args.args[0])
+        self.assertEqual(ex.call_args.kwargs["input"], base64.b64encode(PNG).decode())
+        out = Result(0, base64.b64encode(PNG).decode() + "\n", "", False)
+        with mock.patch.object(host, "_exec", return_value=out) as ex:
+            self.assertEqual(host.read_bytes("/srv/a.png"), PNG)
+        self.assertIn("base64 < /srv/a.png", ex.call_args.args[0])
+        with mock.patch.object(host, "_exec", return_value=Result(44, "", "", False)):
+            self.assertIsNone(host.read_bytes("/srv/missing.png"))
+
+
 if __name__ == "__main__":
     unittest.main()

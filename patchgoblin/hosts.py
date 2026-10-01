@@ -180,6 +180,29 @@ class LocalHost:
         except OSError as exc:
             raise HostError(f"Could not read {path}: {exc}") from exc
 
+    def read_bytes(self, path: str) -> Optional[bytes]:
+        try:
+            with open(path, "rb") as fh:
+                return fh.read()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise HostError(f"Could not read {path}: {exc}") from exc
+
+    def write_bytes(self, path: str, data: bytes) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        for attempt in range(10):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.1 * (attempt + 1))
+
     def list_dir(self, path: str) -> list[str]:
         """Names of the entries in ``path``; [] if it is not a directory."""
         try:
@@ -316,10 +339,27 @@ class SSHHost:
         if not res.ok:
             raise HostError(f"Could not write {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
 
+    def read_bytes(self, path: str) -> Optional[bytes]:
+        q = shlex.quote(path)
+        res = self._exec(f"if [ -f {q} ]; then base64 < {q}; else exit 44; fi", timeout=120)
+        if res.returncode == 44:
+            return None
+        if not res.ok:
+            raise HostError(f"Could not read {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+        return base64.b64decode(res.stdout)
+
+    def write_bytes(self, path: str, data: bytes) -> None:
+        q, tmp = shlex.quote(path), shlex.quote(f"{path}.tmp")
+        d = shlex.quote(posixpath.dirname(path))
+        res = self._exec(f"mkdir -p {d} && base64 -d > {tmp} && mv -f {tmp} {q}",
+                         input=base64.b64encode(data).decode("ascii"), timeout=120)
+        if not res.ok:
+            raise HostError(f"Could not write {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+
     def run(self, argv: list[str], cwd: str, input: Optional[str] = None,
             timeout: Optional[float] = None, on_output: OutputFn = None,
             on_start: StartFn = None, login: bool = False, env: Optional[dict] = None) -> Result:
-        prefix = ["env", *(f"{k}={v}" for k, v in env.items())] if env else []
+        prefix =["env", *(f"{k}={v}" for k, v in env.items())] if env else []
         script = f"cd {shlex.quote(cwd)} && " + " ".join(shlex.quote(a) for a in [*prefix, *argv])
         if login:
             script = self._login(script)
@@ -467,6 +507,28 @@ class WindowsSSHHost(SSHHost):
                   f"[IO.File]::WriteAllBytes({tmp}, $m.ToArray()); "
                   f"Move-Item -Force -LiteralPath {tmp} -Destination {q}")
         res = self._exec(script, input=text, timeout=60)
+        if not res.ok:
+            raise HostError(f"Could not write {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+
+    def read_bytes(self, path: str) -> Optional[bytes]:
+        q = _ps_quote(path)
+        script = (f"if (-not (Test-Path -LiteralPath {q} -PathType Leaf)) {{exit 44}}; "
+                  f"[Console]::Out.Write([Convert]::ToBase64String([IO.File]::ReadAllBytes({q})))")
+        res = self._exec(script, timeout=120)
+        if res.returncode == 44:
+            return None
+        if not res.ok:
+            raise HostError(f"Could not read {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+        return base64.b64decode(res.stdout.strip())
+
+    def write_bytes(self, path: str, data: bytes) -> None:
+        q, tmp = _ps_quote(path), _ps_quote(f"{path}.tmp")
+        script = (f"$d=Split-Path -Parent {q}; "
+                  "if ($d) { New-Item -ItemType Directory -Force -Path $d | Out-Null }; "
+                  "$t=[Console]::In.ReadToEnd(); "
+                  f"[IO.File]::WriteAllBytes({tmp}, [Convert]::FromBase64String($t.Trim())); "
+                  f"Move-Item -Force -LiteralPath {tmp} -Destination {q}")
+        res = self._exec(script, input=base64.b64encode(data).decode("ascii"), timeout=120)
         if not res.ok:
             raise HostError(f"Could not write {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
 

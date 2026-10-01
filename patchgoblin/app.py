@@ -1,6 +1,8 @@
 """Flask app: JSON API plus a single-page UI."""
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import re
@@ -9,15 +11,15 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
-from flask import Flask, abort, jsonify, render_template, request
+from flask import Flask, Response, abort, jsonify, render_template, request
 
 from . import gitops, opencode, svnops
 from .engine import Engine
 from .hosts import HostError, host_for, open_terminal, open_vscode, probe
-from .providers import PLAN_TRUST_LEVELS, endpoint_key, list_models, plan_questions, ready_status
-from .store import (AUTO_MODES, CLI_PROVIDERS, MODELS, PAUSABLE, STATUSES, Registry, Settings, TaskStore, empty_doc,
-                    find_endpoint, find_task, log_event, new_task, now, provider_choices, resolve_auto,
-                    set_status, tasks_path, valid_provider)
+from .providers import IMAGE_MIME, PLAN_TRUST_LEVELS, endpoint_key, list_models, plan_questions, ready_status
+from .store import (ATTACHMENT_NAME, AUTO_MODES, CLI_PROVIDERS, MODELS, PAUSABLE, STATUSES, Registry, Settings,
+                    TaskStore, attachment_path, empty_doc, find_endpoint, find_task, log_event, new_task, now,
+                    provider_choices, resolve_auto, save_attachment, set_status, tasks_path, valid_provider)
 
 EDITABLE = ("title", "description", "plan", "provider", "plan_model", "code_model", "plan_trust")
 MODEL_KEYS = ("plan_model", "code_model")
@@ -165,6 +167,7 @@ def clean_endpoints(values, saved: list[dict]) -> list[dict]:
 
 def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     app = Flask(__name__)
+    app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024  # an 8 MB image is ~11 MB as base64
     data_dir = data_dir or os.environ.get("PATCHGOBLIN_DATA") or os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
     registry, settings = Registry(data_dir), Settings(data_dir)
@@ -909,6 +912,33 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         except HostError:  # e.g. the commit is not in this clone
             files = []
         return jsonify(files=files)
+
+    @app.post("/api/projects/<pid>/attachments")
+    def upload_attachment(pid):
+        project = project_or_404(pid)
+        raw = body().get("data")
+        if not isinstance(raw, str) or not raw:
+            raise ValueError("Missing image data.")
+        if raw.startswith("data:"):
+            _, _, raw = raw.partition(",")
+        try:
+            data = base64.b64decode(raw, validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("The image data is not valid base64.") from None
+        path = save_attachment(project, data)
+        return jsonify(path=path, url=f"/api/projects/{pid}/attachments/{path.rsplit('/', 1)[1]}"), 201
+
+    @app.get("/api/projects/<pid>/attachments/<name>")
+    def get_attachment(pid, name):
+        project = project_or_404(pid)
+        if not ATTACHMENT_NAME.match(name):
+            abort(404)
+        host = host_for(project)
+        data = host.read_bytes(attachment_path(project, name, host))
+        if data is None:
+            abort(404)
+        return Response(data, mimetype=IMAGE_MIME[name.rsplit(".", 1)[1]],
+                        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=3600"})
 
     if start_engine:
         engine.startup()

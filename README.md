@@ -56,6 +56,14 @@ works but only shows the raw output. Codex, opencode and Cline show their raw ou
 remote host for SSH projects), so the task list and plans live with the code and are
 committed along with it.
 
+**Images** can be pasted (or dropped) into a task's description, the new-task Details field, the
+AI feedback box and chat. Each image (PNG, JPEG, GIF or WebP, up to 8 MB) is saved as
+`.patchgoblin/attachments/<id>.<ext>` in the project (on the remote host for SSH projects), so it
+is committed along with `.patchgoblin/`, and a Markdown reference is inserted into the text. AI
+prompts list the referenced files so the agent can open them. OpenAI-compatible endpoints
+also receive the images inline, which needs a vision-capable model. Attachments are not deleted
+automatically.
+
 **States:**
 
 | State | Meaning |

@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -35,6 +36,10 @@ MODELS = {
 }
 TASKS_DIR = ".patchgoblin"
 TASKS_FILE = "tasks.json"
+ATTACHMENTS_DIR = "attachments"
+IMAGE_TYPES = {"png": b"\x89PNG", "jpg": b"\xff\xd8\xff", "gif": b"GIF8", "webp": b"RIFF"}
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+ATTACHMENT_NAME = re.compile(r"^[0-9a-f]{32}\.(png|jpg|gif|webp)$")
 
 LEGACY_CLAUDE_COMMANDS = {
     "plan": "claude -p --output-format text --allowedTools Read,Glob,Grep "
@@ -390,6 +395,28 @@ def empty_doc() -> dict:
 def tasks_path(project: dict, host=None) -> str:
     host = host or host_for(project)
     return host.join(project["path"], TASKS_DIR, TASKS_FILE)
+
+
+def attachment_path(project: dict, name: str, host=None) -> str:
+    host = host or host_for(project)
+    return host.join(project["path"], TASKS_DIR, ATTACHMENTS_DIR, name)
+
+
+def save_attachment(project: dict, data: bytes) -> str:
+    """Store a pasted image in the project; returns its project-relative POSIX path."""
+    if not data:
+        raise ValueError("The image is empty.")
+    if len(data) > MAX_IMAGE_BYTES:
+        raise ValueError(f"Image is too large (max {MAX_IMAGE_BYTES // (1024 * 1024)} MB).")
+    ext = next((e for e, magic in IMAGE_TYPES.items() if data.startswith(magic)), None)
+    if ext == "webp" and data[8:12] != b"WEBP":
+        ext = None
+    if not ext:
+        raise ValueError("Only PNG, JPEG, GIF and WebP images can be attached.")
+    name = uuid.uuid4().hex + "." + ext
+    host = host_for(project)
+    host.write_bytes(attachment_path(project, name, host), data)
+    return f"{TASKS_DIR}/{ATTACHMENTS_DIR}/{name}"
 
 
 class TaskStore:

@@ -78,10 +78,11 @@
 
       <form id="new-task" class="new-task">
         <input id="nt-title" placeholder="New task title…" autocomplete="off" required>
-        <input id="nt-desc" placeholder="Details (optional)" autocomplete="off">
+        <input id="nt-desc" placeholder="Details (optional, paste images)" autocomplete="off">
         <label class="check" title="Keep Auto-plan / Auto-queue from touching the new task"><input type="checkbox" id="nt-paused"> Add paused</label>
         <button type="submit">Add task</button>
       </form>
+      <div class="image-previews" id="nt-desc-img" hidden></div>
 
       <div class="queue-tabs" role="tablist" aria-label="Task queues">
         {% for col, label in [("unplanned", "Unplanned"), ("drafted", "Drafted"), ("planned", "Planned"), ("queue", "AI queue"), ("review", "Review"), ("finished", "Finished"), ("paused", "Paused")] %}
@@ -233,7 +234,8 @@
   </div>
   <div class="drawer-body">
     <input id="d-title" class="title-input">
-    <label>Description<textarea id="d-desc" rows="4"></textarea></label>
+    <label>Description<textarea id="d-desc" rows="4" placeholder="Paste images here"></textarea></label>
+    <div class="image-previews" id="d-desc-img" hidden></div>
     <label class="inline">AI for this task
       <select id="d-provider" class="provider-select">
         <option value="">project default</option>
@@ -271,7 +273,8 @@
     </div>
     <div id="d-feedback-wrap">
       <label><span id="d-feedback-label">Other feedback for the AI <span class="muted">(optional)</span></span>
-        <textarea id="d-feedback" rows="2" placeholder="e.g. Use the existing API client instead of adding a new one."></textarea></label>
+        <textarea id="d-feedback" rows="2" placeholder="e.g. Use the existing API client instead of adding a new one. (Paste images too.)"></textarea></label>
+      <div class="image-previews" id="d-feedback-img" hidden></div>
     </div>
     <div class="actions flow-actions" id="d-flow-actions"></div>
     <div id="d-commit" class="muted" hidden></div>
@@ -323,7 +326,8 @@
     </details>
   </div>
   <form id="chat-form" class="chat-form">
-    <textarea id="c-input" rows="3" placeholder="Ask about the code… (Enter to send, Shift+Enter for a new line)"></textarea>
+    <div class="image-previews" id="c-input-img" hidden></div>
+    <textarea id="c-input" rows="3" placeholder="Ask about the code… (Enter to send, Shift+Enter for a new line, paste images)"></textarea>
     <div class="actions">
       <button type="submit" id="c-send">Send</button>
       <button type="button" class="danger" id="c-cancel" hidden>Cancel</button>

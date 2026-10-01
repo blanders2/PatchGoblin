@@ -725,6 +725,7 @@ async function createTask(ev) {
       { title, description: $("#nt-desc").value.trim(), ...(paused ? { paused: true } : {}) });
     $("#nt-title").value = "";
     $("#nt-desc").value = "";
+    renderImagePreviews($("#nt-desc"), $("#nt-desc-img"));
     state.tasks.push(task);
     const tab = paused ? "paused" : "unplanned";
     if (state.tab !== tab) selectTab(tab);
@@ -899,6 +900,7 @@ function openDrawer(tid) {
   state.dirty = false;
   state.questionStamp = null;
   $("#d-feedback").value = "";
+  renderImagePreviews($("#d-feedback"), $("#d-feedback-img"));
   $("#drawer").hidden = false;
   renderDrawer(true);
   renderBoard();
@@ -1002,6 +1004,76 @@ async function answerQuestions() {
   await doAction("plan", { answers });
 }
 
+/* ---------------- pasted images ---------------- */
+
+const IMAGE_REF = /!\[[^\]]*\]\(\.patchgoblin\/attachments\/([0-9a-f]{32}\.(?:png|jpg|gif|webp))\)/g;
+
+function imageUrls(text) {
+  const names = [...new Set([...(text || "").matchAll(IMAGE_REF)].map(m => m[1]))];
+  return names.map(n => `/api/projects/${state.pid}/attachments/${n}`);
+}
+
+function thumbnails(text) {
+  return imageUrls(text).map(url => el("img", { src: url, alt: "attached image", title: "Open full size", loading: "lazy",
+    onclick: () => window.open(url, "_blank", "noopener") }));
+}
+
+function renderImagePreviews(field, previewEl) {
+  const thumbs = thumbnails(field.value);
+  previewEl.replaceChildren(...thumbs);
+  previewEl.hidden = !thumbs.length;
+}
+
+const IMAGE_FIELDS = { "#d-desc": "#d-desc-img", "#nt-desc": "#nt-desc-img", "#c-input": "#c-input-img",
+                       "#d-feedback": "#d-feedback-img" };
+
+function refreshImagePreviews() {
+  for (const [f, p] of Object.entries(IMAGE_FIELDS)) renderImagePreviews($(f), $(p));
+}
+
+function readDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+// Pasting or dropping an image uploads it to the project and inserts a Markdown reference.
+function enableImagePaste(field, previewEl) {
+  const imagesIn = dt => {
+    if (!dt) return [];
+    const files = [...(dt.files || [])].filter(f => f.type.startsWith("image/"));
+    if (files.length) return files;
+    return [...(dt.items || [])].filter(i => i.kind === "file" && i.type.startsWith("image/"))
+      .map(i => i.getAsFile()).filter(Boolean);
+  };
+  const attach = async files => {
+    const pid = state.pid;
+    for (const file of files) {
+      try {
+        const res = await api("POST", `/api/projects/${pid}/attachments`, { data: await readDataUrl(file) });
+        if (pid !== state.pid) return;
+        const ref = `![image](${res.path})`;
+        const start = field.selectionStart ?? field.value.length;
+        const pad = field.value.slice(0, start) && !/\s$/.test(field.value.slice(0, start)) ? " " : "";
+        field.setRangeText(pad + ref + " ", start, field.selectionEnd ?? start, "end");
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+      } catch (e) { toast(e.message, true); }
+    }
+  };
+  const handle = e => {
+    const files = imagesIn(e.clipboardData || e.dataTransfer);
+    if (!files.length) return;  // plain text paste/drop is left alone
+    e.preventDefault();
+    attach(files);
+  };
+  field.addEventListener("paste", handle);
+  field.addEventListener("drop", handle);
+  field.addEventListener("input", () => renderImagePreviews(field, previewEl));
+}
+
 function renderDrawer(fillForm) {
   const t = openTask();
   if (!t) { state.openTid = null; state.dirty = false; $("#drawer").hidden = true; return; }
@@ -1022,6 +1094,7 @@ function renderDrawer(fillForm) {
     $("#d-plan").value = t.plan || "";
     state.formStamp = formStamp(t);
     state.dirty = false;
+    renderImagePreviews($("#d-desc"), $("#d-desc-img"));
   }
   for (const id of ["#d-title", "#d-desc", "#d-provider", "#d-plan-model", "#d-code-model", "#d-plan-trust", "#d-plan"]) {
     $(id).disabled = locked;
@@ -1219,6 +1292,7 @@ async function doAction(action, extra = {}) {
     Object.assign(t, updated);
     if (action === "plan" || action === "send_back") {
       $("#d-feedback").value = "";
+      renderImagePreviews($("#d-feedback"), $("#d-feedback-img"));
       resetQuestionAnswers();
     }
     state.formStamp = null;
@@ -1350,7 +1424,7 @@ function renderChat(data) {
   $("#c-messages").replaceChildren(...data.messages.map(m => el("li", {
     class: `${m.role}${m.error ? " error" : ""}`,
   }, el("span", { class: "when" }, `${m.role === "user" ? "You" : "AI"} · ${new Date(m.at).toLocaleTimeString()}`),
-     m.text)));
+     m.text, m.role === "user" ? el("div", { class: "image-previews" }, thumbnails(m.text)) : null)));
   $("#c-live-wrap").hidden = !data.active;
   const events = data.events || [];
   renderActivity($("#c-activity"), events);
@@ -1381,6 +1455,7 @@ async function sendChat(ev) {
   $("#c-send").disabled = true;
   if (await chatRequest("POST", "", { message })) {
     input.value = "";
+    refreshImagePreviews();
     $("#c-log").scrollTop = $("#c-log").scrollHeight;
   } else $("#c-send").disabled = false;
 }
@@ -1826,6 +1901,7 @@ function init() {
   setupProjectDialog();
   setupSettingsDialog();
   setupChat();
+  for (const [f, p] of Object.entries(IMAGE_FIELDS)) enableImagePaste($(f), $(p));
   setupBatchBar();
   setupRemoteDialog();
   setupProjectSettings();
