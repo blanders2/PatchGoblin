@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -2378,6 +2379,148 @@ class ClineTests(AppTestCase):
         # Version 4: "cline" was the endpoint, but "opencode" already meant the CLI.
         self.assertEqual(providers("old"), ["cline-api", "opencode"])
         self.assertEqual(providers("new"), ["cline", "opencode"])
+
+
+HAVE_SVN = bool(shutil.which("svn") and shutil.which("svnadmin") and shutil.which("git"))
+
+SVN_AGENT = """import sys
+sys.stdin.read()
+if sys.argv[1] == "run":
+    with open("existing.txt", "a", encoding="utf-8") as fh:
+        fh.write("edited by agent\\n")
+    with open("new_file.txt", "w", encoding="utf-8") as fh:
+        fh.write("new\\n")
+    print("Edited existing.txt and added new_file.txt")
+else:
+    print("1. do it")
+"""
+
+
+def svn_run(cwd, *args):
+    res = subprocess.run(["svn", "--non-interactive", *args], cwd=cwd, capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    return res.stdout
+
+
+@unittest.skipUnless(HAVE_SVN, "svn, svnadmin and git are required")
+class SvnTests(AppTestCase):
+    def setUp(self):
+        super().setUp()
+        self.repo = os.path.join(self.tmp.name, "repo")
+        subprocess.run(["svnadmin", "create", self.repo], check=True)
+        self.url = "file:///" + self.repo.replace("\\", "/").lstrip("/")
+        svn_run(self.tmp.name, "checkout", self.url, self.proj_dir)
+        for name in ("existing.txt", "user_edit.txt"):
+            with open(os.path.join(self.proj_dir, name), "w", encoding="utf-8") as fh:
+                fh.write("start\n")
+        svn_run(self.proj_dir, "add", "existing.txt", "user_edit.txt")
+        svn_run(self.proj_dir, "commit", "-m", "initial")
+        agent = os.path.join(self.tmp.name, "svn_agent.py")
+        with open(agent, "w", encoding="utf-8") as fh:
+            fh.write(SVN_AGENT)
+        self.app.config["SETTINGS"].update({"commands": {"claude": {
+            "plan": [sys.executable, agent, "plan"], "run": [sys.executable, agent, "run"]}}})
+
+    def enable(self):
+        pid = self.add_project(git_tracking=False)["id"]
+        res = self.client.post(f"/api/projects/{pid}/svn/enable", headers=H)
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertIs(res.get_json()["svn_tracking"], True)
+        return pid
+
+    def revisions(self):
+        return svn_run(self.proj_dir, "log", "-q").count("| ")
+
+    def run_task(self, pid, title):
+        tid = self.post_task(pid, title)["id"]
+        self.assertEqual(self.action(pid, tid, "plan").status_code, 200)
+        self.wait_for(pid, tid, {"planned"})
+        self.assertEqual(self.action(pid, tid, "queue").status_code, 200)
+        task = self.wait_for(pid, tid, {"review", "failed"})
+        self.assertEqual(task["status"], "review", task.get("error"))
+        return task
+
+    def test_enable_refuses_non_working_copy(self):
+        shutil.rmtree(os.path.join(self.proj_dir, ".svn"))
+        pid = self.add_project(git_tracking=False)["id"]
+        res = self.client.post(f"/api/projects/{pid}/svn/enable", headers=H)
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("not the root of an SVN working copy", res.get_json()["error"])
+
+    def test_git_and_svn_are_mutually_exclusive(self):
+        pid = self.add_project()["id"]  # git tracked
+        self.assertEqual(self.client.post(f"/api/projects/{pid}/svn/enable", headers=H).status_code, 400)
+        self.client.patch(f"/api/projects/{pid}", headers=H, json={"git_tracking": False})
+        self.assertEqual(self.client.post(f"/api/projects/{pid}/svn/enable", headers=H).status_code, 200)
+        self.assertEqual(self.client.post(f"/api/projects/{pid}/git/enable", headers=H).status_code, 400)
+        res = self.client.patch(f"/api/projects/{pid}", headers=H, json={"svn_tracking": True})
+        self.assertEqual(res.status_code, 400)
+
+    def test_run_records_changes_without_committing(self):
+        pid = self.enable()
+        with open(os.path.join(self.proj_dir, "user_edit.txt"), "a", encoding="utf-8") as fh:
+            fh.write("user edit before the run\n")
+        before = self.revisions()
+        task = self.run_task(pid, "Edit things")
+        self.assertEqual(sorted((c["status"], c["path"]) for c in task["changes"]),
+                         [("?", "new_file.txt"), ("M", "existing.txt")])
+        self.assertIs(task["checkin_pending"], True)
+        self.assertIn("Edited existing.txt", task["summary"])
+        self.assertEqual(self.revisions(), before)
+        res = self.client.get(f"/api/projects/{pid}/tasks/{task['id']}/changes")
+        self.assertEqual(len(res.get_json()["files"]), 2)
+        self.assertNotIn("Git tracking off", json.dumps(task["history"]))
+
+    def test_checkin_flow(self):
+        pid = self.enable()
+        first = self.run_task(pid, "First")
+        second = self.run_task(pid, "Second")
+        data = self.client.get(f"/api/projects/{pid}/checkin").get_json()
+        self.assertEqual([t["id"] for t in data["tasks"]], [first["id"], second["id"]])
+        self.assertTrue(data["message"].startswith("PatchGoblin: 2 tasks"))
+        self.assertIn("Edited existing.txt", data["message"])
+        self.assertIn("new_file.txt", [f["path"] for f in data["status"]])
+
+        before = self.revisions()
+        res = self.client.post(f"/api/projects/{pid}/checkin", headers=H, json={"message": "  "})
+        self.assertEqual(res.status_code, 400)
+        res = self.client.post(f"/api/projects/{pid}/checkin", headers=H, json={"message": data["message"]})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        rev = res.get_json()["revision"]
+        self.assertEqual(self.revisions(), before + 1)
+        self.assertIn("new_file.txt", svn_run(self.proj_dir, "log", "-v", "-l", "1"))
+        for t in self.client.get(f"/api/projects/{pid}/tasks").get_json()["tasks"]:
+            self.assertEqual((t["checkin"], t["checkin_pending"]), (rev, False))
+        self.assertEqual(self.client.get(f"/api/projects/{pid}/checkin").get_json()["tasks"], [])
+        commits = self.client.get(f"/api/projects/{pid}/commits").get_json()["commits"]
+        self.assertEqual(commits[0]["hash"], rev)
+
+    def test_failed_commit_leaves_tasks_pending(self):
+        pid = self.enable()
+        task = self.run_task(pid, "Edit things")
+        other = os.path.join(self.tmp.name, "other")
+        svn_run(self.tmp.name, "checkout", self.url, other)
+        with open(os.path.join(other, "existing.txt"), "a", encoding="utf-8") as fh:
+            fh.write("someone else\n")
+        svn_run(other, "commit", "-m", "someone else")
+        res = self.client.post(f"/api/projects/{pid}/checkin", headers=H, json={"message": "mine"})
+        self.assertGreaterEqual(res.status_code, 400)
+        self.assertIn("svn commit failed", res.get_json()["error"])
+        tasks = self.client.get(f"/api/projects/{pid}/tasks").get_json()["tasks"]
+        current = next(t for t in tasks if t["id"] == task["id"])
+        self.assertEqual((current["checkin"], current["checkin_pending"]), ("", True))
+
+    def test_plan_that_edits_files_fails(self):
+        from patchgoblin.engine import Job
+        from patchgoblin.providers import run_ai
+        self.app.config["SETTINGS"].update({"commands": {"opencode": {
+            "plan": [sys.executable, FAKE, "plan", "--agent", "{agent}"],
+            "run": [sys.executable, FAKE, "run", "--agent", "{agent}"]}}})
+        out = run_ai("opencode", "plan", "please EDIT_DURING_PLAN", host=LocalHost(),
+                     project={"path": self.proj_dir, "svn_tracking": True},
+                     settings=self.app.config["SETTINGS"].get(), model="", job=Job("plan"))
+        self.assertFalse(out.ok)
+        self.assertIn("plan_edit.txt", out.error)
 
 
 if __name__ == "__main__":

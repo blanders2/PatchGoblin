@@ -289,8 +289,7 @@ async function selectProject(pid) {
   $("#p-name").textContent = p.name;
   $("#p-where").textContent = p.location === "ssh"
     ? `${p.ssh_target}${p.ssh_port ? ":" + p.ssh_port : ""}:${p.path}` : p.path;
-  $("#commits-btn").hidden = p.git_tracking !== true;
-  $("#sync-btn").hidden = p.git_tracking !== true;
+  updateVcsButtons(p);
   renderProjectModel();
   renderProjectTrust();
   state.tasks = [];
@@ -370,15 +369,32 @@ function openProjectSettings() {
   form.remote_url.value = "";
   form.remote_url.disabled = true;
   form.git_tracking_off.checked = false;
+  form.svn_tracking_off.checked = false;
   const tracked = p.git_tracking === true;
-  $("#ps-git-off").hidden = tracked;
+  const svn = p.svn_tracking === true;
+  $("#ps-git-off").hidden = tracked || svn;
   $("#ps-git-on").hidden = !tracked;
+  $("#ps-svn").hidden = !svn;
   showError($("#ps-error"), "");
   state.settingsDirty = false;
   if (tracked) {
     $("#ps-remote-status").textContent = "Loading…";
     loadSettingsRemote(p.id);
   }
+}
+
+// Commits shows for either kind of version control; Sync is git-only; Check in is SVN-only.
+function updateVcsButtons(p) {
+  const git = p.git_tracking === true, svn = p.svn_tracking === true;
+  $("#commits-btn").hidden = !git && !svn;
+  $("#sync-btn").hidden = !git;
+  $("#checkin-btn").hidden = !svn;
+  updateCheckinCount();
+}
+
+function updateCheckinCount() {
+  const n = state.tasks.filter(t => t.checkin_pending).length;
+  $("#checkin-btn").textContent = n ? `Check in (${n})` : "Check in";
 }
 
 const AUTO_MODES = ["auto_plan", "auto_queue"];
@@ -457,6 +473,7 @@ async function saveProjectSettings(ev) {
       }
     }
   }
+  if (p.svn_tracking === true && form.svn_tracking_off.checked) fields.svn_tracking = false;
   const btn = $("#ps-save-btn");
   btn.disabled = true;
   showError($("#ps-error"), "");
@@ -471,8 +488,7 @@ async function saveProjectSettings(ev) {
   renderProjects();
   if (currentProject() === p) {
     $("#p-name").textContent = p.name;
-    $("#commits-btn").hidden = p.git_tracking !== true;
-    $("#sync-btn").hidden = p.git_tracking !== true;
+    updateVcsButtons(p);
     renderProjectModel();
     renderProjectTrust();
   }
@@ -529,6 +545,26 @@ function setupProjectSettings() {
   $("#ps-back-btn").onclick = () => closeProjectSettings();
   $("#ps-cancel-btn").onclick = () => closeProjectSettings();
   $("#ps-remove-btn").onclick = removeProject;
+  $("#ps-svn-enable-btn").onclick = async () => {
+    const p = state.projects.find(x => x.id === form.dataset.pid);
+    if (!p) return;
+    const btn = $("#ps-svn-enable-btn");
+    btn.disabled = true;
+    showError($("#ps-error"), "");
+    try {
+      Object.assign(p, await api("POST", `/api/projects/${p.id}/svn/enable`));
+      renderProjects();
+      if (currentProject() === p) updateVcsButtons(p);
+      $("#ps-git-off").hidden = true;
+      $("#ps-svn").hidden = false;
+      form.svn_tracking_off.checked = false;
+      toast("SVN tracking turned on");
+    } catch (e) {
+      showError($("#ps-error"), e.message);
+    } finally {
+      btn.disabled = false;
+    }
+  };
   $("#ps-git-enable-btn").onclick = async () => {
     const p = state.projects.find(x => x.id === form.dataset.pid);
     if (!p) return;
@@ -539,10 +575,10 @@ function setupProjectSettings() {
       Object.assign(p, await api("POST", `/api/projects/${p.id}/git/enable`));
       renderProjects();
       if (currentProject() === p) {
-        $("#commits-btn").hidden = p.git_tracking !== true;
-        $("#sync-btn").hidden = p.git_tracking !== true;
+        updateVcsButtons(p);
       }
       $("#ps-git-off").hidden = true;
+      $("#ps-svn").hidden = true;
       $("#ps-git-on").hidden = false;
       form.auto_sync.checked = p.auto_sync === true;
       form.sync_mode.value = SYNC_MODE_NAMES[p.sync_mode] ? p.sync_mode : "ff-only";
@@ -567,6 +603,7 @@ async function loadTasks() {
     const data = await api("GET", `/api/projects/${pid}/tasks`);
     if (pid !== state.pid) return;
     state.tasks = data.tasks;
+    updateCheckinCount();
     showError($("#p-error"), "");
   } catch (e) {
     if (pid === state.pid) showError($("#p-error"), `Could not load tasks: ${e.message}`);
@@ -1086,8 +1123,10 @@ function renderDrawer(fillForm) {
     : [actionButton("Delete task", deleteTask, "ghost danger small", "Delete this task permanently")]));
 
   const commit = $("#d-commit");
-  commit.hidden = !t.commit;
-  commit.textContent = t.commit ? `Committed as ${t.commit.slice(0, 12)}` : "";
+  const svnState = t.checkin === "pending" || t.checkin_pending ? "Pending check-in"
+    : t.checkin ? `Checked in ${t.checkin}` : "";
+  commit.hidden = !t.commit && !svnState;
+  commit.textContent = t.commit ? `Committed as ${t.commit.slice(0, 12)}` : svnState;
   renderChanges(t, reviewing);
 
   $("#d-output-wrap").hidden = !t.output || t.active;
@@ -1103,8 +1142,11 @@ function renderDrawer(fillForm) {
 // Files changed by the task's commit, fetched once per commit while the drawer shows it.
 async function renderChanges(t, show) {
   const box = $("#d-changes");
-  if (!show || !t.commit) { box.hidden = true; renderChanges.key = null; return; }
-  const key = `${state.pid}/${t.id}/${t.commit}`;
+  const p = currentProject();
+  const ref = t.commit || (p && p.svn_tracking === true && (t.changes || []).length
+    ? `svn:${t.changes.length}:${t.checkin || ""}` : "");
+  if (!show || !ref) { box.hidden = true; renderChanges.key = null; return; }
+  const key = `${state.pid}/${t.id}/${ref}`;
   if (renderChanges.key === key) return;
   renderChanges.key = key;
   box.hidden = true;
@@ -1621,6 +1663,47 @@ async function showCommits() {
   } catch (e) { list.replaceChildren(el("li", { class: "error" }, e.message)); }
 }
 
+async function showCheckin() {
+  const pid = state.pid;
+  showError($("#ci-error"), "");
+  $("#ci-tasks").replaceChildren(el("li", { class: "muted" }, "Loading…"));
+  $("#ci-status").replaceChildren();
+  $("#ci-message").value = "";
+  $("#ci-submit-btn").disabled = true;
+  $("#checkin-dialog").showModal();
+  try {
+    const data = await api("GET", `/api/projects/${pid}/checkin`);
+    $("#ci-tasks").replaceChildren(...(data.tasks.length ? data.tasks.map(t => {
+      const files = t.changes.length ? el("details", {}, el("summary", { class: "muted small" },
+        `${t.changes.length} file${t.changes.length === 1 ? "" : "s"}`),
+        ...t.changes.map(f => el("div", { class: "small" },
+          el("span", { class: `change-status s-${f.status}` }, f.status), " ", f.path))) : null;
+      return el("li", {}, el("strong", {}, `#${t.id} ${t.title}`), files);
+    }) : [el("li", { class: "muted" }, "No finished tasks are waiting.")]));
+    $("#ci-count").textContent = data.status.length;
+    $("#ci-status").replaceChildren(...(data.status.length ? data.status.map(f =>
+      el("li", {}, el("span", { class: `change-status s-${f.status}` }, f.status), " ", f.path))
+      : [el("li", { class: "muted" }, "Nothing to check in.")]));
+    $("#ci-message").value = data.message;
+    $("#ci-submit-btn").disabled = !data.status.length;
+  } catch (e) { showError($("#ci-error"), e.message); }
+}
+
+async function submitCheckin() {
+  const btn = $("#ci-submit-btn");
+  btn.disabled = true;
+  showError($("#ci-error"), "");
+  try {
+    const data = await api("POST", `/api/projects/${state.pid}/checkin`, { message: $("#ci-message").value });
+    $("#checkin-dialog").close();
+    toast(data.revision ? `Checked in as ${data.revision}` : "Nothing to check in");
+    loadTasks();
+  } catch (e) {
+    showError($("#ci-error"), e.message);
+    btn.disabled = false;
+  }
+}
+
 let remoteUrl = ""; // origin's URL as last shown in the Sync dialog
 
 function renderRemote(r) {
@@ -1691,6 +1774,12 @@ function init() {
   loadAutomation();
   $("#new-task").onsubmit = createTask;
   $("#commits-btn").onclick = showCommits;
+  $("#checkin-btn").onclick = showCheckin;
+  $("#ci-submit-btn").onclick = submitCheckin;
+  $("#ci-copy-btn").onclick = async () => {
+    try { await navigator.clipboard.writeText($("#ci-message").value); toast("Message copied"); }
+    catch { toast("Could not copy", true); }
+  };
   $("#terminal-btn").onclick = async () => {
     try {
       await api("POST", `/api/projects/${state.pid}/terminal`);

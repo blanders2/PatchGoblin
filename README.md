@@ -139,6 +139,21 @@ Failed runs leave their changes uncommitted so you can inspect them. The **Commi
 button shows recent history. While tracking is off, runs go straight to Needs review
 with nothing committed, and the **Commits** and **Sync** buttons are hidden.
 
+**SVN.** A project that is already an SVN working copy can use **Use existing SVN
+working copy** in Project settings → Version control (git and SVN tracking are mutually
+exclusive; PatchGoblin never runs `svn checkout` for you). Nothing is committed
+automatically, because an SVN commit is published to the server at once. Instead each
+successful run records the files it changed and the AI's summary on the task, which then
+shows as pending check-in. The **Check in** button opens a dialog with those tasks, the
+working copy's current `svn status`, and an editable commit message built from the tasks.
+Check in adds new files, removes missing ones and runs `svn commit`, then stamps the
+revision on each task. The commit covers the whole working copy (including `tasks.json` and
+manual edits), and edits you make while a task runs are indistinguishable from the AI's.
+Commands run with `--non-interactive`, so your own SVN credentials must already be cached,
+and an out-of-date working copy fails with SVN's error (update it yourself). `svn` and
+`git` must both be installed on the project's host. **Commits** shows `svn log`; Sync is
+git-only.
+
 **Remote sync.** Requires git tracking. Set the project's `origin` URL and sync mode in Project settings; the
 **Sync** button then syncs with it, always using the saved mode.
 A sync commits any uncommitted changes (including `tasks.json`) as `checkpoint before

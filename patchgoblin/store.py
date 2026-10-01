@@ -450,6 +450,10 @@ def new_task(doc: dict, title: str, description: str = "", provider: str = "",
         "output": "",
         "error": "",
         "commit": "",
+        "changes": [],  # SVN projects: files the run changed, awaiting check-in
+        "summary": "",
+        "checkin_pending": False,
+        "checkin": "",
         "review_feedback": "",  # older tasks lack it; read with .get()
         "history": [],
     }

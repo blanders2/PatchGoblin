@@ -12,7 +12,7 @@ import logging
 import threading
 import time
 
-from . import gitops
+from . import gitops, svnops
 from .hosts import HostError, host_for, kill_tree
 from .providers import (Cancelled, Outcome, chat_prompt, plan_prompt, plan_questions, ready_status, run_ai,
                         resolve_trust, run_prompt, split_title)
@@ -410,13 +410,21 @@ class Engine:
         pid, tid = project["id"], task["id"]
         host, path = host_for(project), project["path"]
         track = gitops.tracked(project)
-        commit, outcome = "", None
+        svn = svnops.tracked(project)
+        vcs = "git" if track else "svn" if svn else ""
+        commit, outcome, svn_before, svn_error = "", None, None, ""
         try:
             try:
                 if track and gitops.has_changes(host, path, ignore_metadata=True):
                     sha = gitops.commit_all(host, path, f"PatchGoblin: checkpoint before task #{tid}")
                     job.write(f"Committed pre-existing changes as checkpoint {sha[:10]}\n")
-                outcome = self._ai(project, task, "run", run_prompt(task, track), job)
+                if svn:
+                    try:
+                        svn_before = svnops.dirty_fingerprint(host, path)
+                    except HostError as exc:
+                        svn_error = f"Could not record file changes for check-in: {exc}"
+                        job.write(svn_error + "\n")
+                outcome = self._ai(project, task, "run", run_prompt(task, vcs), job)
             except Cancelled:
                 outcome = Outcome(False, error="Cancelled by user. Review the working tree before re-queueing.")
             except HostError as exc:
@@ -449,6 +457,8 @@ class Engine:
                             log_event(current, f"Committed {commit[:10]}" if commit else "No file changes to commit")
                     if project.get("auto_sync") is True:
                         self._auto_sync(project, tid, job)
+                elif svn:
+                    self._record_svn_changes(project, task, outcome, svn_before, svn_error, job)
                 else:
                     with self.store.edit(project) as doc:
                         current = find_task(doc, tid)
@@ -467,6 +477,67 @@ class Engine:
                 log.exception("Could not record failure for %s#%s", pid, tid)
         finally:
             self.jobs.pop((pid, tid), None)
+
+    def _record_svn_changes(self, project: dict, task: dict, outcome, before, error: str, job: Job) -> None:
+        """Remember the files a finished run changed so the next check-in can list them. Nothing is
+        committed; failures are logged on the task, never fail it."""
+        pid, tid = project["id"], task["id"]
+        host, path = host_for(project), project["path"]
+        changes, event = [], error
+        if before is not None:
+            try:
+                changes = svnops.changed_between(before, svnops.dirty_fingerprint(host, path))
+            except HostError as exc:
+                event = f"Could not record file changes for check-in: {exc}"
+                job.write(event + "\n")
+        with self.store.edit(project) as doc:
+            current = find_task(doc, tid)
+            if current is None:
+                return
+            current["summary"] = (outcome.text or "").strip()[:1500]
+            current["changes"] = changes
+            current["checkin_pending"] = bool(changes)
+            current["checkin"] = ""
+            log_event(current, event or (f"Recorded {len(changes)} changed file{'s' * (len(changes) != 1)} "
+                                         "for check-in" if changes else "No file changes"))
+
+    # ---- check-in (SVN) ---------------------------------------------------
+    def pending_checkin(self, project: dict) -> list[dict]:
+        doc = self.store.read(project, fresh=True)
+        return sorted((t for t in doc["tasks"] if t.get("checkin_pending")), key=lambda t: t["id"])
+
+    def checkin(self, project: dict, message: str) -> str:
+        """Commit the whole working copy and stamp the revision on the pending tasks. The caller
+        checks that no AI job is active. On failure the tasks stay pending."""
+        pid = project["id"]
+        lock = self._sync_lock(pid)
+        if not lock.acquire(blocking=False):
+            raise ValueError("A check-in or task run is already in progress for this project.")
+        try:
+            with self.store.lock(pid):
+                ids = [t["id"] for t in self.pending_checkin(project)]
+                self._stamp(project, ids, checkin="pending")  # so the commit has current tasks.json
+                try:
+                    rev = svnops.checkin(host_for(project), project["path"], message)
+                except BaseException:
+                    self._stamp(project, ids, checkin="")
+                    raise
+                self._stamp(project, ids, checkin=rev, pending=False,
+                            event=f"Checked in as {rev}" if rev else "Nothing to check in")
+                return rev
+        finally:
+            lock.release()
+
+    def _stamp(self, project: dict, ids: list[int], checkin: str, pending: bool = True, event: str = "") -> None:
+        with self.store.edit(project) as doc:
+            for tid in ids:
+                current = find_task(doc, tid)
+                if current is None:
+                    continue
+                current["checkin"] = checkin
+                current["checkin_pending"] = pending
+                if event:
+                    log_event(current, event)
 
     # ---- remote sync -----------------------------------------------------
     def sync(self, project: dict, mode: str, push: bool = True, checkpoint: bool = True) -> dict:

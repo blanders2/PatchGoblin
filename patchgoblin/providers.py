@@ -23,7 +23,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
-from . import gitops, opencode
+from . import gitops, opencode, svnops
 from .gitops import dirty_fingerprint, git
 from .hosts import HostError
 from .store import find_endpoint
@@ -107,6 +107,14 @@ When you are done, reply with a short summary of what you changed and how you ve
 RUN_INSTRUCTIONS_UNTRACKED = """\
 You are implementing a planned task in the project in the current working directory.
 Follow the plan, adapting it if the code requires. Keep changes focused on this task.
+Do not edit anything under .patchgoblin/.
+When you are done, reply with a short summary of what you changed and how you verified it.
+"""
+
+RUN_INSTRUCTIONS_SVN = """\
+You are implementing a planned task in the project in the current working directory.
+Follow the plan, adapting it if the code requires. Keep changes focused on this task.
+Do not run svn commit, add or revert; the user checks changes in later.
 Do not edit anything under .patchgoblin/.
 When you are done, reply with a short summary of what you changed and how you verified it.
 """
@@ -222,8 +230,10 @@ def _review_section(feedback: str, commit: str = "") -> str:
             "needed on top of the current code; do not redo work that is already correct.")
 
 
-def run_prompt(task: dict, tracked: bool = True) -> str:
-    parts = [RUN_INSTRUCTIONS if tracked else RUN_INSTRUCTIONS_UNTRACKED, f"# Task #{task['id']}: {task['title']}"]
+def run_prompt(task: dict, vcs: str = "git") -> str:
+    """The run prompt; ``vcs`` is "git", "svn" or "" (no version control)."""
+    instructions = {"git": RUN_INSTRUCTIONS, "svn": RUN_INSTRUCTIONS_SVN}.get(vcs, RUN_INSTRUCTIONS_UNTRACKED)
+    parts = [instructions, f"# Task #{task['id']}: {task['title']}"]
     if task.get("description", "").strip():
         parts.append(f"## Description\n{task['description'].strip()}")
     plan = task.get("plan", "").strip() or "(No written plan: use the description.)"
@@ -252,7 +262,8 @@ def run_ai(provider: str, mode: str, prompt: str, *, host, project: dict, settin
     active in the project; opencode's plan check uses it to avoid blaming a run's edits on a plan.
     """
     timeout = float(settings["timeouts"][mode])
-    is_tracked = gitops.tracked(project)
+    is_tracked = gitops.tracked(project)  # git only: SVN projects use the untracked code paths
+    svn_wc = svnops.tracked(project)
     endpoint = find_endpoint(settings, provider)
     if endpoint is not None:
         return OpenAIAgent(host, project["path"], endpoint, model, mode, job, tracked=is_tracked).run(prompt, timeout)
@@ -261,10 +272,10 @@ def run_ai(provider: str, mode: str, prompt: str, *, host, project: dict, settin
                                     "(it may have been removed in Settings).")
     if provider == "opencode":
         return run_opencode(settings["commands"][provider], mode, prompt, host=host, cwd=project["path"],
-                            model=model, timeout=timeout, job=job, run_marker=run_marker, tracked=is_tracked)
+                            model=model, timeout=timeout, job=job, run_marker=run_marker, tracked=is_tracked, svn=svn_wc)
     if provider == "cline":
         return run_cline(settings["commands"][provider], mode, prompt, host=host, cwd=project["path"],
-                         model=model, timeout=timeout, job=job, run_marker=run_marker, tracked=is_tracked)
+                         model=model, timeout=timeout, job=job, run_marker=run_marker, tracked=is_tracked, svn=svn_wc)
     return run_cli(settings["commands"][provider], mode, prompt, host=host, cwd=project["path"],
                    model=model, timeout=timeout, job=job)
 
@@ -288,7 +299,8 @@ def cli_argv(cfg: dict, mode: str, model: str) -> list[str]:
 
 
 def run_opencode(cfg: dict, mode: str, prompt: str, *, host, cwd: str, model: str,
-                 timeout: float, job, run_marker=None, tracked: bool = True) -> Outcome:
+                 timeout: float, job, run_marker=None, tracked: bool = True,
+                 svn: bool = False) -> Outcome:
     """opencode, with checks for what its config can get wrong: the agent must be defined
     (opencode may otherwise fall back to its full-access default agent), and planning must
     leave the working tree as it was (changed files are reported, never reverted)."""
@@ -314,24 +326,24 @@ def run_opencode(cfg: dict, mode: str, prompt: str, *, host, cwd: str, model: st
         outcome.error = opencode.strip_ansi(outcome.error)
         return outcome
 
-    return _no_plan_edits(cfg, mode, run, host=host, cwd=cwd, job=job, run_marker=run_marker, tracked=tracked,
+    return _no_plan_edits(cfg, mode, run, host=host, cwd=cwd, job=job, run_marker=run_marker, tracked=tracked, svn=svn,
                           blame=lambda paths: f"opencode's plan agent modified files: {paths}. Review them, "
                                               f'and set agent.{agent} permissions edit/bash to "deny" in '
                                               "opencode.json.")
 
 
 def _no_plan_edits(cfg: dict, mode: str, run, *, host, cwd: str, job, run_marker, blame,
-                   tracked: bool = True) -> Outcome:
+                   tracked: bool = True, svn: bool = False) -> Outcome:
     """``run()``, failing a plan (or chat) that left the working tree changed (the changed files
     are reported, never reverted) unless ``plan_must_not_edit`` is off. ``blame(paths)`` is the
     error message. Untracked projects skip the check entirely (there is no git to diff)."""
     check = mode == "plan" and cfg.get("plan_must_not_edit", True) is not False
-    before = _fingerprint(host, cwd, job, tracked) if check else None
+    before = _fingerprint(host, cwd, job, tracked, svn) if check else None
     marker = run_marker() if before is not None and run_marker else None
     outcome = run()
     if before is None:
         return outcome
-    after = _fingerprint(host, cwd, job, tracked)
+    after = _fingerprint(host, cwd, job, tracked, svn)
     if after is None:
         return outcome
     paths = sorted(p for p in before.keys() | after.keys() if before.get(p) != after.get(p))
@@ -344,9 +356,15 @@ def _no_plan_edits(cfg: dict, mode: str, run, *, host, cwd: str, job, run_marker
     return Outcome(False, outcome.text, blame(", ".join(paths)))
 
 
-def _fingerprint(host, cwd: str, job, tracked: bool = True) -> dict | None:
-    """The working tree's dirty fingerprint, or None (logged) if git can't give one (or tracking
-    is off), so a plan never fails because of git."""
+def _fingerprint(host, cwd: str, job, tracked: bool = True, svn: bool = False) -> dict | None:
+    """The working tree's dirty fingerprint, or None (logged) if git/svn can't give one (or tracking
+    is off), so a plan never fails because of version control."""
+    if svn:
+        try:
+            return svnops.dirty_fingerprint(host, cwd)
+        except HostError as exc:
+            job.write(f"Can't check planning edits (svn status failed): {exc}\n")
+            return None
     if not tracked:
         job.write("Git tracking is off; planning edits aren't checked.\n")
         return None
@@ -389,7 +407,8 @@ def cline_reply(output: str) -> str:
 
 
 def run_cline(cfg: dict, mode: str, prompt: str, *, host, cwd: str, model: str,
-              timeout: float, job, run_marker=None, tracked: bool = True) -> Outcome:
+              timeout: float, job, run_marker=None, tracked: bool = True,
+              svn: bool = False) -> Outcome:
     """The Cline CLI: its output is cut down to the final reply, and since plan mode only
     blocks file-editing tools (commands can still change files), planning is checked too."""
 
@@ -400,7 +419,7 @@ def run_cline(cfg: dict, mode: str, prompt: str, *, host, cwd: str, model: str,
         outcome.error = opencode.strip_ansi(outcome.error)
         return outcome
 
-    return _no_plan_edits(cfg, mode, run, host=host, cwd=cwd, job=job, run_marker=run_marker, tracked=tracked,
+    return _no_plan_edits(cfg, mode, run, host=host, cwd=cwd, job=job, run_marker=run_marker, tracked=tracked, svn=svn,
                           blame=lambda paths: f"Cline modified files while planning: {paths}. Review them; "
                                               "the planning command should use plan mode (-p).")
 
@@ -430,7 +449,7 @@ def run_cli(cfg: dict, mode: str, prompt: str, *, host, cwd: str, model: str,
 class ProjectFiles:
     """File access confined to the project root (used by the OpenAI agent)."""
 
-    RESERVED = (".git", ".patchgoblin")
+    RESERVED = (".git", ".svn", ".patchgoblin")
 
     def __init__(self, host, root: str):
         self.host, self.root = host, root

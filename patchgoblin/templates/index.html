@@ -69,6 +69,7 @@
           <button class="ghost" id="terminal-btn" title="Open a terminal in the project directory">Terminal</button>
           <button class="ghost" id="vscode-btn" title="Open the project directory in VS Code">VS Code</button>
           <button class="ghost" id="commits-btn">Commits</button>
+          <button class="ghost" id="checkin-btn" title="Commit the finished tasks to SVN" hidden>Check in</button>
           <button class="ghost" id="sync-btn" title="Pull from and push to the origin git remote">Sync</button>
           <button class="ghost" id="project-settings-btn" title="AI, planning and git options for this project">Project settings</button>
         </div>
@@ -176,10 +177,17 @@
           </div>
         </fieldset>
         <fieldset>
-          <legend>Git</legend>
+          <legend>Version control</legend>
           <div id="ps-git-off">
-            <p class="muted small">Git tracking is off. Tasks are not committed, and Commits and Sync are unavailable.</p>
+            <p class="muted small">Version control tracking is off. Tasks are not committed, and Commits, Check in and Sync are unavailable.</p>
             <button type="button" class="ghost" id="ps-git-enable-btn">Turn on git tracking</button>
+            <button type="button" class="ghost" id="ps-svn-enable-btn" title="The project folder must already be the root of an SVN working copy">Use existing SVN working copy</button>
+          </div>
+          <div id="ps-svn">
+            <p class="muted small">Tracked with SVN. Nothing is committed automatically: finished tasks wait for you to press Check in.</p>
+            <label class="check" title="Stop recording check-ins; .svn is kept">
+              <input type="checkbox" name="svn_tracking_off"> Stop tracking (keeps .svn)
+            </label>
           </div>
           <div id="ps-git-on">
             <label>Remote URL (origin)
@@ -369,6 +377,27 @@
   <h2>Recent commits</h2>
   <ul id="commit-list" class="commits"></ul>
   <div class="actions right"><button type="button" data-close="commits-dialog">Close</button></div>
+</dialog>
+
+<!-- SVN check-in -->
+<dialog id="checkin-dialog" class="wide">
+  <h2>Check in</h2>
+  <div class="remote-body">
+    <h3>Finished tasks since the last check-in</h3>
+    <ul id="ci-tasks" class="commits"></ul>
+    <h3>Working copy status (<span id="ci-count">0</span>)</h3>
+    <ul id="ci-status" class="commits"></ul>
+    <p class="muted small">Everything listed is committed, including manual edits and files you changed while a task ran. New files are added and missing files removed.</p>
+    <label>Message
+      <textarea id="ci-message" rows="10"></textarea>
+    </label>
+    <div id="ci-error" class="error" hidden></div>
+  </div>
+  <div class="actions right">
+    <button type="button" class="ghost" id="ci-copy-btn">Copy message</button>
+    <button type="button" id="ci-submit-btn" class="primary">Check in</button>
+    <button type="button" data-close="checkin-dialog">Close</button>
+  </div>
 </dialog>
 
 <!-- Git remote sync -->

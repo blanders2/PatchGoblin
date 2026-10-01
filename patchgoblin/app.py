@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from flask import Flask, abort, jsonify, render_template, request
 
-from . import gitops, opencode
+from . import gitops, opencode, svnops
 from .engine import Engine
 from .hosts import HostError, host_for, open_terminal, open_vscode, probe
 from .providers import PLAN_TRUST_LEVELS, endpoint_key, list_models, plan_questions, ready_status
@@ -413,12 +413,29 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             raise ValueError("Wait for this project's AI jobs to finish first.")
         if gitops.tracked(project):
             return jsonify(project)
+        if svnops.tracked(project):
+            raise ValueError("This project is tracked with SVN; stop SVN tracking before using git.")
         host, path = host_for(project), project["path"]
         created = gitops.ensure_repo(host, path)
         if created or not gitops.recent_commits(host, path, limit=1):
             gitops.commit_all(host, path, "PatchGoblin: initial commit")
         updated = registry.update(project["id"], {"git_tracking": True})
         return jsonify(updated)
+
+    @app.post("/api/projects/<pid>/svn/enable")
+    def enable_svn(pid):
+        """Turn on SVN check-in tracking for a project that is an existing working copy root."""
+        project = project_or_404(pid)
+        if engine.busy(pid) or any(t["status"] in LOCKED for t in store.read(project, fresh=True)["tasks"]):
+            raise ValueError("Wait for this project's AI jobs to finish first.")
+        if svnops.tracked(project):
+            return jsonify(project)
+        if gitops.tracked(project):
+            raise ValueError("This project is tracked with git; stop git tracking before using SVN.")
+        if not svnops.is_wc_root(host_for(project), project["path"]):
+            raise ValueError("This folder is not the root of an SVN working copy (or svn is not installed "
+                             "on its host). PatchGoblin never runs svn checkout itself.")
+        return jsonify(registry.update(project["id"], {"svn_tracking": True}))
 
     @app.patch("/api/projects/<pid>")
     def update_project(pid):
@@ -431,6 +448,12 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             if data["git_tracking"] is not False:
                 raise ValueError("git_tracking must be true or false.")
             fields["git_tracking"] = False
+        if "svn_tracking" in data:
+            if data["svn_tracking"] is True:
+                raise ValueError("Use POST /api/projects/<id>/svn/enable to turn on SVN tracking.")
+            if data["svn_tracking"] is not False:
+                raise ValueError("svn_tracking must be true or false.")
+            fields["svn_tracking"] = False
         if not gitops.tracked(project) and any(k in data for k in ("remote_url", "auto_sync", "sync_mode")):
             raise ValueError("Git tracking is off for this project; turn it on first.")
         if "name" in data:
@@ -513,9 +536,39 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     @app.get("/api/projects/<pid>/commits")
     def commits(pid):
         project = project_or_404(pid)
+        if svnops.tracked(project):
+            return jsonify(commits=svnops.recent_log(host_for(project), project["path"]))
         if not gitops.tracked(project):
-            raise ValueError("Git tracking is off for this project.")
+            raise ValueError("Version control tracking is off for this project.")
         return jsonify(commits=gitops.recent_commits(host_for(project), project["path"]))
+
+    def svn_project(pid: str) -> dict:
+        project = project_or_404(pid)
+        if not svnops.tracked(project):
+            raise ValueError("SVN tracking is off for this project.")
+        return project
+
+    @app.get("/api/projects/<pid>/checkin")
+    def get_checkin(pid):
+        project = svn_project(pid)
+        tasks = engine.pending_checkin(project)
+        entries = svnops.status_entries(host_for(project), project["path"])
+        return jsonify(tasks=[{"id": t["id"], "title": t["title"], "summary": t.get("summary", ""),
+                               "changes": t.get("changes", [])} for t in tasks],
+                       status=[{"status": svnops.LETTER[item], "item": item, "path": name}
+                               for name, item in sorted(entries.items())],
+                       message=svnops.default_checkin_message(tasks))
+
+    @app.post("/api/projects/<pid>/checkin")
+    def post_checkin(pid):
+        project = svn_project(pid)
+        message = body().get("message")
+        if not isinstance(message, str) or not message.strip():
+            raise ValueError("Enter a check-in message.")
+        if engine.busy(pid) or any(t["status"] in LOCKED for t in store.read(project, fresh=True)["tasks"]):
+            raise ValueError("Wait for this project's AI jobs to finish before checking in.")
+        rev = engine.checkin(project, message.strip() + "\n")
+        return jsonify(revision=rev)
 
     def remote_view(project: dict, status: dict) -> dict:
         return {**status, "auto_sync": project.get("auto_sync") is True,
@@ -843,6 +896,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         """The files changed by the task's (latest) commit; [] without one."""
         project = project_or_404(pid)
         task = find_task(store.read(project), tid) or abort(404)
+        if svnops.tracked(project):
+            return jsonify(files=task.get("changes") or [])
         sha = task.get("commit") or ""
         if not sha or not gitops.tracked(project):
             return jsonify(files=[])

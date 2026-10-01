@@ -173,7 +173,7 @@ def list_files(host, path: str, is_tracked: bool) -> list[str]:
         return [n for n in res.stdout.splitlines() if n]
     res = git(host, path, "grep", "--no-index", "--exclude-standard", "-l", "-I", "-e", "")
     names = [n for n in res.stdout.splitlines() if n]
-    return [n for n in names if not n.startswith((".git/", ".patchgoblin/"))]
+    return [n for n in names if not n.startswith((".git/", ".svn/", ".patchgoblin/"))]
 
 
 # ---- remote sync ------------------------------------------------------------
