@@ -246,6 +246,7 @@ class Engine:
     def maybe_auto_queue(self, pid: str, task: dict) -> bool:
         """Queue a just-planned task if Auto-queue is on. Call inside ``store.edit``; the
         caller kicks the runner after leaving it."""
+        # Paused tasks are skipped on purpose: only "planned" tasks match (see AUTO_TARGETS).
         if task["status"] != "planned" or not self.auto(pid, "auto_queue"):
             return False
         task["queued_at"] = now()
@@ -268,6 +269,7 @@ class Engine:
                 if queued:
                     self.kick(pid)
             if "auto_plan" in keys:
+                # Only "unplanned" tasks are picked, so paused ones are left alone on purpose.
                 ids = [t["id"] for t in self.store.read(project, fresh=True)["tasks"]
                        if t["status"] == "unplanned"]
                 for tid in ids:

@@ -15,7 +15,7 @@ from . import gitops, opencode
 from .engine import Engine
 from .hosts import HostError, host_for, open_terminal, probe
 from .providers import PLAN_TRUST_LEVELS, endpoint_key, list_models, plan_questions, ready_status
-from .store import (AUTO_MODES, CLI_PROVIDERS, MODELS, STATUSES, Registry, Settings, TaskStore, empty_doc,
+from .store import (AUTO_MODES, CLI_PROVIDERS, MODELS, PAUSABLE, STATUSES, Registry, Settings, TaskStore, empty_doc,
                     find_endpoint, find_task, log_event, new_task, now, provider_choices, resolve_auto,
                     set_status, tasks_path, valid_provider)
 
@@ -612,10 +612,11 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             raise ValueError("Unknown provider.")
         models = {k: model_name(data.get(k)) for k in MODEL_KEYS}
         trust = plan_trust(data.get("plan_trust") or "", allow_blank=True)
+        paused = data.get("paused") is True
         with store.edit(project) as doc:
             task = new_task(doc, title, (data.get("description") or "").strip(), provider, **models,
-                            plan_trust=trust)
-        if engine.auto(pid, "auto_plan"):
+                            plan_trust=trust, paused=paused)
+        if not paused and engine.auto(pid, "auto_plan"):
             try:
                 engine.start_planning(project, task["id"], auto=True)
             except (ValueError, KeyError) as exc:  # creating the task must still succeed
@@ -668,6 +669,9 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         "dequeue": (("queued",), "planned", "Removed from queue"),
         "approve": (("review",), "done", "Approved by engineer"),
         "reopen": (("done", "review"), "planned", "Reopened"),
+        # Pause remembers the status in paused_from; resume restores it (target is dynamic).
+        "pause": (PAUSABLE, "paused", "Paused"),
+        "resume": (("paused",), None, "Resumed"),
     }
 
     def transition(pid: str, task: dict, action: str, queued_at: str | None = None) -> bool:
@@ -676,6 +680,20 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         source = task["status"]
         if source not in allowed:
             raise ValueError(f"Cannot {action.replace('_', ' ')} a task that is {task['status']}.")
+        if action == "resume":
+            status = task.pop("paused_from", None)
+            if status not in PAUSABLE:
+                status = "unplanned"
+            if status == "planned":
+                status = ready_status(task.get("plan", ""))
+            if status == "queued":
+                task["queued_at"] = task.get("queued_at") or queued_at or now()
+            set_status(task, status, f"Resumed ({status})")
+            return status == "queued"
+        if action == "pause":
+            task["paused_from"] = source
+            if source == "queued":
+                task["queued_at"] = None
         if status == "planned":
             status = ready_status(task.get("plan", ""))
             if status == "drafted":

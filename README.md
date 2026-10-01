@@ -59,6 +59,7 @@ committed along with it.
 | Needs review | The AI run finished and its work is committed. Approve it, send it back to the AI with feedback, or reopen it. |
 | Done | Approved by you. You can send it back to the AI with feedback, or reopen it. |
 | Failed | The run failed or was cancelled. You can re-queue it, replan it, or mark it planned. |
+| Paused | Set aside by you; Auto-plan and Auto-queue never touch it. Resume returns it to the status it had. |
 
 Planning and implementation both run **in the project's directory, on the project's
 host**. Each project runs one task at a time, in queue order. Different projects run in
@@ -122,7 +123,7 @@ questions goes from creation to an AI run and a commit without you reviewing the
 **Batch actions.** Tick the checkbox on each card you want (Shift+click selects a
 range, Space toggles the focused card, Esc clears). A toolbar then shows the actions
 that apply to the ticked tasks: Plan with AI, Mark planned, Move to drafted, Queue for AI, Remove from
-queue, Back to unplanned, Approve, Reopen, Cancel, Set AI and Delete. The same rules apply as for
+queue, Back to unplanned, Approve, Reopen, Pause, Resume, Cancel, Set AI and Delete. The same rules apply as for
 a single task. Tasks that don't qualify are skipped and listed in the result message,
 and the rest still go through. Batch-queued tasks run in id order. Selections stay
 within the current tab.

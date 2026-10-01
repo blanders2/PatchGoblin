@@ -58,11 +58,12 @@
       <form id="new-task" class="new-task">
         <input id="nt-title" placeholder="New task title…" autocomplete="off" required>
         <input id="nt-desc" placeholder="Details (optional)" autocomplete="off">
+        <label class="check" title="Keep Auto-plan / Auto-queue from touching the new task"><input type="checkbox" id="nt-paused"> Add paused</label>
         <button type="submit">Add task</button>
       </form>
 
       <div class="queue-tabs" role="tablist" aria-label="Task queues">
-        {% for col, label in [("unplanned", "Unplanned"), ("drafted", "Drafted"), ("planned", "Planned"), ("queue", "AI queue"), ("review", "Review"), ("finished", "Finished")] %}
+        {% for col, label in [("unplanned", "Unplanned"), ("drafted", "Drafted"), ("planned", "Planned"), ("queue", "AI queue"), ("review", "Review"), ("finished", "Finished"), ("paused", "Paused")] %}
         <button type="button" class="queue-tab" role="tab" id="tab-{{ col }}" data-col="{{ col }}" data-label="{{ label }}" aria-controls="col-{{ col }}">
           {{ label }} <span class="activity" hidden></span><span class="count empty"></span>
         </button>
@@ -87,7 +88,7 @@
         <button type="button" class="ghost small" id="batch-clear" title="Clear selection (Esc)">✕</button>
       </div>
       <div class="board">
-        {% for col in ["unplanned", "drafted", "planned", "queue", "review", "finished"] %}
+        {% for col in ["unplanned", "drafted", "planned", "queue", "review", "finished", "paused"] %}
         <div class="column" id="col-{{ col }}" data-col="{{ col }}" role="tabpanel" aria-labelledby="tab-{{ col }}"><div class="cards"></div></div>
         {% endfor %}
       </div>

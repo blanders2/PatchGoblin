@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from .hosts import host_for
 
-STATUSES = ("unplanned", "planning", "drafted", "planned", "queued", "running", "review", "done", "failed")
+STATUSES = ("unplanned", "planning", "drafted", "planned", "queued", "running", "review", "done", "failed", "paused")
 CLI_PROVIDERS = ("claude", "codex", "opencode", "cline")
 CLI_NAMES = {"claude": "Claude Code", "codex": "Codex", "opencode": "opencode", "cline": "Cline"}
 # Suggestions for the model dropdowns; any other model name can still be entered as "Custom…".
@@ -91,6 +91,8 @@ DEFAULT_SETTINGS = {
 # (None or missing inherits). Each maps to the status of the tasks it acts on when turned on.
 AUTO_MODES = ("auto_plan", "auto_queue")
 AUTO_TARGETS = {"auto_plan": "unplanned", "auto_queue": "planned"}
+# Statuses a task can be paused from; "paused" never matches AUTO_TARGETS or the runner's "queued".
+PAUSABLE = ("unplanned", "drafted", "planned", "queued", "failed")
 
 
 def resolve_auto(project: dict, settings: dict, key: str) -> bool:
@@ -357,8 +359,8 @@ class Settings:
 # Engine.reconcile; every write stamps the current version). 3: the 'review' status exists.
 # 4: a task provider "opencode" means the opencode CLI; older files meant an endpoint with that
 # id, which was renamed (TaskStore applies Settings' provider_renames when loading them).
-# 5: likewise for "cline" (the Cline CLI).
-DOC_VERSION = 5
+# 5: likewise for "cline" (the Cline CLI). 6: the 'paused' status exists.
+DOC_VERSION = 6
 # The tasks.json version from which each CLI id means the CLI rather than an endpoint.
 RESERVED_SINCE = {"opencode": 4, "cline": 5}
 
@@ -428,7 +430,7 @@ def find_task(doc: dict, tid: int) -> dict | None:
 
 
 def new_task(doc: dict, title: str, description: str = "", provider: str = "",
-             plan_model: str = "", code_model: str = "", plan_trust: str = "") -> dict:
+             plan_model: str = "", code_model: str = "", plan_trust: str = "", paused: bool = False) -> dict:
     ts = now()
     task = {
         "id": doc["next_id"],
@@ -453,7 +455,10 @@ def new_task(doc: dict, title: str, description: str = "", provider: str = "",
     }
     doc["next_id"] += 1
     doc["tasks"].append(task)
-    log_event(task, "Created")
+    if paused:
+        task["status"] = "paused"
+        task["paused_from"] = "unplanned"
+    log_event(task, "Created (paused)" if paused else "Created")
     return task
 
 

@@ -13,6 +13,7 @@
   --b-unplanned: #e7e9e5; --t-unplanned: #4a534d;
   --b-planning: #e4ecfb; --t-planning: #2c55a8;
   --b-drafted: #fcead8; --t-drafted: #9a4a00;
+  --b-paused: #ebebeb; --t-paused: #5f5f5f;
   --b-review: #efe5fa; --t-review: #6a3aa8;
   --b-planned: #e3f1e8; --t-planned: #256b41;
   --b-queued: #f7efd9; --t-queued: #7d5b00;
@@ -38,6 +39,7 @@
     --b-unplanned: #2a302c; --t-unplanned: #c3cbc5;
     --b-planning: #1f2d45; --t-planning: #9dbcf5;
     --b-drafted: #3f2a18; --t-drafted: #f2b27a;
+    --b-paused: #2d2d2d; --t-paused: #b0b0b0;
     --b-review: #33254a; --t-review: #cfb2f5;
     --b-planned: #1e3527; --t-planned: #8fd6a9;
     --b-queued: #3a3019; --t-queued: #e8c56d;
@@ -252,6 +254,7 @@ button.link:hover { filter: none; }
 .badge.unplanned { background: var(--b-unplanned); color: var(--t-unplanned); }
 .badge.planning { background: var(--b-planning); color: var(--t-planning); }
 .badge.drafted { background: var(--b-drafted); color: var(--t-drafted); }
+.badge.paused { background: var(--b-paused); color: var(--t-paused); }
 .badge.planned {background: var(--b-planned); color: var(--t-planned); }
 .badge.queued { background: var(--b-queued); color: var(--t-queued); }
 .badge.running { background: var(--b-running); color: var(--t-running); }

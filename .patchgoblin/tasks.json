@@ -1,6 +1,6 @@
 {
   "version": 5,
-  "next_id": 27,
+  "next_id": 30,
   "tasks": [
     {
       "id": 1,
@@ -1223,28 +1223,66 @@
     },
     {
       "id": 21,
-      "title": "add an explicit paused state to keep tasks from being auto changed.",
+      "title": "Add a \"paused\" task status that automation never touches",
       "description": "",
-      "plan": "",
-      "status": "unplanned",
+      "plan": "Add `paused` as a real task status, stored in tasks.json like the others. A task can be paused from `unplanned`, `drafted`, `planned`, `queued` or `failed`. Pausing saves the task's current status in a `paused_from` field. Resuming puts that status back (or `unplanned` if the field is missing). Automation only acts on `unplanned` tasks (Auto-plan, `AUTO_TARGETS`, `create_task`) and on `planned` tasks (`maybe_auto_queue`), and the runner only claims `queued` tasks. So a task whose status is `paused` is skipped by all of them without changing the engine logic. The work is: two new `TRANSITIONS` (`pause` / `resume`) in `app.py`, the new status in `store.py` with a tasks.json version bump, an optional \"create paused\" flag so Auto-plan can't grab a new task before you pause it, and a Paused tab with buttons and batch actions in the UI.\n\n1. **`patchgoblin/store.py`**\n   - Add `\"paused\"` to `STATUSES`, after `\"failed\"`.\n   - Bump `DOC_VERSION` to 6 and add a line to the version comment: \"6: the 'paused' status exists\".\n   - Add `PAUSABLE = (\"unplanned\", \"drafted\", \"planned\", \"queued\", \"failed\")` next to `AUTO_TARGETS`.\n   - In `new_task`, add a `paused: bool = False` parameter. When it's set, create the task as `status=\"paused\"` with `paused_from=\"unplanned\"`, and log \"Created (paused)\".\n\n2. **`patchgoblin/app.py`: transitions**\n   - Add `\"pause\": (PAUSABLE, \"paused\", \"Paused\")` and `\"resume\": ((\"paused\",), None, \"Resumed\")` to `TRANSITIONS`. Import `PAUSABLE`.\n   - In `transition()`:\n     - For `pause`: set `task[\"paused_from\"] = source`. If `source == \"queued\"`, clear `queued_at`.\n     - For `resume`: the target is `task.pop(\"paused_from\", None)` if it is in `PAUSABLE`, else `\"unplanned\"`. A `planned` target goes through `ready_status()`, so a plan that gained questions while paused lands in `drafted`. A `queued` target gets a fresh `queued_at = queued_at or now()` and returns `True` so the caller kicks the runner. Log the message as `f\"Resumed ({target})\"`.\n     - `resume` never calls `maybe_auto_queue` and never starts auto-plan. Resuming is a manual action, and `transition()` already auto-queues only `mark_planned` from `unplanned`.\n   - `BATCH_ACTIONS` already includes all of `TRANSITIONS`, so batch pause/resume works with no extra code.\n\n3. **`patchgoblin/app.py`: create**\n   - In `create_task`, read `paused = data.get(\"paused\") is True` and pass it to `new_task`.\n   - Skip the `engine.auto(pid, \"auto_plan\")` branch when `paused` is set.\n\n4. **`patchgoblin/engine.py`**\n   - No logic changes.\n   - Update the `start_planning` error text if needed. The current `\"Cannot plan a task that is paused.\"` already reads fine.\n   - Add a comment in `_apply_auto` / `maybe_auto_queue` saying paused tasks are skipped on purpose because they never match `AUTO_TARGETS`.\n\n5. **`patchgoblin/static/app.js`**\n   - Add `paused: \"Paused\"` to `STATUS_LABEL` and `paused: \"paused\"` to `COLUMN_OF`.\n   - Add `\"paused\"` to `ACTIONABLE` and `NOT_BUSY`.\n   - Add the drawer buttons in the status `switch`:\n     - `unplanned`, `drafted`, `planned` and `failed` get a ghost \"Pause\" button with the tooltip \"Keep automation (Auto-plan / Auto-queue) from changing this task\".\n     - `queued` gets a \"Pause\" button next to \"Remove from queue\".\n     - A new `case \"paused\":` gets a primary \"Resume\" button plus muted text showing where it will return to (`STATUS_LABEL[t.paused_from || \"unplanned\"]`).\n   - Add `pause` (from the five pausable statuses) and `resume` (from `[\"paused\"]`) to `BATCH_ACTIONS`, and add verbs \"Paused\" / \"Resumed\" to `BATCH_VERB`.\n   - Add an \"Add paused\" checkbox to the new-task form and send `paused: true` in `createTask`. When it's ticked, switch to the `paused` tab after creating.\n\n6. **`patchgoblin/templates/index.html`**\n   - Add `(\"paused\", \"Paused\")` to both column lists (lines 65 and 90), after `finished`. That adds the tab and its panel.\n   - Add the `#nt-paused` checkbox to the new-task form.\n\n7. **`patchgoblin/static/app.css`**\n   - Add `--b-paused` / `--t-paused` colours to the light and dark themes (a neutral grey).\n   - Add `.badge.paused` next to `.badge.drafted` (around line 254).\n\n8. **`README.md`**\n   - Add a \"Paused\" row to the status table (around line 55): \"Set aside by you; Auto-plan and Auto-queue never touch it. Resume returns it to the status it had.\"\n   - Add Pause/Resume to the batch-actions list (around line 124).\n\n9. **`tests/test_patchgoblin.py`**: add tests next to `test_auto_queue_first_plan_only`:\n   - `test_pause_and_resume`: pause from each pausable status; resume restores it. Check that `queued_at` is cleared on pause and reset on resume, and that resume from `queued` kicks the runner (use `hold_runner`). Pausing `review`, `done`, `planning` or `running` returns 400. Resuming a non-paused task returns 400. `plan` on a paused task returns 400. Edit and delete still work while paused.\n   - `test_paused_skipped_by_automation`: create a paused task and a paused planned task. Turn on `auto_plan` and `auto_queue` (both per project and globally via `set_global`). Wait about 0.3 s and check both are still `paused` with no \"Auto-\" events. Then check that creating with `paused: true` and `auto_plan` on returns `paused`, not `planning`.\n   - Add a batch test for `pause` / `resume`, including a partial failure on an ineligible status.\n   - Add a check that a written doc has `version == 6`.\n\n## Verification\n- `.venv\\Scripts\\python -m pytest tests -q`: all existing tests plus the new ones pass.\n- Manual: run the app with Auto-plan and Auto-queue on for a project.\n  - Create a task with \"Add paused\" ticked: it stays in the Paused tab.\n  - Pause a planned task, then toggle Auto-queue off and back on: it doesn't move.\n  - Resume it: it goes back to Planned and isn't auto-queued.\n  - Pause a queued task, then resume it: it runs.\n- Open `.patchgoblin/tasks.json` and check for `\"status\": \"paused\"`, `paused_from`, and `\"version\": 6`.\n\n## Assumptions\n- \"Paused\" is a new status with its own tab, not a flag on top of the existing status. \"Explicit state\" points this way, and every automation path already filters by status.\n- Tasks can be paused from `unplanned`, `drafted`, `planned`, `queued` and `failed`. `review` and `done` are never changed by automation, and `planning` / `running` have to be cancelled first.\n- Resuming doesn't trigger Auto-plan or Auto-queue. This matches the existing rule that only a first plan, or a mode being switched on, is automated.\n- Resuming a task that was paused from `queued` re-queues it at the back of the queue, with a new `queued_at`.\n- Paused tasks can still be edited and deleted (they aren't in `LOCKED`).\n- The Paused tab goes after Finished.\n\n## Risks\n- **Older PatchGoblin versions:** an older copy that reads a tasks.json containing `paused` (for example on another machine after git sync) will show an unknown status, and its `set_status` assert only covers its own transitions. The version bump to 6 only records this; nothing enforces it.\n- **`resume` target:** `transition()` currently reads a fixed target status from `TRANSITIONS`. Make sure `resume`'s dynamic target still goes through the existing `ready_status` / drafted checks in the right order, and that the \"Plan still has open questions\" error branch, which applies when the source is `drafted`, can't fire for `resume`.\n- **Pausing a queued task:** the runner claims tasks inside `store.edit`. Pausing must happen inside the same `store.edit` block (which `apply_action` already does) so the runner can't claim the task halfway through.\n- **UI tab state:** `validTab` comes from `COLUMN_OF`, so the new `paused` column must be added there. Otherwise a saved `pg.tab = \"paused\"` falls back to Unplanned.\n\n## Questions for you\nNone.",
+      "status": "review",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "created_at": "2026-09-28T15:49:16+00:00",
-      "updated_at": "2026-09-28T15:49:16+00:00",
-      "queued_at": null,
-      "started_at": null,
-      "finished_at": null,
-      "output": "",
+      "updated_at": "2026-10-01T20:19:09+00:00",
+      "queued_at": "2026-10-01T20:12:45+00:00",
+      "started_at": "2026-10-01T20:12:45+00:00",
+      "finished_at": "2026-10-01T20:19:09+00:00",
+      "output": "`paused` is now a real task status with Pause and Resume actions. The full suite passed except two failures, and both are fixed. I re-ran only the Automation and Opencode test classes afterwards (23 tests, all OK), not the full suite. I didn't do the manual run in the app.\n\n- **Backend:** `store.py` has the `paused` status, `PAUSABLE`, `DOC_VERSION = 6`, and a `paused` option on `new_task`. In `app.py`, `pause` and `resume` are new transitions, so batch pause and resume work without extra code. `resume` restores `paused_from`, falls back to `unplanned`, and runs a planned target through `ready_status`. A task resumed to `queued` gets a fresh `queued_at` and kicks the runner. Creating with `paused: true` skips Auto-plan. `engine.py` only gained comments.\n- **UI:**\n  - **Paused tab and buttons:** `app.js`, `index.html` and `app.css` have the Paused tab and badge. They also have drawer Pause and Resume buttons, the batch actions, and an \"Add paused\" checkbox that switches to the Paused tab after creating.\n  - **README:** it has the new status row and batch-actions entry.\n- **Tests:** I added tests for pause and resume, resume landing in `drafted` when the plan gained questions, automation skipping paused tasks, and batch pause and resume with a partial failure. Two existing tests expected `version` 5, so I changed them to 6.\n- **Test runner:** pytest isn't installed in `.venv`, so I ran the suite with `python -m unittest discover -s tests`.\n\nThe first full run had one real failure, which was the stale version-5 expectation, and one error from my own batch test calling a helper that didn't exist in that class. Both are fixed.",
       "error": "",
       "commit": "",
       "history": [
         {
           "at": "2026-09-28T15:49:16+00:00",
           "event": "Created"
+        },
+        {
+          "at": "2026-10-01T20:00:30+00:00",
+          "event": "Auto-planned: AI planning started"
+        },
+        {
+          "at": "2026-10-01T20:02:06+00:00",
+          "event": "Title rewritten by AI (was: add an explicit paused state to keep tasks from being auto changed.)"
+        },
+        {
+          "at": "2026-10-01T20:02:06+00:00",
+          "event": "AI plan ready"
+        },
+        {
+          "at": "2026-10-01T20:05:25+00:00",
+          "event": "Auto-queued"
+        },
+        {
+          "at": "2026-10-01T20:05:25+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-10-01T20:05:25+00:00",
+          "event": "AI run failed"
+        },
+        {
+          "at": "2026-10-01T20:12:45+00:00",
+          "event": "Queued for AI"
+        },
+        {
+          "at": "2026-10-01T20:12:45+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-10-01T20:19:09+00:00",
+          "event": "AI run finished; awaiting review"
         }
-      ]
+      ],
+      "prev_status": "unplanned",
+      "review_feedback": ""
     },
     {
       "id": 22,
@@ -1342,90 +1380,23 @@
       "review_feedback": ""
     },
     {
-      "id": 23,
-      "title": "Make the sidebar \"checking\" reachability dot static instead of pulsing",
-      "description": "",
-      "plan": "The only follow-up is in the CSS. The dot pulses only in its grey \"checking\u2026\" state, through a dedicated `p-dot-pulse` animation in `patchgoblin/static/app.css`. The green and red dots are already static, and the JS doesn't set any animation. Remove the animation and its keyframes and reduced-motion rule, and leave a solid muted-grey dot. It will still look different from the green and red states. No backend, JS or test changes are needed.\n\n## Steps\n\n1. **`patchgoblin/static/app.css` line 147**: change `.p-dot.checking { opacity: .5; animation: p-dot-pulse 1.4s ease-in-out infinite; }` to `.p-dot.checking { opacity: .5; }`. The base `.p-dot` rule on line 144 already sets the colour to `var(--muted)`. The `.5` opacity keeps \"checking\" visibly different from a real result.\n2. **`patchgoblin/static/app.css` line 148**: delete `@keyframes p-dot-pulse { 50% { opacity: .15; } }`.\n3. **`patchgoblin/static/app.css` line 149**: delete `@media (prefers-reduced-motion: reduce) { .p-dot.checking { animation: none; } }`, since nothing animates any more.\n4. Leave the shared `@keyframes pulse` (line 266) and its reduced-motion block (lines 267\u2013269) alone. They drive the queue-tab activity dot and the planning/running badges, which the feedback doesn't cover.\n\n## Verification\n\n- Search `app.css` for `p-dot-pulse`; there should be no matches.\n- Manual check: hard-refresh the app. On first load, each dot shows as a steady grey for a moment. It then turns green or red without any flashing. Rename a project folder and switch tabs to trigger a re-check. The dot should turn solid red with the \"Directory does not exist\" tooltip. The running and planning badges should still pulse.\n- Optionally run `python -m unittest tests.test_patchgoblin` to confirm nothing else changed. This is CSS only, so no test results should change.\n\n## Assumptions\n\n- \"Make the indicator static\" means removing the pulse from the grey \"checking\" state, the only state that animates. The dot and tooltip stay as they are.\n- The grey keeps `opacity: .5` so \"checking\" still looks different from the solid green and red states.\n- Re-checks don't need changes. `loadReachability` keeps the previous `state.reach` until new results arrive, so after the first load dots never go back to grey.\n\n## Risks\n\n- Don't touch the shared `pulse` keyframes or their reduced-motion rule. Other indicators still use them.\n- Browsers may serve cached CSS. Hard-refresh during manual checks, or bump the cache-busting query string if the app uses one.\n\n## Questions for you\n\nNone.",
-      "status": "planned",
-      "provider": "",
-      "plan_model": "",
-      "code_model": "",
-      "plan_trust": "",
-      "created_at": "2026-09-28T23:57:07+00:00",
-      "updated_at": "2026-09-30T11:35:23+00:00",
-      "queued_at": "2026-09-29T11:27:13+00:00",
-      "started_at": "2026-09-29T11:27:13+00:00",
-      "finished_at": "2026-09-29T11:33:20+00:00",
-      "output": "[2026-09-30T11:34:53+00:00] plan with claude in g:\\My Drive\\Projects\\PatchGoblin\n$ claude -p --output-format text --allowedTools Read,Glob,Grep --disallowedTools Edit,Write,NotebookEdit,Bash\nTitle: Make the sidebar \"checking\" reachability dot static instead of pulsing\n\nThe only follow-up is in the CSS. The dot pulses only in its grey \"checking\u2026\" state, through a dedicated `p-dot-pulse` animation in `patchgoblin/static/app.css`. The green and red dots are already static, and the JS doesn't set any animation. Remove the animation and its keyframes and reduced-motion rule, and leave a solid muted-grey dot. It will still look different from the green and red states. No backend, JS or test changes are needed.\n\n## Steps\n\n1. **`patchgoblin/static/app.css` line 147**: change `.p-dot.checking { opacity: .5; animation: p-dot-pulse 1.4s ease-in-out infinite; }` to `.p-dot.checking { opacity: .5; }`. The base `.p-dot` rule on line 144 already sets the colour to `var(--muted)`. The `.5` opacity keeps \"checking\" visibly different from a real result.\n2. **`patchgoblin/static/app.css` line 148**: delete `@keyframes p-dot-pulse { 50% { opacity: .15; } }`.\n3. **`patchgoblin/static/app.css` line 149**: delete `@media (prefers-reduced-motion: reduce) { .p-dot.checking { animation: none; } }`, since nothing animates any more.\n4. Leave the shared `@keyframes pulse` (line 266) and its reduced-motion block (lines 267\u2013269) alone. They drive the queue-tab activity dot and the planning/running badges, which the feedback doesn't cover.\n\n## Verification\n\n- Search `app.css` for `p-dot-pulse`; there should be no matches.\n- Manual check: hard-refresh the app. On first load, each dot shows as a steady grey for a moment. It then turns green or red without any flashing. Rename a project folder and switch tabs to trigger a re-check. The dot should turn solid red with the \"Directory does not exist\" tooltip. The running and planning badges should still pulse.\n- Optionally run `python -m unittest tests.test_patchgoblin` to confirm nothing else changed. This is CSS only, so no test results should change.\n\n## Assumptions\n\n- \"Make the indicator static\" means removing the pulse from the grey \"checking\" state, the only state that animates. The dot and tooltip stay as they are.\n- The grey keeps `opacity: .5` so \"checking\" still looks different from the solid green and red states.\n- Re-checks don't need changes. `loadReachability` keeps the previous `state.reach` until new results arrive, so after the first load dots never go back to grey.\n\n## Risks\n\n- Don't touch the shared `pulse` keyframes or their reduced-motion rule. Other indicators still use them.\n- Browsers may serve cached CSS. Hard-refresh during manual checks, or bump the cache-busting query string if the app uses one.\n\n## Questions for you\n\nNone.\n",
-      "error": "",
-      "commit": "",
-      "review_feedback": "right now it pulses, maybe make the indicator static",
-      "history": [
-        {
-          "at": "2026-09-28T23:57:07+00:00",
-          "event": "Created"
-        },
-        {
-          "at": "2026-09-28T23:57:41+00:00",
-          "event": "AI planning started"
-        },
-        {
-          "at": "2026-09-28T23:58:53+00:00",
-          "event": "Title rewritten by AI (was: add an indicator to the project listing to the left to show if they are accessible)"
-        },
-        {
-          "at": "2026-09-28T23:58:53+00:00",
-          "event": "AI plan ready"
-        },
-        {
-          "at": "2026-09-29T11:27:13+00:00",
-          "event": "Queued for AI"
-        },
-        {
-          "at": "2026-09-29T11:27:13+00:00",
-          "event": "AI run started"
-        },
-        {
-          "at": "2026-09-29T11:33:20+00:00",
-          "event": "AI run finished; awaiting review"
-        },
-        {
-          "at": "2026-09-30T11:34:53+00:00",
-          "event": "Sent back after review with feedback"
-        },
-        {
-          "at": "2026-09-30T11:34:53+00:00",
-          "event": "AI re-planning started with review feedback"
-        },
-        {
-          "at": "2026-09-30T11:35:23+00:00",
-          "event": "Title rewritten by AI (was: Show a reachability status dot next to each project in the sidebar)"
-        },
-        {
-          "at": "2026-09-30T11:35:23+00:00",
-          "event": "AI plan ready"
-        }
-      ],
-      "prev_status": "review"
-    },
-    {
       "id": 24,
       "title": "Make git tracking an opt-in per-project setting that can be enabled later",
       "description": "",
       "plan": "New projects will start without git tracking. A new per-project boolean, `git_tracking`, controls whether PatchGoblin runs any git operation on the project: `git init`, the initial commit, checkpoint and task commits, the Commits and Sync views, remote settings and auto-sync. The add-project dialog gets a \"Track with git\" checkbox that is off by default. Project settings shows a \"Turn on git tracking\" button for untracked projects. That button calls a new endpoint that runs the existing `gitops.ensure_repo` and initial-commit logic and then sets the flag. Projects already registered have repos and will be migrated to `git_tracking: true`, so their behaviour doesn't change. When tracking is off, the two things that currently depend on git in `providers.py` need fallbacks: the OpenAI agent's `list_files` and `search` tools, and the \"planning must not edit files\" check. This matters most for a directory nested inside some other repo, where plain `git` commands would act on the parent repo.\n\n## Steps\n\n1. **`patchgoblin/store.py` \u2013 `Registry._migrate`**: for every project dict with no `\"git_tracking\"` key, set `p[\"git_tracking\"] = True` and mark `changed`. The existing `.bak` backup and save logic stays as it is. Update the docstring. New projects always get the key explicitly, so after migration the key is always present.\n\n2. **Add a helper `tracked(project) -> bool`** returning `project.get(\"git_tracking\") is True`, in the same style as the `auto_sync` checks. Put it in `gitops.py` so that `app.py`, `engine.py` and `providers.py` can all import it.\n\n3. **`patchgoblin/app.py`**\n   - `add_project`: read `track = data.get(\"git_tracking\") is True` and store `fields[\"git_tracking\"] = track`. Only run `gitops.ensure_repo(...)` and the `\"PatchGoblin: initial commit\"` when `track` is true. The `tasks.json` creation stays unconditional.\n   - New endpoint `POST /api/projects/<pid>/git/enable`:\n     - Reject with `ValueError` if `engine.busy(pid)` or any task is `LOCKED`, the same guard `sync_remote` uses.\n     - Run `created = gitops.ensure_repo(host, path)`. If a repo was created, or the repo has no HEAD yet, run `gitops.commit_all(host, path, \"PatchGoblin: initial commit\")`.\n     - Call `registry.update(pid, {\"git_tracking\": True})` and return the updated project.\n     - Do the git work before saving, so a git failure leaves `projects.json` untouched. This follows the pattern already used for `remote_url`.\n   - `update_project`:\n     - Accept `\"git_tracking\": false` to stop tracking. This only flips the flag; `.git` is never deleted.\n     - Reject `\"git_tracking\": true` here with a message pointing to the enable endpoint, so repo creation stays in one place.\n     - Reject `remote_url`, `auto_sync` and `sync_mode` edits while the project is untracked. Ignoring them would also work, but rejecting is clearer.\n   - `commits`, `get_remote`, `put_remote` and `sync_remote`: if `not tracked(project)`, raise `ValueError(\"Git tracking is off for this project.\")`. `commits` could instead return an empty list, but it should raise for consistency.\n   - `/api/projects/<pid>/tasks/<tid>/changes` (around line 792, `commit_files`): return `[]` when untracked.\n\n4. **`patchgoblin/engine.py`**\n   - `_execute`: wrap the pre-run checkpoint (lines 413\u2013415) and the post-run `commit_all`/auto-sync block (lines 439\u2013447) in `if gitops.tracked(project):`.\n   - For untracked projects, still move the task to review. Log the event `\"Git tracking off; nothing committed\"` and leave `current[\"commit\"]` as `\"\"`.\n   - `sync` and `_auto_sync`: return or raise early when untracked. The API layer checks too, but the engine should protect itself.\n\n5. **`patchgoblin/providers.py`**\n   - `_no_plan_edits`/`_fingerprint`: pass the project's tracking state through the call site (the `tracked` flag, or `None`). When the project is untracked, log `\"Git tracking is off; planning edits aren't checked.\\n\"` and return `None`. The check is then skipped, which is the existing \"never fail a plan because of git\" path.\n   - `OpenAIAgent`: take a `tracked` flag.\n     - When untracked, `search` uses `git grep --no-index --exclude-standard -n -I -E -e <pattern>`. `--no-index` stops git from resolving a parent repository.\n     - `list_files` needs a non-repo source. Add `gitops.list_files(host, path, tracked)`:\n       - Tracked: keep the current `ls-files --cached --others --exclude-standard`.\n       - Untracked: run `git grep --no-index --exclude-standard -l -I -e \"\"`, which lists text files that respect `.gitignore`, in one call that also works over SSH. Merge that with a filter that drops `.git/` and `.patchgoblin/`.\n   - Thread `project` or `tracked` through wherever `OpenAIAgent` is built.\n\n6. **`patchgoblin/templates/index.html`**\n   - In the add-project dialog, replace the \"A git repository is initialized\u2026\" note (line 327) with `<label class=\"check\"><input type=\"checkbox\" name=\"git_tracking\"> Track with git (initialize a repository and commit each finished task)</label>`, unchecked.\n   - In the project settings Git fieldset, add:\n     - a `#ps-git-off` block with the text \"Git tracking is off.\" and a `#ps-git-enable-btn` button labelled \"Turn on git tracking\".\n     - a \"Stop tracking (keeps .git)\" checkbox or button inside the tracked section.\n   - Update the empty-state copy (line 37) and the remove-project note so they no longer promise git.\n\n7. **`patchgoblin/static/app.js`**\n   - The add-project `onsubmit` (around line 1344) sends `git_tracking: form.git_tracking.checked`.\n   - `openProjectSettings` (around line 319) shows or hides the tracked controls based on `p.git_tracking === true`, and skips `loadSettingsRemote` when untracked.\n   - `saveProjectSettings` sends `auto_sync`, `sync_mode` and `remote_url` only when the project is tracked.\n   - The enable button: `api(\"POST\", `/api/projects/${pid}/git/enable`)`, then update `state` and re-render the dialog.\n   - In `selectProject`/project header rendering, hide `#commits-btn` and `#sync-btn` when untracked.\n\n8. **`README.md`**: document the default (untracked), how to turn tracking on later, and that turning it off keeps `.git`.\n\n## Verification\n- Tests in `tests/test_patchgoblin.py`:\n  - Change the `add_project` helper to send `git_tracking: True` by default, so the existing git and sync tests keep their meaning.\n  - `test_add_project_untracked_by_default`: posting without the field creates no `.git` and still creates `tasks.json`, and the project has `git_tracking` false.\n  - `test_untracked_project_nested_in_repo_is_not_committed`: `git init` the temp parent, add the project inside it untracked, run a task to review, and assert the parent repo's log and status index are unchanged.\n  - `test_enable_git_tracking_later`: with an untracked project, POST `/git/enable` creates `.git` and `.gitignore`, `git_log == [\"PatchGoblin: initial commit\"]`, the flag is true, and a subsequent task run records a commit.\n  - `test_enable_on_existing_repo_does_not_recommit`: covered by the existing repo-left-alone behaviour.\n  - `test_git_endpoints_rejected_when_untracked`: commits, remote and sync each return 400.\n  - `test_registry_migration`: extend it to assert that legacy entries get `git_tracking: True`.\n  - An OpenAI-agent tool test: `list_files` and `search` work in an untracked directory that is nested in a repo, and return only that directory's files.\n- Run `python -m unittest discover tests` (or the project's usual runner).\n- Manual check (the `run` skill):\n  - Add a project with the box unchecked. Confirm that Commits and Sync are hidden and that a task runs to review.\n  - Turn tracking on in Project settings. Confirm that Commits shows the initial commit.\n\n## Assumptions\n- The field is named `git_tracking`. New projects default to `false`, and existing registered projects are migrated to `true` because they already have repos and task commits.\n- Adding a folder that is already a repo root still defaults to untracked, as the task says. The user can turn tracking on later, and that won't create a new commit when HEAD exists.\n- Turning tracking off is allowed and never deletes `.git` or history. Turning it on goes through a dedicated endpoint because it has side effects.\n- Untracked projects skip the planning \"must not edit files\" check with a logged note, rather than reimplementing file fingerprinting without git.\n- Untracked projects still keep `.patchgoblin/tasks.json` in the project directory.\n- Tasks in untracked projects go to review with no `commit`. The task detail pane's changes view already hides itself when there's no commit.\n\n## Risks\n- **Parent-repo leakage**: without `.git` in the project, any unguarded `git` call (`status`, `add -A`, `commit`, `ls-files`, `grep`) runs against an enclosing repository. Audit every `gitops.`/`git(` call site; the nested-repo test above is the safety net.\n- Existing tests assume `add_project` creates a repo. Changing the helper default is required, and `test_existing_repo_is_left_alone` may need `git_tracking: True`.\n- `git grep --no-index -l -e \"\"` skips empty and binary files in the untracked `list_files`. That's acceptable for an AI file list, but note it in a comment.\n- The CLI agents (Claude Code, Codex, Cline) might run git themselves. The run prompt says \"changes are committed automatically\"; when a project is untracked, adjust or drop that sentence in `providers.py:102`.\n- If enabling fails partway (after `git init`, before the flag is saved), the flag stays false and a retry is safe because `ensure_repo` is idempotent.\n- The migration writes `projects.json.bak` only if it doesn't exist yet. A backup from an earlier migration will stay, which is fine.\n\n## Questions for you\nNone.",
-      "status": "review",
+      "status": "done",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "created_at": "2026-09-30T11:27:43+00:00",
-      "updated_at": "2026-09-30T11:45:36+00:00",
+      "updated_at": "2026-10-01T20:05:55+00:00",
       "queued_at": "2026-09-30T11:32:37+00:00",
       "started_at": "2026-09-30T11:32:37+00:00",
       "finished_at": "2026-09-30T11:45:36+00:00",
       "output": "I've made all the planned changes and verified them with the earlier full-suite run (which surfaced and I fixed two test fixture issues). The confirmation rerun is still executing in the background \u2014 I'll report its result once the completion notification arrives, rather than continue polling.",
       "error": "",
-      "commit": "",
+      "commit": "88ecc139f95ad80c0951f8652c22d1d5efe204af",
       "review_feedback": "",
       "history": [
         {
@@ -1455,52 +1426,89 @@
         {
           "at": "2026-09-30T11:45:36+00:00",
           "event": "AI run finished; awaiting review"
+        },
+        {
+          "at": "2026-09-30T11:45:39+00:00",
+          "event": "Committed 88ecc139f9"
+        },
+        {
+          "at": "2026-10-01T20:05:55+00:00",
+          "event": "Approved by engineer"
         }
       ],
       "prev_status": "unplanned"
     },
     {
       "id": 25,
-      "title": "Add a button near Terminal that opens the project directory in vs code",
+      "title": "Add a \"VS Code\" button that opens the project directory in VS Code",
       "description": "",
-      "plan": "",
-      "status": "unplanned",
+      "plan": "Add a **VS Code** button next to **Terminal**, built the same way as the Terminal feature. A pure helper `vscode_command(host, path, platform, which)` in `patchgoblin/hosts.py` works out the command to run, and a launcher `open_vscode(project)` starts it without waiting. A new `POST /api/projects/<pid>/vscode` route in `patchgoblin/app.py` calls the launcher. Local projects run `code <path>`. SSH projects run `code --remote ssh-remote+<target> <path>`, which uses the VS Code Remote-SSH extension. If the `code` command isn't on PATH, macOS falls back to `open -a \"Visual Studio Code\" <path>`, and every other case raises a clear `HostError`. That error already becomes a 502 with a message, and the frontend shows it as a toast.\n\n## Steps\n\n1. **`patchgoblin/hosts.py`: add `vscode_command`** below `terminal_command` (around line 376):\n   ```python\n   def vscode_command(host, path: str, platform: str = sys.platform,\n                      which: Callable[[str], Optional[str]] = shutil.which) -> list[str]:\n       \"\"\"Argv that opens ``path`` in VS Code on this computer (via Remote-SSH for SSH projects).\"\"\"\n   ```\n   - Find the `code` executable with `which(\"code\")`. On Windows this resolves to `code.cmd`. If that fails on win32, also try `%LOCALAPPDATA%\\Programs\\Microsoft VS Code\\bin\\code.cmd` (the default per-user install location), passed in through the same `which`/an `exists` check so it can be tested.\n   - Local project: `[code, path]`.\n   - SSH project: `[code, \"--remote\", f\"ssh-remote+{host.target}\", path]`. If `host.port` is set, raise `HostError(\"VS Code Remote-SSH needs an ~/.ssh/config Host alias for a custom port; use the alias as the SSH target.\")`. Use the real attribute names from `SSHHost.__init__`, the ones `shell_argv` already uses (`self.target`, `self.port`).\n   - If `code` isn't found: on darwin with a local project, return `[\"open\", \"-a\", \"Visual Studio Code\", path]`. Otherwise raise `HostError(\"VS Code's 'code' command was not found on PATH. In VS Code run \\\"Shell Command: Install 'code' command in PATH\\\".\")`.\n\n2. **`patchgoblin/hosts.py`: add `open_vscode(project)`**, modelled on `open_terminal`:\n   - Check that the directory exists for local projects.\n   - Call `subprocess.Popen(argv, stdin/stdout/stderr=DEVNULL, ...)`.\n   - On Windows use `creationflags=subprocess.CREATE_NO_WINDOW`, not `CREATE_NEW_CONSOLE`, so running `code.cmd` doesn't flash a console window. Elsewhere use `start_new_session=True`.\n   - Wrap `OSError` in `HostError(\"Could not open VS Code: \u2026\")`.\n   - To avoid copying the Popen block, pull it out of `open_terminal` into a small `_spawn(argv, cwd, creationflags)` helper that both functions use.\n\n3. **`patchgoblin/app.py`**:\n   - Import `open_vscode` on line 16.\n   - Add the route after `terminal` (line 554):\n     ```python\n     @app.post(\"/api/projects/<pid>/vscode\")\n     def vscode(pid):\n         open_vscode(project_or_404(pid))\n         return jsonify(ok=True)\n     ```\n\n4. **`patchgoblin/templates/index.html`** line 50: add this right after the Terminal button:\n   `<button class=\"ghost\" id=\"vscode-btn\" title=\"Open the project directory in VS Code\">VS Code</button>`\n\n5. **`patchgoblin/static/app.js`** around line 1649: add a click handler that mirrors `#terminal-btn`. It calls `api(\"POST\", `/api/projects/${state.pid}/vscode`)`, shows `toast(\"VS Code opened\")` on success, and `toast(e.message, true)` on failure.\n\n6. **`tests/test_patchgoblin.py`**:\n   - Add `test_open_vscode` next to `test_open_terminal` (line 207). Patch `patchgoblin.hosts.subprocess.Popen` and `patchgoblin.hosts.shutil.which` to return a fake `code` path. Check for a 200, one Popen call, `proj_dir` in argv, a 403 without the header, and a 404 for an unknown project.\n   - Add `test_vscode_commands` next to `test_terminal_commands` (line 1349), reusing its `have(...)` helper. Cover: local on linux/win32 \u2192 `[code, path]`; SSH \u2192 contains `--remote` and `ssh-remote+me@box`; SSH with a port \u2192 `HostError`; no `code` on darwin \u2192 the `open -a` fallback; no `code` on linux \u2192 `HostError`.\n\n## Verification\n- Run `python -m pytest tests/test_patchgoblin.py -k \"vscode or terminal\"`, then the full suite.\n- Manual check: start the app, open a local project and click **VS Code**. VS Code should open in that folder with no stray console window on Windows. Rename `code` off PATH (or test on a machine without it) and confirm the error toast appears. If an SSH project is available, confirm Remote-SSH opens the remote folder.\n\n## Assumptions\n- VS Code is launched on the machine running PatchGoblin, the same as Terminal.\n- SSH projects use Remote-SSH (`--remote ssh-remote+<target>`) instead of being refused. The button doesn't check whether the extension is installed; VS Code shows its own prompt if it isn't.\n- SSH projects with a custom port raise an error rather than trying an unreliable `host:port` authority.\n- The button label is \"VS Code\" and it goes right after \"Terminal\".\n- The button shows for every project and isn't hidden when `code` is missing. The error toast explains what to do.\n\n## Risks\n- **Running `code.cmd` on Windows:** Popen runs it through `cmd.exe`, so a path containing `&`, `^` or `%` could be misread (the \"BatBadBut\" problem). Project paths come from the user's own registry, so the risk is low. Still, test with a path that has spaces, which is the common case here (`G:\\My Drive\\...`).\n- **No `shell=True`:** don't use it, and don't build a command string; keep argv as a list.\n- **Wrong window flag:** `CREATE_NEW_CONSOLE` would leave an empty console window open after `code.cmd` exits. Use `CREATE_NO_WINDOW`.\n- **PATH differences:** PATH may differ when PatchGoblin runs as a service or from a launcher that doesn't load the user's PATH. This is why there's a fallback to the default install location.\n- **SSH targets:** the target is used straight in `ssh-remote+\u2026`. Targets that contain unusual characters may need VS Code's hex-encoded authority form; that's out of scope.\n\n## Questions for you\nNone.",
+      "status": "queued",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "created_at": "2026-09-30T11:28:28+00:00",
-      "updated_at": "2026-09-30T11:28:28+00:00",
-      "queued_at": null,
-      "started_at": null,
-      "finished_at": null,
+      "updated_at": "2026-10-01T20:12:45+00:00",
+      "queued_at": "2026-10-01T20:12:45+00:00",
+      "started_at": "2026-10-01T20:05:25+00:00",
+      "finished_at": "2026-10-01T20:05:25+00:00",
       "output": "",
-      "error": "",
+      "error": "git status failed: Command not found: git",
       "commit": "",
       "review_feedback": "",
       "history": [
         {
           "at": "2026-09-30T11:28:28+00:00",
           "event": "Created"
+        },
+        {
+          "at": "2026-10-01T20:00:30+00:00",
+          "event": "Auto-planned: AI planning started"
+        },
+        {
+          "at": "2026-10-01T20:01:46+00:00",
+          "event": "Title rewritten by AI (was: Add a button near Terminal that opens the project directory in vs code)"
+        },
+        {
+          "at": "2026-10-01T20:01:46+00:00",
+          "event": "AI plan ready"
+        },
+        {
+          "at": "2026-10-01T20:05:25+00:00",
+          "event": "Auto-queued"
+        },
+        {
+          "at": "2026-10-01T20:05:25+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-10-01T20:05:25+00:00",
+          "event": "AI run failed"
+        },
+        {
+          "at": "2026-10-01T20:12:45+00:00",
+          "event": "Queued for AI"
         }
-      ]
+      ],
+      "prev_status": "unplanned"
     },
     {
       "id": 26,
-      "title": "Add the ability to see what is happening live in the ide",
+      "title": "Show a live activity feed of what the AI agent is doing in PatchGoblin",
       "description": "",
-      "plan": "",
-      "status": "unplanned",
+      "plan": "PatchGoblin already has a live view: the task drawer polls `/live` and prints the job's raw output in a `<pre>`. With the default Claude Code command it shows almost nothing. `claude -p --output-format text` prints only the final answer when the job ends, so you see the `$ claude \u2026` line and then wait. The fix is to get structured, step-by-step output from the agents and show it in PatchGoblin as a readable activity feed: \"Reading engine.py\", \"Editing app.py\", \"Running `pytest`\", plus the agent's own messages as they arrive. Claude Code will run with `--output-format stream-json --verbose`. A new parser turns its JSON lines into activity events and takes the final answer from the closing `result` event. The OpenAI-compatible agent emits the same events from its tool loop. Other CLIs (Codex, opencode, Cline) keep their raw output as it streams today. The drawer gets a proper \"Live activity\" panel, with a Raw tab kept as a fallback. Active task cards on the board show a one-line \"now: \u2026\" status. The chat panel shows the same feed while a reply is being written. Nothing is written to files in the project; the file-mirroring idea from the earlier plan is dropped.\n\n1. **`patchgoblin/engine.py`, `Job`**: add structured activity next to the raw text buffer.\n   - `self._events: list[dict]`, capped at `MAX_EVENTS = 500` (drop the oldest), and `self.current: str`.\n   - `event(kind, label, detail=\"\")`, where `kind` is one of `\"say\"` (agent text), `\"tool\"`, `\"error\"` or `\"note\"`. It appends `{\"at\": elapsed seconds, \"kind\", \"label\", \"detail\"}` (detail clipped to ~4000 chars) under the lock and sets `current` for `tool`/`say` events. It also writes a readable line to the raw buffer through `self.write`, so the raw log still tells the whole story.\n   - `events()` returns a copy.\n2. **`patchgoblin/providers.py`, Claude stream parser**: add `run_claude(cfg, mode, prompt, *, host, cwd, model, timeout, job)`.\n   - If the argv from `cli_argv` contains `stream-json`, wrap the job in a `_StreamJson` adapter (same pattern as `_PlainLog`).\n   - The adapter buffers partial lines and runs `json.loads` on each complete line. Non-JSON lines and stderr go to `job.write` unchanged.\n   - It maps events as follows:\n     - `system`/`init` becomes a `note` with the model and working directory.\n     - `assistant` text blocks become `say`.\n     - `assistant` `tool_use` blocks become `tool`, labelled by `describe_tool(name, input)`: Read/Edit/Write/MultiEdit/NotebookEdit become \"Reading/Editing/Writing `<path relative to cwd>`\"; Bash becomes \"Running `<command>`\" (with its description as detail); Grep/Glob become \"Searching `<pattern>`\"; TodoWrite becomes \"Updating plan\" (todo list as detail); Task becomes \"Starting sub-agent\"; anything else becomes the tool name with its JSON input clipped to 200 chars.\n     - `user` `tool_result` blocks with `is_error` become an `error` event with the clipped content.\n     - `result` sets `result_text` and `is_error`, and emits a `note` with duration, turns and cost when present.\n   - After `run_cli` returns, replace `outcome.text` with the `result` event's text. That keeps plan, title and question parsing unchanged. If there is no `result` event, fail with \"Claude Code ended without a result\" plus the stderr tail. If `is_error`, fail with its text.\n   - If the argv has no `stream-json` (a user's custom text-mode command), fall back to plain `run_cli` as today.\n   - In `run_ai`, route `provider == \"claude\"` to `run_claude`.\n3. **`providers.py`, `OpenAIAgent.run`**: replace the `job.write(content\u2026)` line with `job.event(\"say\", \u2026)`. Replace the `\u2192 name args` line with `job.event(\"tool\", describe_tool(name, args))`, so endpoint agents get the same feed (map `read_file`, `write_file`, `run_command`, `search` and `list_files` in `describe_tool`). Tool errors become `error` events.\n4. **`patchgoblin/store.py`**:\n   - Change the `claude` defaults in `DEFAULT_SETTINGS` to `claude -p --output-format stream-json --verbose \u2026`, keeping the same allowed and disallowed tool flags.\n   - In `Settings._migrate`, if the saved `commands.claude.plan`/`run` exactly equal the old text-mode defaults (keep them as `LEGACY_CLAUDE_COMMANDS`), remove those keys so the new defaults apply. Leave custom commands alone.\n5. **`patchgoblin/app.py`**:\n   - `live()`: also return `events=job.events()` and `current=job.current`. The raw `output` stays.\n   - `task_view`: add `activity` (the job's `current`, or `\"\"`) so the board can show it without an extra request.\n   - The chat GET endpoint: add `events`/`current` from `chat.job`.\n6. **`patchgoblin/templates/index.html`**: rework `#d-live-wrap` into a \"Live activity\" section.\n   - The header shows a pulsing dot, `#d-current` (current step), job kind (Planning/Running) and `#d-elapsed`.\n   - Two tabs: \"Activity\" (`<ol id=\"d-activity\" class=\"activity\">`) and \"Raw output\" (the existing `#d-live` pre).\n   - Add a \"Cancel\" shortcut if one isn't already in the flow actions.\n   - Do the same for chat: `#c-activity` inside `#c-live-wrap`, with the raw pre behind a toggle.\n7. **`patchgoblin/static/app.js`**:\n   - Add `renderActivity(list, events)`. Each `<li>` shows a kind icon (\ud83d\udcac say, \ud83d\udd27 tool, \u26a0 error, \u00b7 note), the label, a muted `+Ns` timestamp, and a collapsible `<details>` for long detail.\n   - Add an `activityAtBottom` check so it only auto-scrolls when the user is already at the bottom.\n   - Rebuild only appended items: keep a rendered count, and re-render fully if the list shrank (cap rollover or a new job).\n   - `pollLive()`: render events, set `#d-current`, use the Activity tab when `events.length`, otherwise default to Raw (Codex/opencode/Cline). Poll every 1000 ms.\n   - `renderChat()`: same for chat.\n   - Board card renderer: for `t.active && t.activity`, add a single-line, ellipsized `card-activity` element (\"\u25b6 Editing app.py\").\n8. **`patchgoblin/static/app.css`**: styles for `.activity` (compact rows, monospace labels, error colour, say rows in normal text with pre-wrap), the pulsing live dot, tabs, and `.card-activity`.\n9. **`README.md`**: update \"How it works\" to describe the live activity feed. Note that Claude Code now runs with `stream-json`, and that custom Claude commands should keep `--output-format stream-json --verbose` to get the feed (text mode still works, with the raw view only).\n\n## Verification\n- `uv run python -m unittest discover -s tests -v`, with new tests in `tests/test_patchgoblin.py`:\n  - `_StreamJson`/`run_claude`: feed it a recorded stream-json transcript (init, assistant text, tool_use Read/Edit/Bash, an error tool_result, result) split across arbitrary chunk boundaries. Assert the event kinds and labels, the relative paths, and that `outcome.text` equals the `result` text.\n  - It fails cleanly when there is no `result` line or `is_error` is true. Text-mode argv falls back to raw `run_cli` behaviour.\n  - Use a fake `claude` agent script that prints stream-json. Run a planning job and a task run end to end: plan/title/questions parsed as before, the task committed, and `/live` returning `events` and `current` while it runs (or `Job.events()` checked directly).\n  - `OpenAIAgent` emits `tool`/`say` events (existing mocked-endpoint tests extended).\n  - `Job` caps events at `MAX_EVENTS`.\n  - Settings migration: saved old default Claude commands are upgraded to stream-json, and custom commands are kept.\n  - `task_view` includes `activity` for an active job.\n- Manual check: run `claude -p --output-format stream-json --verbose` once by hand to confirm the event shapes match the installed version. Then start a plan and a run on a local project and watch the drawer feed fill step by step, the card's \"now:\" line update, and the Raw tab still show everything. Repeat with chat and with an SSH project.\n\n## Assumptions\n- \"Live view of what the agent is doing\" means readable step-by-step activity (tools, files, commands, agent messages) inside PatchGoblin. The existing raw `<pre>` already exists but is nearly empty for Claude.\n- Switching the default Claude commands to `stream-json` is in scope. It's the only way Claude Code reports progress before the end, and the final answer is taken from the `result` event, so the plan and run outputs stay the same.\n- Codex, opencode and Cline keep the raw output view in this task. Their JSON modes (`codex exec --json`, etc.) can get parsers later using the same `job.event` API.\n- Events live only in memory with the job, like the raw output today. Nothing is written into the project.\n- Polling every second is enough; no SSE or websockets.\n\n## Risks\n- Claude Code's stream-json format can change between versions. Parse defensively: ignore unknown types and fields, and never fail a job because of a malformed line (pass it to raw output).\n- `-p` with `stream-json` requires `--verbose`. Without it, Claude Code errors out. Make sure the default and the migration include it.\n- Large lines: tool results such as big file reads can be single very long JSON lines. Don't put tool result bodies into events, only errors, clipped. Keep the line buffer unbounded per line but drop it after parsing.\n- `run_cli`'s \"produced no output\" check and the stored `t.output` currently use raw stdout. With stream-json, raw stdout is JSON, so set `outcome.text` from the `result` event before any of those checks or storage happen.\n- The SSH line buffering must handle chunks split mid-line or mid-UTF-8 character. The `_PlainLog` pattern shows the approach; test with odd chunk boundaries.\n- The UI must not rebuild the entire activity list every second for long runs (500 items); append incrementally.\n- Task #25 (Open in VS Code) also touches the drawer markup, so expect merge conflicts in `index.html`/`app.js`.\n\n## Questions for you\nNone.",
+      "status": "planned",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "created_at": "2026-09-30T11:36:03+00:00",
-      "updated_at": "2026-09-30T11:36:03+00:00",
-      "queued_at": null,
-      "started_at": null,
-      "finished_at": null,
-      "output": "",
+      "updated_at": "2026-10-01T20:16:47+00:00",
+      "queued_at": "2026-10-01T20:05:25+00:00",
+      "started_at": "2026-10-01T20:05:25+00:00",
+      "finished_at": "2026-10-01T20:05:25+00:00",
+      "output": "[2026-10-01T20:15:22+00:00] plan with claude in g:\\My Drive\\Projects\\PatchGoblin\n$ claude -p --output-format text --allowedTools Read,Glob,Grep --disallowedTools Edit,Write,NotebookEdit,Bash\nDenying Bash also turns off the PowerShell tool, so Claude has neither. To use PowerShell, set CLAUDE_CODE_USE_POWERSHELL_TOOL=1.\nTitle: Show a live activity feed of what the AI agent is doing in PatchGoblin\n\nPatchGoblin already has a live view: the task drawer polls `/live` and prints the job's raw output in a `<pre>`. With the default Claude Code command it shows almost nothing. `claude -p --output-format text` prints only the final answer when the job ends, so you see the `$ claude \u2026` line and then wait. The fix is to get structured, step-by-step output from the agents and show it in PatchGoblin as a readable activity feed: \"Reading engine.py\", \"Editing app.py\", \"Running `pytest`\", plus the agent's own messages as they arrive. Claude Code will run with `--output-format stream-json --verbose`. A new parser turns its JSON lines into activity events and takes the final answer from the closing `result` event. The OpenAI-compatible agent emits the same events from its tool loop. Other CLIs (Codex, opencode, Cline) keep their raw output as it streams today. The drawer gets a proper \"Live activity\" panel, with a Raw tab kept as a fallback. Active task cards on the board show a one-line \"now: \u2026\" status. The chat panel shows the same feed while a reply is being written. Nothing is written to files in the project; the file-mirroring idea from the earlier plan is dropped.\n\n1. **`patchgoblin/engine.py`, `Job`**: add structured activity next to the raw text buffer.\n   - `self._events: list[dict]`, capped at `MAX_EVENTS = 500` (drop the oldest), and `self.current: str`.\n   - `event(kind, label, detail=\"\")`, where `kind` is one of `\"say\"` (agent text), `\"tool\"`, `\"error\"` or `\"note\"`. It appends `{\"at\": elapsed seconds, \"kind\", \"label\", \"detail\"}` (detail clipped to ~4000 chars) under the lock and sets `current` for `tool`/`say` events. It also writes a readable line to the raw buffer through `self.write`, so the raw log still tells the whole story.\n   - `events()` returns a copy.\n2. **`patchgoblin/providers.py`, Claude stream parser**: add `run_claude(cfg, mode, prompt, *, host, cwd, model, timeout, job)`.\n   - If the argv from `cli_argv` contains `stream-json`, wrap the job in a `_StreamJson` adapter (same pattern as `_PlainLog`).\n   - The adapter buffers partial lines and runs `json.loads` on each complete line. Non-JSON lines and stderr go to `job.write` unchanged.\n   - It maps events as follows:\n     - `system`/`init` becomes a `note` with the model and working directory.\n     - `assistant` text blocks become `say`.\n     - `assistant` `tool_use` blocks become `tool`, labelled by `describe_tool(name, input)`: Read/Edit/Write/MultiEdit/NotebookEdit become \"Reading/Editing/Writing `<path relative to cwd>`\"; Bash becomes \"Running `<command>`\" (with its description as detail); Grep/Glob become \"Searching `<pattern>`\"; TodoWrite becomes \"Updating plan\" (todo list as detail); Task becomes \"Starting sub-agent\"; anything else becomes the tool name with its JSON input clipped to 200 chars.\n     - `user` `tool_result` blocks with `is_error` become an `error` event with the clipped content.\n     - `result` sets `result_text` and `is_error`, and emits a `note` with duration, turns and cost when present.\n   - After `run_cli` returns, replace `outcome.text` with the `result` event's text. That keeps plan, title and question parsing unchanged. If there is no `result` event, fail with \"Claude Code ended without a result\" plus the stderr tail. If `is_error`, fail with its text.\n   - If the argv has no `stream-json` (a user's custom text-mode command), fall back to plain `run_cli` as today.\n   - In `run_ai`, route `provider == \"claude\"` to `run_claude`.\n3. **`providers.py`, `OpenAIAgent.run`**: replace the `job.write(content\u2026)` line with `job.event(\"say\", \u2026)`. Replace the `\u2192 name args` line with `job.event(\"tool\", describe_tool(name, args))`, so endpoint agents get the same feed (map `read_file`, `write_file`, `run_command`, `search` and `list_files` in `describe_tool`). Tool errors become `error` events.\n4. **`patchgoblin/store.py`**:\n   - Change the `claude` defaults in `DEFAULT_SETTINGS` to `claude -p --output-format stream-json --verbose \u2026`, keeping the same allowed and disallowed tool flags.\n   - In `Settings._migrate`, if the saved `commands.claude.plan`/`run` exactly equal the old text-mode defaults (keep them as `LEGACY_CLAUDE_COMMANDS`), remove those keys so the new defaults apply. Leave custom commands alone.\n5. **`patchgoblin/app.py`**:\n   - `live()`: also return `events=job.events()` and `current=job.current`. The raw `output` stays.\n   - `task_view`: add `activity` (the job's `current`, or `\"\"`) so the board can show it without an extra request.\n   - The chat GET endpoint: add `events`/`current` from `chat.job`.\n6. **`patchgoblin/templates/index.html`**: rework `#d-live-wrap` into a \"Live activity\" section.\n   - The header shows a pulsing dot, `#d-current` (current step), job kind (Planning/Running) and `#d-elapsed`.\n   - Two tabs: \"Activity\" (`<ol id=\"d-activity\" class=\"activity\">`) and \"Raw output\" (the existing `#d-live` pre).\n   - Add a \"Cancel\" shortcut if one isn't already in the flow actions.\n   - Do the same for chat: `#c-activity` inside `#c-live-wrap`, with the raw pre behind a toggle.\n7. **`patchgoblin/static/app.js`**:\n   - Add `renderActivity(list, events)`. Each `<li>` shows a kind icon (\ud83d\udcac say, \ud83d\udd27 tool, \u26a0 error, \u00b7 note), the label, a muted `+Ns` timestamp, and a collapsible `<details>` for long detail.\n   - Add an `activityAtBottom` check so it only auto-scrolls when the user is already at the bottom.\n   - Rebuild only appended items: keep a rendered count, and re-render fully if the list shrank (cap rollover or a new job).\n   - `pollLive()`: render events, set `#d-current`, use the Activity tab when `events.length`, otherwise default to Raw (Codex/opencode/Cline). Poll every 1000 ms.\n   - `renderChat()`: same for chat.\n   - Board card renderer: for `t.active && t.activity`, add a single-line, ellipsized `card-activity` element (\"\u25b6 Editing app.py\").\n8. **`patchgoblin/static/app.css`**: styles for `.activity` (compact rows, monospace labels, error colour, say rows in normal text with pre-wrap), the pulsing live dot, tabs, and `.card-activity`.\n9. **`README.md`**: update \"How it works\" to describe the live activity feed. Note that Claude Code now runs with `stream-json`, and that custom Claude commands should keep `--output-format stream-json --verbose` to get the feed (text mode still works, with the raw view only).\n\n## Verification\n- `uv run python -m unittest discover -s tests -v`, with new tests in `tests/test_patchgoblin.py`:\n  - `_StreamJson`/`run_claude`: feed it a recorded stream-json transcript (init, assistant text, tool_use Read/Edit/Bash, an error tool_result, result) split across arbitrary chunk boundaries. Assert the event kinds and labels, the relative paths, and that `outcome.text` equals the `result` text.\n  - It fails cleanly when there is no `result` line or `is_error` is true. Text-mode argv falls back to raw `run_cli` behaviour.\n  - Use a fake `claude` agent script that prints stream-json. Run a planning job and a task run end to end: plan/title/questions parsed as before, the task committed, and `/live` returning `events` and `current` while it runs (or `Job.events()` checked directly).\n  - `OpenAIAgent` emits `tool`/`say` events (existing mocked-endpoint tests extended).\n  - `Job` caps events at `MAX_EVENTS`.\n  - Settings migration: saved old default Claude commands are upgraded to stream-json, and custom commands are kept.\n  - `task_view` includes `activity` for an active job.\n- Manual check: run `claude -p --output-format stream-json --verbose` once by hand to confirm the event shapes match the installed version. Then start a plan and a run on a local project and watch the drawer feed fill step by step, the card's \"now:\" line update, and the Raw tab still show everything. Repeat with chat and with an SSH project.\n\n## Assumptions\n- \"Live view of what the agent is doing\" means readable step-by-step activity (tools, files, commands, agent messages) inside PatchGoblin. The existing raw `<pre>` already exists but is nearly empty for Claude.\n- Switching the default Claude commands to `stream-json` is in scope. It's the only way Claude Code reports progress before the end, and the final answer is taken from the `result` event, so the plan and run outputs stay the same.\n- Codex, opencode and Cline keep the raw output view in this task. Their JSON modes (`codex exec --json`, etc.) can get parsers later using the same `job.event` API.\n- Events live only in memory with the job, like the raw output today. Nothing is written into the project.\n- Polling every second is enough; no SSE or websockets.\n\n## Risks\n- Claude Code's stream-json format can change between versions. Parse defensively: ignore unknown types and fields, and never fail a job because of a malformed line (pass it to raw output).\n- `-p` with `stream-json` requires `--verbose`. Without it, Claude Code errors out. Make sure the default and the migration include it.\n- Large lines: tool results such as big file reads can be single very long JSON lines. Don't put tool result bodies into events, only errors, clipped. Keep the line buffer unbounded per line but drop it after parsing.\n- `run_cli`'s \"produced no output\" check and the stored `t.output` currently use raw stdout. With stream-json, raw stdout is JSON, so set `outcome.text` from the `result` event before any of those checks or storage happen.\n- The SSH line buffering must handle chunks split mid-line or mid-UTF-8 character. The `_PlainLog` pattern shows the approach; test with odd chunk boundaries.\n- The UI must not rebuild the entire activity list every second for long runs (500 items); append incrementally.\n- Task #25 (Open in VS Code) also touches the drawer markup, so expect merge conflicts in `index.html`/`app.js`.\n\n## Questions for you\nNone.\n",
       "error": "",
       "commit": "",
       "review_feedback": "",
@@ -1508,8 +1516,210 @@
         {
           "at": "2026-09-30T11:36:03+00:00",
           "event": "Created"
+        },
+        {
+          "at": "2026-10-01T20:00:30+00:00",
+          "event": "Auto-planned: AI planning started"
+        },
+        {
+          "at": "2026-10-01T20:02:13+00:00",
+          "event": "Title rewritten by AI (was: Add the ability to see what is happening live in the ide)"
+        },
+        {
+          "at": "2026-10-01T20:02:13+00:00",
+          "event": "AI plan ready"
+        },
+        {
+          "at": "2026-10-01T20:05:25+00:00",
+          "event": "Auto-queued"
+        },
+        {
+          "at": "2026-10-01T20:05:25+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-10-01T20:05:25+00:00",
+          "event": "AI run failed"
+        },
+        {
+          "at": "2026-10-01T20:15:22+00:00",
+          "event": "AI planning started with feedback"
+        },
+        {
+          "at": "2026-10-01T20:16:47+00:00",
+          "event": "Title rewritten by AI (was: Mirror live AI job output to a log file in the project that IDEs can follow)"
+        },
+        {
+          "at": "2026-10-01T20:16:47+00:00",
+          "event": "AI plan ready"
         }
-      ]
+      ],
+      "prev_status": "failed"
+    },
+    {
+      "id": 27,
+      "title": "Add a selectable color scheme picker (System/Light/Dark plus extra themes)",
+      "description": "",
+      "plan": "The app already has a dark palette, but it only switches on with the OS setting (`@media (prefers-color-scheme: dark)` in `patchgoblin/static/app.css:25`). The plan turns each palette into a named scheme on `<html data-theme=\"\u2026\">`, adds a small theme picker to the topbar, and saves the choice in `localStorage` under a `pg.theme` key, the same way `pg.pid` and `pg.tab` are saved. \"System\" (the default) keeps today's behaviour. JS converts it to `light` or `dark` with `matchMedia` and follows the OS live. A tiny inline script in `<head>` sets the theme before first paint so the page doesn't flash the wrong colours. No backend or settings.json changes are needed.\n\n## Steps\n\n1. **`patchgoblin/static/app.css`: restructure the palette.**\n   - Keep the current `:root { \u2026 }` block as the Light scheme, and also match it with `:root[data-theme=\"light\"]`.\n   - Change `@media (prefers-color-scheme: dark) { :root { \u2026 } }` into plain selectors with no media query: `:root[data-theme=\"dark\"], :root[data-theme=\"midnight\"] { \u2026existing dark vars\u2026; color-scheme: dark; }`.\n   - Add two extra schemes that only override the base tokens (`--bg`, `--panel`, `--panel-2`, `--text`, `--muted`, `--line`, `--accent`, `--accent-ink`) and inherit the status `--b-*` / `--t-*` colours from their light or dark parent:\n     - `midnight`: a blue-black dark variant.\n     - `sepia`: a warm light variant. Group it with the light selector so it gets the light status colours and `color-scheme: light`.\n   - Add a `.theme-picker` style: `margin-left: auto` in `.topbar`, with `select { width: auto; }` (the global `select { width: 100% }` would otherwise stretch it).\n\n2. **`patchgoblin/templates/index.html`**\n   - In `<head>`, before the stylesheet link, add an inline `<script>`. It reads `localStorage[\"pg.theme\"]` inside a try/catch, converts `system` (or a missing/unknown value) using `matchMedia(\"(prefers-color-scheme: dark)\")`, and sets `document.documentElement.dataset.theme`.\n   - In `.topbar`, after `.brand`, add `<label class=\"inline theme-picker\">Theme <select id=\"theme-select\">` with these options: System, Light, Dark, Midnight, Sepia. Give it an `aria-label`.\n\n3. **`patchgoblin/static/app.js`**\n   - Near `localStorageGet` and `localStorageSet` (around line 36), add:\n     - `const THEMES = [\"system\",\"light\",\"dark\",\"midnight\",\"sepia\"]`\n     - `validTheme(v)`, like `validTab`\n     - `applyTheme(choice)`, which resolves `system` through `matchMedia` and sets `document.documentElement.dataset.theme`\n   - Add `setupThemePicker()`. It sets `#theme-select.value` from the stored choice. Its `onchange` handler stores `pg.theme` and calls `applyTheme`. It also adds one `matchMedia(...).addEventListener(\"change\", \u2026)` listener that reapplies the theme only while the stored choice is `system`.\n   - Call `setupThemePicker()` from `init()` (around line 1639).\n   - Add a `storage` event listener so other open tabs update when the theme changes.\n\n4. **Check for hard-coded colours** that look wrong on the new schemes. Leave the neutral rgba shadows and backdrops as they are. The `#fff` text on `--danger` buttons and the `.toast.error` text may need a `--danger-ink` variable. Dark `--danger` (`#f08a80`) with white text is already low-contrast today, so add `--danger-ink` per scheme and use it in `button.danger` and `.toast.error`.\n\n5. **`README.md`**: add one line about the Theme picker if the README has a UI or features section.\n\n## Verification\n- `uv run python -m pytest tests` (or the project's usual test command) still passes.\n- Add a test in `tests/test_patchgoblin.py`, next to `test_index_has_queue_tabs`: `GET /` contains `id=\"theme-select\"`, each theme option value, and the `pg.theme` head script.\n- Manual check with the `run` skill or `run.py`:\n  - Pick each theme and confirm the board, badges, drawer, dialogs, the Settings dialog, the batch bar and toasts all look right.\n  - Reload and confirm the theme is kept with no light flash.\n  - With System selected, switch the OS or DevTools \"emulate prefers-color-scheme\" and confirm the page follows live.\n  - Confirm form controls and scrollbars match each scheme (`color-scheme` is set).\n\n## Assumptions\n- The theme is a per-browser preference stored in `localStorage` (`pg.theme`), not a server setting in settings.json, so it applies instantly and needs no API or schema change.\n- \"System\" is the default, which keeps current behaviour for existing users.\n- The extra schemes are Midnight (dark) and Sepia (light). They reuse the existing status colours of their light or dark parent rather than defining new badge palettes.\n- The picker goes in the topbar, which is currently empty apart from the brand, rather than in the Settings dialog. That dialog only applies changes on Save, which suits a live preview poorly.\n\n## Risks\n- The `@media (prefers-color-scheme: dark)` block must be removed or turned into selectors. If it stays, it will override an explicit Light choice for users whose OS is in dark mode.\n- If JS or `localStorage` is unavailable, `data-theme` is never set. The `:root` defaults must therefore still give a complete light palette, and the head script must not throw.\n- Other `:root` or `[data-theme]` rules need specificity at least as high as the theme rules, or they will override them.\n- The global `select { width: 100% }` will stretch the topbar picker unless it is overridden.\n- On narrow screens (`@media (max-width: 900px)`), check that the topbar picker doesn't wrap badly.\n- Check contrast of the new schemes' `--muted` text and `--accent` buttons against their backgrounds (WCAG AA).\n\n## Questions for you\nNone.",
+      "status": "queued",
+      "provider": "",
+      "plan_model": "",
+      "code_model": "",
+      "plan_trust": "",
+      "created_at": "2026-10-01T18:48:47+00:00",
+      "updated_at": "2026-10-01T20:12:45+00:00",
+      "queued_at": "2026-10-01T20:12:45+00:00",
+      "started_at": "2026-10-01T20:05:25+00:00",
+      "finished_at": "2026-10-01T20:05:25+00:00",
+      "output": "",
+      "error": "git status failed: Command not found: git",
+      "commit": "",
+      "review_feedback": "",
+      "history": [
+        {
+          "at": "2026-10-01T18:48:47+00:00",
+          "event": "Created"
+        },
+        {
+          "at": "2026-10-01T20:00:30+00:00",
+          "event": "Auto-planned: AI planning started"
+        },
+        {
+          "at": "2026-10-01T20:01:42+00:00",
+          "event": "Title rewritten by AI (was: selectable color schemes with a dark mode)"
+        },
+        {
+          "at": "2026-10-01T20:01:42+00:00",
+          "event": "AI plan ready"
+        },
+        {
+          "at": "2026-10-01T20:05:25+00:00",
+          "event": "Auto-queued"
+        },
+        {
+          "at": "2026-10-01T20:05:25+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-10-01T20:05:25+00:00",
+          "event": "AI run failed"
+        },
+        {
+          "at": "2026-10-01T20:12:45+00:00",
+          "event": "Queued for AI"
+        }
+      ],
+      "prev_status": "unplanned"
+    },
+    {
+      "id": 28,
+      "title": "Support SSH projects on Windows hosts (PowerShell or cmd default shell)",
+      "description": "",
+      "plan": "**Summary.** Today `SSHHost` assumes the remote machine is POSIX. It uses `sh` syntax, `shlex` quoting, `posixpath`, `test`/`cat`/`find`, and `$SHELL -lc`. Windows OpenSSH runs commands through whichever default shell the server has (cmd.exe by default, PowerShell if `DefaultShell` is set). The plan adds a `WindowsSSHHost(SSHHost)` subclass that never relies on the default shell. Every command it sends is a single `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand <base64 UTF\u201116LE>` line, which parses the same way under both cmd and PowerShell, so quoting and escaping problems go away. The remote OS is detected automatically and cached per `(target, port)`, so the project registry format and the UI form stay the same. File contents travel on stdin as raw bytes. Paths use `ntpath`. The existing POSIX `SSHHost` is unchanged, so its current tests keep passing.\n\n## Steps\n\n1. **`patchgoblin/hosts.py`: PowerShell encoding helpers**\n   - Add `import base64, ntpath`.\n   - Add `_ps_quote(s)`, which returns a PowerShell single-quoted literal (`'` \u2192 `''`).\n   - Add `_ps_command(script)`, which returns `\"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand \" + base64(script.encode(\"utf-16-le\"))`.\n   - Start every script with `$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);`. The progress setting stops CLIXML progress noise from reaching stderr.\n\n2. **`hosts.py`: new `class WindowsSSHHost(SSHHost)`** with `os = \"windows\"`. Add `os = \"posix\"` to `SSHHost` as well. Override these methods:\n   - `_exec(script, **kw)` \u2192 `communicate(self._argv(_ps_command(PREAMBLE + script)), **kw)`.\n   - `join` \u2192 `ntpath.join`.\n   - `normalize`: strip the path and turn `/` into `\\`. Require a drive-absolute path (`ntpath.isabs` and a drive letter, e.g. `C:\\Users\\me\\project`); otherwise raise `HostError(\"Use an absolute Windows path on the remote host, e.g. C:\\\\Users\\\\me\\\\project.\")`. Then apply `ntpath.normpath`.\n   - `check` \u2192 `_exec(\"exit 0\")`.\n   - `is_dir` \u2192 `if (Test-Path -LiteralPath X -PathType Container) {exit 0} else {exit 1}`.\n   - `ensure_dir` \u2192 `New-Item -ItemType Directory -Force -Path X | Out-Null`.\n   - `home` \u2192 print `$env:USERPROFILE`, and validate that the result matches a drive-absolute path.\n   - `list_dirs(path)`: an empty path lists drives (`Get-PSDrive -PSProvider FileSystem` \u2192 `C:\\`) with `parent=None`, mirroring `LocalHost`. Otherwise `exit 45` if the path is missing; else print the resolved full path, then `Get-ChildItem -LiteralPath X -Directory -Force | % Name`. Return `sep=\"\\\\\"`. `parent` is `ntpath.dirname(cwd)`, or `\"\"` at a drive root so the picker goes back to the drive list.\n   - `read_text` \u2192 `exit 44` if the file is missing. Otherwise write the raw bytes with `[Console]::OpenStandardOutput().Write(...)`, then decode with UTF\u20118 in Python. This avoids the console code page.\n   - `list_dir` \u2192 `Get-ChildItem -Force -Name`, or nothing if the path is not a directory.\n   - `write_text`: create the parent directory, copy `[Console]::OpenStandardInput()` into a `MemoryStream`, run `[IO.File]::WriteAllBytes(\"$p.tmp\", ...)`, then `Move-Item -Force` onto the target. Pass the text as `input=text`. Keep `\\n` line endings to match `LocalHost`.\n   - `run(argv, cwd, input, ..., login, env)`:\n     - Script: `$env:K='v'` for each env var, then `Set-Location -LiteralPath cwd; & 'exe' 'arg'...; exit $LASTEXITCODE`, quoting every element with `_ps_quote`.\n     - Ignore `login`: Windows sshd sessions already get the user's PATH.\n     - The native command must inherit the stdin pipe, so pass input through rather than piping `$input` (see Risks).\n   - `run_shell(command, cwd)` \u2192 `Set-Location -LiteralPath cwd; <command>` run as PowerShell. Emit `exit $LASTEXITCODE` only when it is set.\n   - `shell_argv(path)` \u2192 `[ssh_bin, \"-t\", (-p port), target, \"powershell.exe -NoLogo -NoExit -EncodedCommand <Set-Location \u2026>\"]`.\n   - Add `dir_status(path, timeout)`, which returns the `Result` of the `is_dir` script. Add the POSIX equivalent to `SSHHost` too.\n\n3. **`hosts.py`: OS detection**\n   - Add `_SSH_OS: dict[tuple, str]` and `detect_ssh_os(target, port)`.\n   - First run plain `uname -s`. Exit code 0 means `posix`. Exit code 255 or a timeout raises `HostError(\"SSH connection \u2026 failed\")` and is not cached.\n   - On any other non-zero exit, run `_ps_command(\"[Environment]::OSVersion.Platform\")`. Output `Win32NT` means `windows`.\n   - If both fail, raise `HostError(\"Could not detect the remote OS on \u2026\")`.\n   - Cache only successful results, under a `threading.Lock`.\n\n4. **`hosts.py`: `host_for`.** For SSH projects, build an `SSHHost`. If `project.get(\"ssh_os\")` is set, use it; otherwise call `detect_ssh_os` and return `WindowsSSHHost` when the result is `windows`.\n\n5. **`hosts.py`: `probe`.** Replace `host._exec(f\"test -d \u2026\")` with `host.dir_status(path, timeout=20)`. Keep the existing 255/126/127 handling, and keep it inside the `try` so detection failures are still reported rather than raised.\n\n6. **`hosts.py`: `terminal_command`.** No logic change is needed because it uses `host.shell_argv`. Check that the `wt` `;` escaping does not touch the base64 payload (base64 has no `;`).\n\n7. **`patchgoblin/app.py`**\n   - `browse()`: replace `os.name == \"nt\" and host.kind == \"local\"` with a host attribute such as `getattr(host, \"lists_drives\", False)`. Set it to `os.name == \"nt\"` on `LocalHost` and `True` on `WindowsSSHHost`, so an empty path shows drives on both.\n   - `add_project()`: after `host.check()`, store `fields[\"ssh_os\"] = host.os`. This avoids a detection round trip later, and it is additive, since old projects without the field auto-detect.\n   - `add_project()` name derivation already handles `\\`.\n   - Have `project_fields` pass through `ssh_os` only if it is already present, and check whether the registry's update path drops unknown fields.\n\n8. **`patchgoblin/providers.py`**\n   - `ProjectFiles.resolve` already builds paths with `host.join`, so it works.\n   - Line ~580: make the `run_command` tool description say \"PowerShell command\" when `getattr(self.host, \"os\", \"\") == \"windows\"`, so the OpenAI agent doesn't send bash.\n   - Leave `cli_argv` alone. Users with Windows remotes may need to configure `claude.cmd`-style names; `&` resolves `.cmd`/`.ps1` through PATHEXT.\n\n9. **`patchgoblin/templates/index.html` and `static/app.js`**\n   - Change the SSH path hint/placeholder to \"/home/me/project or C:\\Users\\me\\project\".\n   - Check the folder picker joins using `sep` from the response (it already handles a Windows local host).\n\n10. **`README.md`.** Document Windows SSH hosts:\n    - They need OpenSSH Server with key auth.\n    - The default shell can be cmd or PowerShell.\n    - Windows PowerShell 5.1+ must be present on the remote.\n    - git and the CLIs must be on the user's PATH.\n\n## Verification\n\n- **Unit tests** in `tests/test_patchgoblin.py`, mocking `patchgoblin.hosts.communicate`:\n  - **Encoding:** `WindowsSSHHost.run([\"claude\",\"-p\",\"it's\"], cwd=\"C:\\\\my app\", env={\"A\":\"1\"})` sends one remote command starting with `powershell.exe \u2026 -EncodedCommand`. Decoding the base64 gives a script containing `$env:A='1'`, `Set-Location -LiteralPath 'C:\\my app'` and `& 'claude' '-p' 'it''s'`.\n  - **`normalize`:** accepts `C:/x/../y` \u2192 `C:\\y`; rejects `/srv/x` and `x\\y`.\n  - **`list_dirs`:** parses mocked output and returns `sep`/`parent`. Exit code 45 raises `HostError`. An empty path returns drives.\n  - **`read_text` / `write_text`:** exit 44 \u2192 `None`; `write_text` passes `input=text`.\n  - **`detect_ssh_os`:** `uname` ok \u2192 posix; uname exit 1 then `Win32NT` \u2192 windows; 255 raises and is not cached.\n  - **`host_for`:** respects a stored `ssh_os` without calling `communicate`.\n  - **`probe`:** still never raises (extend `test_probe_ssh_never_raises`).\n  - **`terminal_command`:** a Windows SSH host produces `ssh -t \u2026 powershell.exe -NoLogo -NoExit -EncodedCommand \u2026`.\n- **Existing tests:** run `python -m pytest tests -q`. All current SSH tests must pass unchanged.\n- **Manual check against a real Windows 10/11 OpenSSH server**, once with the default cmd shell and once with `DefaultShell` set to PowerShell:\n  - Add a project via the folder picker.\n  - Confirm `tasks.json` round-trips with non-ASCII text.\n  - Enable git tracking.\n  - Run a plan/code task with a CLI provider; confirm the prompt arrives on stdin and output streams live.\n  - Open a terminal.\n  - Confirm the status probe shows reachable.\n\n## Assumptions\n\n- \"ps and cmd\" means the remote Windows sshd's default shell may be either PowerShell or cmd.exe. Wrapping every command in `powershell -EncodedCommand` covers both, so no per-shell code is needed.\n- The target is Windows PowerShell 5.1 (`powershell.exe`, present on all supported Windows), not `pwsh`.\n- The remote OS is auto-detected and also stored as an optional additive `ssh_os` field on new projects. No UI selector is added.\n- `login=True` is a no-op on Windows remotes.\n- The OpenAI agent's `run_command` on Windows remotes runs PowerShell, and its tool description says so.\n\n## Risks\n\n- **Stdin pass-through:** Windows PowerShell 5.1 must hand its stdin pipe to a native child started with `&` (no pipeline input). Verify this early on a real host. If prompts don't arrive, fall back to a `System.Diagnostics.Process` wrapper that copies stdin and stdout byte-for-byte while streaming.\n- **Stdout encoding:** native tools may print in the OEM code page. The preamble sets `[Console]::OutputEncoding`, but some CLIs ignore it, so check that non-ASCII output isn't garbled.\n- **Command-line length:** cmd.exe limits command lines to 8191 characters, and base64 of UTF\u201116 is about 2.7\u00d7 the script size. Small scripts are fine. Providers with `prompt_arg` (prompt passed as an argument) will overflow; detect this and raise a clear `HostError` rather than failing obscurely.\n- **stderr noise:** PowerShell can write CLIXML or progress records to stderr. `$ProgressPreference` and `-NonInteractive` reduce this, but check that error messages shown to users stay readable.\n- **Cancellation:** `kill_tree` kills the local ssh process. On Windows sshd the remote powershell/child tree may keep running after the channel closes. Check that cancelling a task actually stops the remote agent.\n- **Detection cost:** auto-detection adds one round trip per process for projects without `ssh_os`. Keep failures uncached so a host that was offline at startup recovers.\n- **Callers that assume POSIX:** anything calling `host._exec` with shell syntax or using `posixpath` on project paths will break on Windows remotes. Grep again before finishing (`providers.py` `ProjectFiles` uses `posixpath` only on the relative path, which is fine).\n- **Duplicate check:** the duplicate-project check compares raw path strings. Windows paths are case-insensitive, so `C:\\A` and `c:\\a` could both be registered. This is minor, but consider normalizing case in `normalize`.\n\n## Questions for you\n\nNone.",
+      "status": "queued",
+      "provider": "",
+      "plan_model": "",
+      "code_model": "",
+      "plan_trust": "",
+      "created_at": "2026-10-01T18:49:14+00:00",
+      "updated_at": "2026-10-01T20:12:45+00:00",
+      "queued_at": "2026-10-01T20:12:45+00:00",
+      "started_at": "2026-10-01T20:05:25+00:00",
+      "finished_at": "2026-10-01T20:05:25+00:00",
+      "output": "",
+      "error": "git status failed: Command not found: git",
+      "commit": "",
+      "review_feedback": "",
+      "history": [
+        {
+          "at": "2026-10-01T18:49:14+00:00",
+          "event": "Created"
+        },
+        {
+          "at": "2026-10-01T20:00:30+00:00",
+          "event": "Auto-planned: AI planning started"
+        },
+        {
+          "at": "2026-10-01T20:02:37+00:00",
+          "event": "Title rewritten by AI (was: support windows ssh with ps and cmd)"
+        },
+        {
+          "at": "2026-10-01T20:02:37+00:00",
+          "event": "AI plan ready"
+        },
+        {
+          "at": "2026-10-01T20:05:25+00:00",
+          "event": "Auto-queued"
+        },
+        {
+          "at": "2026-10-01T20:05:25+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-10-01T20:05:25+00:00",
+          "event": "AI run failed"
+        },
+        {
+          "at": "2026-10-01T20:12:45+00:00",
+          "event": "Queued for AI"
+        }
+      ],
+      "prev_status": "unplanned"
+    },
+    {
+      "id": 29,
+      "title": "Add SVN working-copy support with a pending check-in summary and Check in dialog",
+      "description": "",
+      "plan": "**Summary.** Add SVN as a second, opt-in kind of version control, alongside git. In SVN, a commit publishes to the server straight away, so PatchGoblin won't commit after each task the way it does for git. Instead, every successful run records the files it changed and its AI summary on the task, and marks the task \"pending check-in\". A new **Check in** button opens a dialog with three things: the tasks finished since the last check-in, the working copy's current `svn status`, and a commit message built from those tasks (one heading line, then `#N title` plus a trimmed summary for each task). You can edit the message. Clicking **Check in** adds new files, removes missing ones, and runs `svn commit`. It then stamps the new revision on each pending task and clears the pending list. A new `patchgoblin/svnops.py` module holds the SVN logic, mirroring `gitops.py`. It reuses `git hash-object` (git is already required on every host) to detect which files a run touched.\n\n## Steps\n\n1. **New module `patchgoblin/svnops.py`**, modelled on `gitops.py`:\n   - `svn(host, path, *args, timeout=300)`: runs `[\"svn\", \"--non-interactive\", *args]` through `host.run`.\n   - `tracked(project)`: returns `project.get(\"svn_tracking\") is True`.\n   - `is_wc_root(host, path)`: true if `svn info --show-item wc-root .` resolves to `path`. Compare after `host.normalize`, and handle Windows slash and case differences.\n   - `status_entries(host, path)`: parses `svn status --xml` into `{relpath: item}`, where item is one of `modified`, `added`, `deleted`, `unversioned`, `missing`, `replaced` or `conflicted`. Skips `.patchgoblin/` and anything ignored.\n   - `dirty_fingerprint(host, path)`: returns `{path: \"item blob\"}`. Blobs come from `git hash-object --no-filters --stdin-paths`, run with `cwd=path` and no repository needed, the same way `gitops.dirty_fingerprint` does it.\n   - `changed_between(before, after)`: returns `[{\"status\": \"M\"|\"A\"|\"D\"|\"?\", \"path\"}]`, the same shape as `gitops.commit_files`, so the drawer's file list works unchanged.\n   - `checkin(host, path, message)`: if there are no changes, returns `\"\"`. Otherwise it runs `svn add --force --parents .` (this respects `svn:ignore` and global-ignores), then `svn delete --keep-local` on each `missing` entry, then `svn commit -m message`. It parses the revision from `Committed revision N.` and returns `\"rN\"`. Commit failures (out-of-date working copy, conflicts, auth) are raised as `HostError`, using the same `_check` pattern as `gitops`.\n   - `recent_log(host, path, limit=30)`: `svn log --xml -l N`, parsed into the `hash/author/when/subject` shape so the existing Commits dialog can show it.\n\n2. **Project flag and enabling** (`patchgoblin/app.py`):\n   - Add `POST /api/projects/<pid>/svn/enable`, modelled on `enable_git`. It applies the same busy/LOCKED guard. It refuses if git tracking is on, and refuses unless `is_wc_root` is true. PatchGoblin never runs checkout or `svnadmin` itself. On success it sets `svn_tracking: True`.\n   - In `update_project`, accept `svn_tracking: false` and reject `true` with a pointer to the enable endpoint, just as `git_tracking` does.\n   - Make `enable_git` refuse while `svn_tracking` is on: the two modes are mutually exclusive.\n\n3. **Run bookkeeping** (`patchgoblin/engine.py` `_execute`):\n   - For SVN projects, take `svnops.dirty_fingerprint` before `self._ai(...)` and again after a successful run. No checkpoint commit is made.\n   - Store `current[\"changes\"] = changed_between(...)`, `current[\"checkin_pending\"] = True` and `current[\"summary\"] = outcome.text.strip()[:1500]`.\n   - Log `\"Recorded N changed files for check-in\"`, or `\"No file changes\"` with `checkin_pending` left false.\n   - If fingerprinting fails, use the git branch's HostError handling: log it on the task, never fail the run.\n   - Pass the SVN state into `run_prompt`.\n\n4. **Store** (`patchgoblin/store.py` `new_task`): add the defaults `\"changes\": []`, `\"summary\": \"\"`, `\"checkin_pending\": False` and `\"checkin\": \"\"`. Older tasks keep working because readers use `.get`.\n\n5. **Prompts** (`patchgoblin/providers.py`):\n   - Change `run_prompt(task, tracked)` to take `vcs` (`\"git\"`, `\"svn\"` or `\"\"`). Add `RUN_INSTRUCTIONS_SVN`: \"Do not run svn commit, add or revert; the user checks changes in later.\"\n   - In `run_ai`/`_fingerprint`, make the plan-edit check use `svnops.dirty_fingerprint` for SVN projects, so the opencode/Cline \"plan must not edit\" check also works there.\n   - `OpenAIAgent`: treat `.svn/` like `.git/`. That means no writes, and it is excluded from the `--no-index` `list_files`/grep results; also update `gitops.list_files`. SVN projects use the untracked code paths (`tracked=False` for git purposes).\n\n6. **Check-in API** (`patchgoblin/app.py` and engine):\n   - `GET /api/projects/<pid>/checkin` returns `{tasks: [{id, title, summary, changes}], status: [...], message: <default>}`. Pending tasks are listed in id order.\n   - `POST /api/projects/<pid>/checkin {message}`: rejects a blank message and applies the same busy/LOCKED guard as sync. It runs inside `engine._sync_lock(pid)` and `store.lock(pid)`, so tasks.json isn't written mid-commit.\n   - The flow is: first stamp each pending task's `checkin = \"pending\"` (so the commit includes up-to-date tasks.json), then call `svnops.checkin`. On success, write `checkin = \"rN\"`, `checkin_pending = False` and the event `Checked in as rN`. The tasks.json change from that write is picked up by the next check-in, which is the same compromise auto-sync makes. On failure, restore the flags and return the error.\n   - Add a `default_checkin_message(tasks)` helper. Its first line is `PatchGoblin: N task(s) (#a, #b\u2026)`, or `PatchGoblin: task #N title` for a single task. Then each task gets a `- #N title` bullet, with its summary indented below and trimmed to about 400 characters.\n   - Extend `task_changes`: for SVN projects, return `task[\"changes\"]`.\n   - Extend `commits`: for SVN projects, return `svnops.recent_log`.\n\n7. **Frontend** (`templates/index.html`, `static/app.js`, `static/app.css`):\n   - In Project settings, rename the Git fieldset to **Version control**. Add a `#ps-svn` block with **Use existing SVN working copy** (calls the enable endpoint) and a **Stop tracking (keeps .svn)** checkbox. Hide the git controls while SVN is on, and the SVN controls while git is on.\n   - In the header, add `#checkin-btn`, shown when `svn_tracking`. Its label shows a pending count (e.g. \"Check in (3)\").\n   - Add a `#checkin-dialog` with the pending task list (each task's files can be expanded), the `svn status` file list, an editable message `<textarea>`, **Copy message**, **Check in** and **Close**.\n   - Factor the repeated `#commits-btn`/`#sync-btn` visibility lines (app.js:264, 446, 514) into one `updateVcsButtons(p)` helper. Show Commits for both kinds; show Sync for git only.\n   - Show `checkin` (e.g. \"Checked in r123\" or \"Pending check-in\") in the task drawer where the commit hash is shown now.\n\n8. **README**: add an \"SVN\" paragraph after **Git** covering the opt-in, that nothing is committed automatically, what the Check in dialog does, that the user's own SVN credentials are needed (`--non-interactive`), and that SVN must be installed on the project's host.\n\n## Verification\n- `uv run python -m unittest discover -s tests -v`: all existing tests must still pass.\n- Add tests in `tests/test_patchgoblin.py`, skipped with `unittest.skipUnless(shutil.which(\"svn\") and shutil.which(\"svnadmin\"))`. Each sets up `svnadmin create` in a temp dir and `svn checkout file:///\u2026`. Cover:\n  - enabling SVN, and refusing a non-working-copy directory or a git-tracked project;\n  - a fake-agent run that edits one file and adds another: the task records exactly those two `changes`, `checkin_pending` is true, and nothing is committed (`svn log` is unchanged);\n  - user edits made before the run to files the AI doesn't touch are excluded from `changes`;\n  - `GET /checkin`: the default message lists both pending tasks with their summaries;\n  - `POST /checkin`: the revision increases, new files were added, each task gets `checkin == \"rN\"` and the pending list is empty;\n  - a failing commit (e.g. after another checkout commits first) leaves tasks pending and returns an error;\n  - the plan-edit check fails a plan that modifies a file in an SVN project.\n- Manual check with `uv run run.py` on a local SVN checkout: run two tasks, open Check in, edit the message, check in, then confirm with `svn log -l 1 -v`.\n\n## Assumptions\n- \"Track changes between check-ins\" means building up a list of finished tasks and the files they touched until the user checks in. It does not mean committing to SVN after each task, because an SVN commit is published to the server immediately.\n- SVN support uses an existing working copy. PatchGoblin will not run `svn checkout` or create repositories.\n- Git and SVN tracking are mutually exclusive per project, and the flag is a new `svn_tracking` boolean next to `git_tracking` (no general `vcs` field, to avoid migrating existing projects).\n- The check-in covers the whole working copy, including `.patchgoblin/tasks.json` and any manual edits, the same way git sync's checkpoint does. The dialog lists every file first.\n- Unversioned files are `svn add`ed and missing files `svn delete`d at check-in, matching `git add -A`.\n- Remote and SSH hosts are expected to have both `svn` and `git` on PATH.\n- No push, sync or auto-check-in: check-in only ever happens when the user clicks it.\n\n## Risks\n- **Misattributed changes.** Edits the user makes during a run look like the AI's, because there is no checkpoint commit to separate them. Say so in the dialog; the commit still includes everything shown.\n- **Out-of-date working copy.** `svn commit` fails if the working copy is out of date. Show SVN's error clearly; a later step could offer `svn update`. Never auto-resolve conflicts.\n- **Authentication.** `--non-interactive` means missing cached credentials fail at once. That's intended, but the error message should say why.\n- **Unintended adds.** `svn add --force .` can add large or generated files that `svn:ignore` doesn't cover. Showing the status list before commit is the mitigation.\n- **Windows paths.** `svn status --xml` paths and `wc-root` need care with case and slashes on Windows. Normalize before comparing.\n- **XML parsing.** Parse with `xml.etree` and handle non-ASCII paths. Don't scrape the text output, whose format depends on locale.\n- **tasks.json during commit.** Committing tasks.json while the store might write to it: hold `store.lock(pid)` for the whole check-in, as `gitops.sync`'s `guard` does.\n- **Missed `tracked` call sites.** Every existing `gitops.tracked` branch must still treat SVN projects as \"not git\". Audit each call site in app.py, engine.py and providers.py so that, for example, the \"Git tracking off; nothing committed\" event isn't logged for SVN runs.\n\n## Questions for you\nNone.",
+      "status": "queued",
+      "provider": "",
+      "plan_model": "",
+      "code_model": "",
+      "plan_trust": "",
+      "created_at": "2026-10-01T18:50:21+00:00",
+      "updated_at": "2026-10-01T20:12:45+00:00",
+      "queued_at": "2026-10-01T20:12:45+00:00",
+      "started_at": "2026-10-01T20:05:25+00:00",
+      "finished_at": "2026-10-01T20:05:25+00:00",
+      "output": "",
+      "error": "git status failed: Command not found: git",
+      "commit": "",
+      "review_feedback": "",
+      "history": [
+        {
+          "at": "2026-10-01T18:50:21+00:00",
+          "event": "Created"
+        },
+        {
+          "at": "2026-10-01T20:00:30+00:00",
+          "event": "Auto-planned: AI planning started"
+        },
+        {
+          "at": "2026-10-01T20:02:51+00:00",
+          "event": "Title rewritten by AI (was: allow svn. track changes between checkin to allow for a nice scheckin summary)"
+        },
+        {
+          "at": "2026-10-01T20:02:51+00:00",
+          "event": "AI plan ready"
+        },
+        {
+          "at": "2026-10-01T20:05:25+00:00",
+          "event": "Auto-queued"
+        },
+        {
+          "at": "2026-10-01T20:05:25+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-10-01T20:05:25+00:00",
+          "event": "AI run failed"
+        },
+        {
+          "at": "2026-10-01T20:12:45+00:00",
+          "event": "Queued for AI"
+        }
+      ],
+      "prev_status": "unplanned"
     }
   ]
 }

@@ -579,7 +579,7 @@ class WorkflowTests(AppTestCase):
         doc = store.read(project, fresh=True)
         self.assertEqual([t["status"] for t in doc["tasks"]], ["drafted", "planned"])
         self.assertEqual(doc["tasks"][0]["history"][-1]["event"], "Plan has open questions")
-        self.assertEqual(doc["version"], 5)
+        self.assertEqual(doc["version"], 6)
 
         stamp = seed(2,[ASKING_PLAN, ASKING_PLAN])
         engine.reconcile(project)  # already migrated: planned tasks keep their questions
@@ -879,6 +879,103 @@ class AutomationTests(AppTestCase):
         res = self.client.post(f"/api/projects/{pid}/tasks/batch", headers=H,
                                json={"action": "mark_planned", "ids": [batch]})
         self.assertEqual(next(t for t in res.get_json()["tasks"] if t["id"] == batch)["status"], "queued")
+
+    def force_status(self, pid, tid, status):
+        """Put a task in a status directly (for states the API only reaches via the AI)."""
+        project = self.app.config["REGISTRY"].get(pid)
+        with self.app.config["STORE"].edit(project) as doc:
+            next(t for t in doc["tasks"] if t["id"] == tid)["status"] = status
+
+    def test_pause_and_resume(self):
+        kick = self.hold_runner()
+        pid = self.add_project()["id"]
+
+        def make(status):
+            tid = self.post_task(pid, status)["id"]
+            if status in ("planned", "queued"):
+                self.client.patch(f"/api/projects/{pid}/tasks/{tid}", headers=H, json={"plan": "do it"})
+                self.action(pid, tid, "mark_planned")
+            if status == "queued":
+                self.action(pid, tid, "queue")
+            elif status in ("drafted", "failed"):
+                self.force_status(pid, tid, status)
+            return tid
+
+        for status in ("unplanned", "drafted", "planned", "queued", "failed"):
+            tid = make(status)
+            kick.reset_mock()
+            task = self.action(pid, tid, "pause").get_json()
+            self.assertEqual((task["status"], task["paused_from"]), ("paused", status))
+            self.assertIsNone(task["queued_at"])
+            task = self.action(pid, tid, "resume").get_json()
+            self.assertEqual(task["status"], status)
+            self.assertNotIn("paused_from", task)
+            self.assertEqual(bool(task["queued_at"]), status == "queued")
+            self.assertEqual(kick.called, status == "queued")
+            self.assertEqual(self.events(task)[-1], f"Resumed ({status})")
+
+        tid = make("unplanned")
+        for status in ("review", "done", "planning", "running"):
+            self.force_status(pid, tid, status)
+            self.assertEqual(self.action(pid, tid, "pause").status_code, 400)
+        self.force_status(pid, tid, "unplanned")
+        self.assertEqual(self.action(pid, tid, "resume").status_code, 400)
+
+        self.action(pid, tid, "pause")
+        self.assertEqual(self.action(pid, tid, "plan").status_code, 400)
+        res = self.client.patch(f"/api/projects/{pid}/tasks/{tid}", headers=H, json={"title": "renamed"})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(self.client.delete(f"/api/projects/{pid}/tasks/{tid}", headers=H).status_code, 200)
+
+    def test_resume_planned_with_questions_lands_in_drafted(self):
+        self.hold_runner()
+        pid = self.add_project()["id"]
+        tid = self.post_task(pid, "t")["id"]
+        self.client.patch(f"/api/projects/{pid}/tasks/{tid}", headers=H, json={"plan": "do it"})
+        self.action(pid, tid, "mark_planned")
+        self.action(pid, tid, "pause")
+        self.client.patch(f"/api/projects/{pid}/tasks/{tid}", headers=H, json={"plan": ASKING_PLAN})
+        self.assertEqual(self.action(pid, tid, "resume").get_json()["status"], "drafted")
+
+    def test_paused_skipped_by_automation(self):
+        self.hold_runner()
+        pid = self.add_project()["id"]
+        paused = self.client.post(f"/api/projects/{pid}/tasks", headers=H,
+                                  json={"title": "Paused", "paused": True}).get_json()
+        self.assertEqual(paused["status"], "paused")
+        self.assertEqual(paused["paused_from"], "unplanned")
+        self.assertEqual(self.events(paused), ["Created (paused)"])
+        planned = self.post_task(pid, "Planned")["id"]
+        self.client.patch(f"/api/projects/{pid}/tasks/{planned}", headers=H, json={"plan": "do it"})
+        self.action(pid, planned, "mark_planned")
+        self.action(pid, planned, "pause")
+
+        self.set_project(pid, auto_plan=True, auto_queue=True)
+        self.set_global(auto_plan=True, auto_queue=True)
+        time.sleep(0.3)
+        tasks = self.client.get(f"/api/projects/{pid}/tasks").get_json()["tasks"]
+        self.assertEqual([t["status"] for t in tasks], ["paused", "paused"])
+        self.assertFalse([e for t in tasks for e in self.events(t) if e.startswith("Auto-")])
+
+        res = self.client.post(f"/api/projects/{pid}/tasks", headers=H, json={"title": "New", "paused": True})
+        self.assertEqual(res.get_json()["status"], "paused")
+
+    def test_batch_pause_and_resume(self):
+        kick = self.hold_runner()
+        pid = self.add_project()["id"]
+        a, b = (self.post_task(pid, n)["id"] for n in "ab")
+        self.force_status(pid, b, "review")
+
+        def batch(action):
+            return self.client.post(f"/api/projects/{pid}/tasks/batch", headers=H,
+                                    json={"action": action, "ids": [a, b]})
+
+        results = batch("pause").get_json()["results"]
+        self.assertEqual([r["ok"] for r in results], [True, False])
+        self.assertIn("review", results[1]["error"])
+        results = batch("resume").get_json()["results"]
+        self.assertEqual([r["ok"] for r in results], [True, False])
+        self.assertFalse(kick.called)
 
     def test_enable_applies_to_existing(self):
         self.hold_runner()
@@ -2052,7 +2149,7 @@ class OpencodeTests(AppTestCase):
         client.patch("/api/projects/old/tasks/2", headers=H, json={"provider": "opencode"})
         with open(os.path.join(old_dir, ".patchgoblin", "tasks.json"), encoding="utf-8") as fh:
             doc = json.load(fh)
-        self.assertEqual((doc["version"], [t["provider"] for t in doc["tasks"]]), (5, ["opencode-api", "opencode"]))
+        self.assertEqual((doc["version"], [t["provider"] for t in doc["tasks"]]), (6, ["opencode-api", "opencode"]))
         client.patch("/api/projects/old", headers=H, json={"provider": "opencode"})
 
         stamp = os.stat(settings_path).st_mtime_ns

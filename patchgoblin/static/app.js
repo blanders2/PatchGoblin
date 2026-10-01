@@ -5,14 +5,15 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 const STATUS_LABEL = {
   unplanned: "Unplanned", planning: "Planning…", drafted: "Drafted", planned: "Planned", queued: "Queued",
-  running: "Running…", review: "Needs review", done: "Done", failed: "Failed",
+  running: "Running…", review: "Needs review", done: "Done", failed: "Failed", paused: "Paused",
 };
 const COLUMN_OF = {
   unplanned: "unplanned", planning: "unplanned", drafted: "drafted", planned: "planned",
   queued: "queue", running: "queue", review: "review", done: "finished", failed: "finished",
+  paused: "paused",
 };
 // Waiting on the user: not locked by the AI (LOCKED in app.py) and not done.
-const ACTIONABLE = new Set(["unplanned", "drafted", "planned", "queued", "review", "failed"]);
+const ACTIONABLE = new Set(["unplanned", "drafted", "planned", "queued", "review", "failed", "paused"]);
 const BUSY = new Set(["planning", "running"]);
 
 const state = {
@@ -653,13 +654,15 @@ async function createTask(ev) {
   ev.preventDefault();
   const title = $("#nt-title").value.trim();
   if (!title) return;
+  const paused = $("#nt-paused").checked;
   try {
     const task = await api("POST", `/api/projects/${state.pid}/tasks`,
-      { title, description: $("#nt-desc").value.trim() });
+      { title, description: $("#nt-desc").value.trim(), ...(paused ? { paused: true } : {}) });
     $("#nt-title").value = "";
     $("#nt-desc").value = "";
     state.tasks.push(task);
-    if (state.tab !== "unplanned") selectTab("unplanned");
+    const tab = paused ? "paused" : "unplanned";
+    if (state.tab !== tab) selectTab(tab);
     else renderBoard();
   } catch (e) { toast(e.message, true); }
 }
@@ -677,13 +680,15 @@ const BATCH_ACTIONS = [
   { action: "unplan", label: "Back to unplanned", from: ["drafted", "planned"] },
   { action: "approve", label: "Approve", from: ["review"] },
   { action: "reopen", label: "Reopen", from: ["done", "review"] },
+  { action: "pause", label: "Pause", from: ["unplanned", "drafted", "planned", "queued", "failed"] },
+  { action: "resume", label: "Resume", from: ["paused"] },
   { action: "cancel", label: "Cancel", from: ["planning", "running"], cls: "danger" },
 ];
-const NOT_BUSY = ["unplanned", "drafted", "planned", "queued", "review", "done", "failed"];
+const NOT_BUSY = ["unplanned", "drafted", "planned", "queued", "review", "done", "failed", "paused"];
 const BATCH_VERB = { delete: "Deleted", set_provider: "Updated", set_models: "Updated", plan: "Started planning",
   mark_planned: "Marked planned", mark_drafted: "Moved to drafted", queue: "Queued", dequeue: "Removed from queue",
   unplan: "Moved back", reopen: "Reopened", approve: "Approved", send_back: "Sent back",
-  cancel: "Cancelled" };
+  cancel: "Cancelled", pause: "Paused", resume: "Resumed" };
 
 const tabTasks = () => sortTasks(state.tab, state.tasks.filter(t => COLUMN_OF[t.status] === state.tab));
 const selectedTasks = () => state.tasks.filter(t => state.selected.has(t.id));
@@ -986,6 +991,8 @@ function renderDrawer(fillForm) {
     return b;
   };
   const skipTip = "Accept the plan as written without asking the AI";
+  const pauseButton = () => actionButton("Pause", act("pause"), "ghost",
+    "Keep automation (Auto-plan / Auto-queue) from changing this task");
 
   const A = [];
   const act = action => () => doAction(action);
@@ -993,6 +1000,7 @@ function renderDrawer(fillForm) {
     case "unplanned":
       A.push(actionButton(planLabel, act("plan"), asking ? "ghost" : "primary", planTip));
       A.push(actionButton("Mark planned (skip AI)", act("mark_planned"), "ghost", skipTip));
+      A.push(pauseButton());
       break;
     case "planning":
       A.push(actionButton("Cancel planning", act("cancel"), "danger"));
@@ -1004,6 +1012,7 @@ function renderDrawer(fillForm) {
         "Accept the plan once its questions are removed. Unsaved edits are saved first."));
       A.push(actionButton("Queue anyway", act("queue"), "ghost", queueTip));
       A.push(actionButton("Back to unplanned", act("unplan"), "ghost"));
+      A.push(pauseButton());
       A.push(el("span", { class: "muted small" },
         "Answer the questions, or delete them from the plan, save, and click Mark planned."));
       break;
@@ -1015,9 +1024,11 @@ function renderDrawer(fillForm) {
           "The plan has open questions; park it in Drafted until they're answered"));
       }
       A.push(actionButton("Back to unplanned", act("unplan"), "ghost"));
+      A.push(pauseButton());
       break;
     case "queued":
       A.push(actionButton("Remove from queue", act("dequeue")));
+      A.push(pauseButton());
       break;
     case "running":
       A.push(actionButton("Cancel run", act("cancel"), "danger"));
@@ -1035,6 +1046,12 @@ function renderDrawer(fillForm) {
       A.push(actionButton("Queue to run again", act("queue"), asking ? "" : "primary", queueTip));
       A.push(actionButton(planLabel, act("plan"), "ghost", planTip));
       A.push(actionButton("Mark planned (skip AI)", act("mark_planned"), "ghost", skipTip));
+      A.push(pauseButton());
+      break;
+    case "paused":
+      A.push(actionButton("Resume", act("resume"), "primary", "Put the task back where it was"));
+      A.push(el("span", { class: "muted small" },
+        `Returns to ${STATUS_LABEL[t.paused_from || "unplanned"]}; automation won't touch it while paused.`));
       break;
   }
   $("#d-flow-actions").replaceChildren(...A);
