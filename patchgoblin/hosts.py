@@ -7,6 +7,8 @@ Remote hosts are driven with the system ``ssh`` client, so keys, agents and
 """
 from __future__ import annotations
 
+import base64
+import ntpath
 import os
 import posixpath
 import re
@@ -122,6 +124,7 @@ def communicate(argv, cwd=None, input: Optional[str] = None, timeout: Optional[f
 class LocalHost:
     kind = "local"
     label = "this computer"
+    lists_drives = os.name == "nt"
 
     def join(self, *parts: str) -> str:
         return os.path.join(*parts)
@@ -221,6 +224,7 @@ class SSHHost:
     """A POSIX host reached with the system ``ssh`` client (key auth, BatchMode)."""
 
     kind = "ssh"
+    os = "posix"
 
     def __init__(self, target: str, port: Optional[int] = None, ssh_bin: str = "ssh"):
         target = (target or "").strip()
@@ -334,6 +338,190 @@ class SSHHost:
             argv += ["-p", str(self.port)]
         return argv + [self.target, f'cd {shlex.quote(path)} && exec "${{SHELL:-/bin/sh}}" -l']
 
+    def dir_status(self, path: str, timeout: Optional[float] = None) -> Result:
+        """Result whose exit code is 0 when ``path`` is a directory on the host."""
+        return self._exec(f"test -d {shlex.quote(path)}", timeout=timeout)
+
+
+def _ps_quote(s: str) -> str:
+    return "'" + str(s).replace("'", "''") + "'"
+
+
+_PS_PREAMBLE = ("$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; "
+                "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); ")
+_PS_PREFIX = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
+_CMD_LIMIT = 8000  # cmd.exe caps command lines at 8191 characters
+
+
+def _ps_command(script: str) -> str:
+    """One remote command line that runs ``script`` identically under cmd and PowerShell."""
+    return _PS_PREFIX + base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+
+
+_WIN_ABS_RE = re.compile(r"^[A-Za-z]:\\")
+
+
+class WindowsSSHHost(SSHHost):
+    """A Windows host (OpenSSH Server, default shell cmd or PowerShell).
+
+    Every command is a single ``powershell.exe -EncodedCommand`` line, so the server's
+    default shell never parses user data. File contents travel as raw UTF-8 bytes.
+    """
+
+    os = "windows"
+    lists_drives = True
+
+    def _exec(self, script: str, **kw) -> Result:
+        command = _ps_command(_PS_PREAMBLE + script)
+        if len(command) > _CMD_LIMIT:
+            raise HostError("Command is too long for a Windows SSH host "
+                            "(pass the prompt on stdin instead of as an argument).")
+        return communicate(self._argv(command), **kw)
+
+    def join(self, *parts: str) -> str:
+        return ntpath.join(*parts)
+
+    def normalize(self, path: str) -> str:
+        path = path.strip().replace("/", "\\")
+        if not _WIN_ABS_RE.match(path):
+            raise HostError("Use an absolute Windows path on the remote host, e.g. C:\\Users\\me\\project.")
+        return ntpath.normpath(path)
+
+    def check(self) -> None:
+        res = self._exec("exit 0", timeout=30)
+        if not res.ok:
+            raise HostError(f"SSH connection to {self.label} failed: {res.stderr.strip() or res.returncode}")
+
+    def dir_status(self, path: str, timeout: Optional[float] = None) -> Result:
+        return self._exec(f"if (Test-Path -LiteralPath {_ps_quote(path)} -PathType Container) "
+                          "{exit 0} else {exit 1}", timeout=timeout)
+
+    def is_dir(self, path: str) -> bool:
+        return self.dir_status(path, timeout=60).ok
+
+    def ensure_dir(self, path: str) -> None:
+        res = self._exec(f"New-Item -ItemType Directory -Force -Path {_ps_quote(path)} | Out-Null", timeout=60)
+        if not res.ok:
+            raise HostError(f"Could not create {path} on {self.label}: {res.stderr.strip()}")
+
+    def home(self) -> str:
+        res = self._exec("[Console]::Out.Write($env:USERPROFILE)", timeout=30)
+        out = res.stdout.strip()
+        if not res.ok or not _WIN_ABS_RE.match(out):
+            raise HostError(f"Could not find the home directory on {self.label}: {res.stderr.strip()}")
+        return out
+
+    def list_dirs(self, path: str) -> dict:
+        if not path:
+            res = self._exec("Get-PSDrive -PSProvider FileSystem | ForEach-Object { $_.Root }", timeout=60)
+            if not res.ok:
+                raise HostError(f"Could not list drives on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+            drives = [ln.strip() for ln in res.stdout.splitlines() if ln.strip()]
+            return {"path": "", "parent": None, "sep": "\\",
+                    "dirs": [{"name": d, "path": d} for d in drives]}
+        path = self.normalize(path)
+        q = _ps_quote(path)
+        script = (f"if (-not (Test-Path -LiteralPath {q} -PathType Container)) {{exit 45}}; "
+                  f"(Resolve-Path -LiteralPath {q}).ProviderPath; "
+                  f"Get-ChildItem -LiteralPath {q} -Directory -Force -ErrorAction SilentlyContinue "
+                  "| ForEach-Object { $_.Name }; exit 0")
+        res = self._exec(script, timeout=60)
+        if res.returncode == 45:
+            raise HostError(f"Not a directory (or no access): {path}")
+        if not res.ok:
+            raise HostError(f"Could not list {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+        lines = [ln.rstrip("\r") for ln in res.stdout.splitlines()]
+        cwd = lines[0] if lines and lines[0] else path
+        names = sorted((n for n in lines[1:] if n), key=str.lower)
+        parent = ntpath.dirname(cwd)
+        if parent == cwd or not parent:  # drive root: back to the drive list
+            parent = ""
+        return {"path": cwd, "parent": parent, "sep": "\\",
+                "dirs": [{"name": n, "path": ntpath.join(cwd, n)} for n in names]}
+
+    def read_text(self, path: str) -> Optional[str]:
+        q = _ps_quote(path)
+        script = (f"if (-not (Test-Path -LiteralPath {q} -PathType Leaf)) {{exit 44}}; "
+                  f"$b=[IO.File]::ReadAllBytes({q}); $o=[Console]::OpenStandardOutput(); "
+                  "$o.Write($b,0,$b.Length); $o.Flush()")
+        res = self._exec(script, timeout=60)
+        if res.returncode == 44:
+            return None
+        if not res.ok:
+            raise HostError(f"Could not read {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+        return res.stdout
+
+    def list_dir(self, path: str) -> list[str]:
+        q = _ps_quote(path)
+        res = self._exec(f"if (Test-Path -LiteralPath {q} -PathType Container) "
+                         f"{{Get-ChildItem -LiteralPath {q} -Force -Name}}", timeout=60)
+        if not res.ok:
+            raise HostError(f"Could not list {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+        return sorted(line.rstrip("\r") for line in res.stdout.splitlines() if line.strip())
+
+    def write_text(self, path: str, text: str) -> None:
+        q, tmp = _ps_quote(path), _ps_quote(f"{path}.tmp")
+        script = (f"$d=Split-Path -Parent {q}; "
+                  "if ($d) { New-Item -ItemType Directory -Force -Path $d | Out-Null }; "
+                  "$m=New-Object IO.MemoryStream; [Console]::OpenStandardInput().CopyTo($m); "
+                  f"[IO.File]::WriteAllBytes({tmp}, $m.ToArray()); "
+                  f"Move-Item -Force -LiteralPath {tmp} -Destination {q}")
+        res = self._exec(script, input=text, timeout=60)
+        if not res.ok:
+            raise HostError(f"Could not write {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+
+    def run(self, argv: list[str], cwd: str, input: Optional[str] = None,
+            timeout: Optional[float] = None, on_output: OutputFn = None,
+            on_start: StartFn = None, login: bool = False, env: Optional[dict] = None) -> Result:
+        # ``login`` is a no-op: Windows sshd sessions already carry the user's PATH.
+        sets = "".join(f"$env:{k}={_ps_quote(v)}; " for k, v in (env or {}).items())
+        call = "& " + " ".join(_ps_quote(a) for a in argv)
+        script = f"{sets}Set-Location -LiteralPath {_ps_quote(cwd)}; {call}; exit $LASTEXITCODE"
+        return self._exec(script, input=input, timeout=timeout, on_output=on_output, on_start=on_start)
+
+    def run_shell(self, command: str, cwd: str, timeout: Optional[float] = None,
+                  on_output: OutputFn = None, on_start: StartFn = None) -> Result:
+        script = (f"Set-Location -LiteralPath {_ps_quote(cwd)}; {command}\n"
+                  "if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }")
+        return self._exec(script, timeout=timeout, on_output=on_output, on_start=on_start)
+
+    def shell_argv(self, path: str) -> list[str]:
+        argv = [self.ssh_bin, "-t"]
+        if self.port:
+            argv += ["-p", str(self.port)]
+        script = f"Set-Location -LiteralPath {_ps_quote(path)}"
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        return argv + [self.target, f"powershell.exe -NoLogo -NoExit -EncodedCommand {encoded}"]
+
+
+_SSH_OS: dict[tuple, str] = {}
+_SSH_OS_LOCK = threading.Lock()
+
+
+def detect_ssh_os(target: str, port: Optional[int] = None) -> str:
+    """``"posix"`` or ``"windows"`` for an SSH target; successes are cached, failures are not."""
+    key = (target, port or None)
+    with _SSH_OS_LOCK:
+        if key in _SSH_OS:
+            return _SSH_OS[key]
+    probe_host = SSHHost(target, port)
+    res = communicate(probe_host._argv("uname -s"), timeout=30)
+    if res.timed_out or res.returncode == 255:
+        raise HostError(f"SSH connection to {probe_host.label} failed: "
+                        f"{'timed out' if res.timed_out else res.stderr.strip() or res.returncode}")
+    found = None
+    if res.ok:
+        found = "posix"
+    else:
+        res = communicate(probe_host._argv(_ps_command("[Environment]::OSVersion.Platform")), timeout=30)
+        if res.ok and "Win32NT" in res.stdout:
+            found = "windows"
+    if not found:
+        raise HostError(f"Could not detect the remote OS on {probe_host.label}.")
+    with _SSH_OS_LOCK:
+        _SSH_OS[key] = found
+    return found
+
 
 _LINUX_TERMINALS = (
     # (binary, flags before the command to run inside it)
@@ -439,7 +627,9 @@ def open_vscode(project: dict) -> None:
 
 def host_for(project: dict):
     if project.get("location") == "ssh":
-        return SSHHost(project.get("ssh_target", ""), project.get("ssh_port"))
+        target, port = project.get("ssh_target", ""), project.get("ssh_port")
+        remote_os = project.get("ssh_os") or detect_ssh_os(target, port)
+        return (WindowsSSHHost if remote_os == "windows" else SSHHost)(target, port)
     return LocalHost()
 
 
@@ -452,7 +642,7 @@ def probe(project: dict) -> dict:
             if os.path.isdir(path):
                 return {"ok": True, "error": ""}
             return {"ok": False, "error": f"Directory does not exist: {path}"}
-        res = host._exec(f"test -d {shlex.quote(path)}", timeout=20)
+        res = host.dir_status(path, timeout=20)
         if res.timed_out:
             return {"ok": False, "error": f"SSH connection to {host.label} timed out"}
         if res.returncode == 0:

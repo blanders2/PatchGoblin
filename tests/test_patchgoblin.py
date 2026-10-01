@@ -11,7 +11,9 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from patchgoblin import create_app  # noqa: E402
-from patchgoblin.hosts import HostError, LocalHost, Result, SSHHost, probe, terminal_command, vscode_command  # noqa: E402
+from patchgoblin import hosts as hosts_mod  # noqa: E402
+from patchgoblin.hosts import (HostError, LocalHost, Result, SSHHost, WindowsSSHHost, detect_ssh_os,  # noqa: E402
+                               host_for, probe, terminal_command, vscode_command)
 from patchgoblin.providers import OpenAIAgent, Outcome, ProjectFiles  # noqa: E402
 
 FAKE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_agent.py")
@@ -251,6 +253,60 @@ class ProjectTests(AppTestCase):
             self.assertEqual(out["ok"], ok, out)
             self.assertIn(text, out["error"])
             self.assertIn("test -d '/srv/my app'", comm.call_args[0][0][-1])
+
+    @staticmethod
+    def _decode_ps(argv):
+        import base64
+        cmd = argv[-1]
+        assert cmd.startswith("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "), cmd
+        return base64.b64decode(cmd.rsplit(" ", 1)[1]).decode("utf-16-le")
+
+    def test_windows_ssh_host(self):
+        host = WindowsSSHHost("me@win", 2222)
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(0, "", "")) as comm:
+            host.run(["claude", "-p", "it's"], cwd=r"C:\my app", env={"A": "1"})
+            script = self._decode_ps(comm.call_args[0][0])
+            self.assertIn("$env:A='1'", script)
+            self.assertIn(r"Set-Location -LiteralPath 'C:\my app'", script)
+            self.assertIn("& 'claude' '-p' 'it''s'", script)
+            host.write_text(r"C:\p\t.json", "hi")
+            self.assertEqual(comm.call_args[1]["input"], "hi")
+        self.assertEqual(host.normalize("C:/x/../y"), r"C:\y")
+        for bad in ("/srv/x", r"x\y"):
+            with self.assertRaises(HostError):
+                host.normalize(bad)
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(44, "", "")):
+            self.assertIsNone(host.read_text(r"C:\nope"))
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(0, r"C:\a"+"\nb\r\nc\r\n", "")):
+            out = host.list_dirs(r"C:\a")
+        self.assertEqual(out["parent"], "C:"+chr(92))
+        self.assertEqual(out["sep"], "\\")
+        self.assertEqual([d["path"] for d in out["dirs"]], [r"C:\a\b", r"C:\a\c"])
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(45, "", "")):
+            with self.assertRaises(HostError):
+                host.list_dirs(r"C:\a")
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(0, "C:" + chr(92) + "\nD:" + chr(92) + "\n", "")):
+            self.assertEqual(len(host.list_dirs("")["dirs"]), 2)
+        argv, _ = terminal_command(host, r"C:\p", platform="win32", which=lambda n: None)
+        self.assertEqual(argv[:2], ["ssh", "-t"])
+        self.assertIn("powershell.exe -NoLogo -NoExit -EncodedCommand ", argv[-1])
+
+    def test_detect_ssh_os_and_host_for(self):
+        hosts_mod._SSH_OS.clear()
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(0, "Linux\n", "")):
+            self.assertEqual(detect_ssh_os("a@b"), "posix")
+        with mock.patch("patchgoblin.hosts.communicate",
+                        side_effect=[Result(1, "", ""), Result(0, "Win32NT\r\n", "")]):
+            self.assertEqual(detect_ssh_os("a@win"), "windows")
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(255, "", "refused")):
+            with self.assertRaises(HostError):
+                detect_ssh_os("a@down")
+        self.assertNotIn(("a@down", None), hosts_mod._SSH_OS)
+        with mock.patch("patchgoblin.hosts.communicate") as comm:
+            h = host_for({"location": "ssh", "ssh_target": "a@x", "ssh_os": "windows"})
+            self.assertIsInstance(h, WindowsSSHHost)
+            comm.assert_not_called()
+        hosts_mod._SSH_OS.clear()
 
     def test_index_has_queue_tabs(self):
         html = self.client.get("/").get_data(as_text=True)

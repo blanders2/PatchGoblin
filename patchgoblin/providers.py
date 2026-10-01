@@ -577,7 +577,8 @@ class OpenAIAgent:
             tools.append(_tool("write_file", "Create or overwrite a text file with the full new contents.",
                                path=_S, content=_S))
         if self.allow_commands:
-            tools.append(_tool("run_command", "Run a shell command in the project root (5 minute limit). "
+            shell = "PowerShell command" if getattr(self.host, "os", "") == "windows" else "shell command"
+            tools.append(_tool("run_command", f"Run a {shell} in the project root (5 minute limit). "
                                "Returns exit code and output.", command=_S))
         return tools
 

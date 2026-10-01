@@ -319,6 +319,12 @@ versions (a single "OpenAI API" block) become an endpoint with id `openai`.
   (e.g. `/home/me/project`).
 - Agent commands run in a login shell (`$SHELL -lc`), so PATH changes from your profile
   (npm, nvm, `~/.local/bin`) apply.
+- Windows hosts work too (OpenSSH Server with key auth). The remote OS is detected
+  automatically; the server's default shell can be cmd.exe or PowerShell because every
+  command is sent as `powershell.exe -EncodedCommand`, so Windows PowerShell 5.1+ must be
+  present. Use drive paths (`C:\Users\me\project`); git and the AI CLIs must be on the
+  user's PATH. Long arguments are limited by cmd.exe's ~8,000 character command line, so
+  prompts must go over stdin.
 - Cancelling a remote run closes the SSH session. Most CLIs exit when that happens, but
   check the host if one doesn't.
 

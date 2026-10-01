@@ -372,7 +372,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         data = body()
         host = host_for(project_fields(data))
         path = (data.get("path") or "").strip()
-        if data.get("home") or (not path and not (os.name == "nt" and host.kind == "local")):
+        if data.get("home") or (not path and not getattr(host, "lists_drives", False)):
             path = host.home()
         return jsonify(host.list_dirs(path))
 
@@ -384,6 +384,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         host = host_for(fields)
         if fields["location"] == "ssh":
             host.check()
+            fields["ssh_os"] = host.os
         path = host.normalize(data.get("path") or "")
         fields["path"] = path
         fields["name"] = fields["name"] or path.replace("\\", "/").rstrip("/").split("/")[-1] or path
