@@ -13,9 +13,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from patchgoblin import create_app  # noqa: E402
 from patchgoblin import hosts as hosts_mod  # noqa: E402
+from patchgoblin.engine import Job  # noqa: E402
 from patchgoblin.hosts import (HostError, LocalHost, Result, SSHHost, WindowsSSHHost, detect_ssh_os,  # noqa: E402
                                host_for, probe, terminal_command, vscode_command)
-from patchgoblin.providers import OpenAIAgent, Outcome, ProjectFiles  # noqa: E402
+from patchgoblin.providers import (OpenAIAgent, Outcome, ProjectFiles, _StreamJson,  # noqa: E402
+                                   describe_tool, run_claude)
 
 FAKE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_agent.py")
 H = {"X-PatchGoblin": "1"}
@@ -787,7 +789,7 @@ class WorkflowTests(AppTestCase):
         a, b, c = (self.post_task(pid, t)["id"] for t in ("a", "b", "c"))
         path = os.path.join(self.proj_dir, ".patchgoblin", "tasks.json")
         engine = self.app.config["ENGINE"]
-        engine.jobs[(pid, c)] = mock.Mock()  # keep reconcile() from resetting the fake "running" task
+        engine.jobs[(pid, c)] = Job("run")  # keep reconcile() from resetting the fake "running" task
         with open(path, encoding="utf-8") as fh:
             doc = json.load(fh)
         doc["tasks"][2]["status"] = "running"
@@ -1941,7 +1943,7 @@ class ModelTests(AppTestCase):
             json.dump(doc, fh)
         store = self.app.config["STORE"]
         store.forget(pid)
-        self.app.config["ENGINE"].jobs[(pid, c)] = mock.Mock()
+        self.app.config["ENGINE"].jobs[(pid, c)] = Job("run")
         self.addCleanup(self.app.config["ENGINE"].jobs.pop, (pid, c))
         res = self.client.patch(f"/api/projects/{pid}/tasks/{a}", headers=H, json={"code_model": " x "})
         self.assertEqual(res.status_code, 200, res.get_json())
@@ -2521,6 +2523,191 @@ class SvnTests(AppTestCase):
                      settings=self.app.config["SETTINGS"].get(), model="", job=Job("plan"))
         self.assertFalse(out.ok)
         self.assertIn("plan_edit.txt", out.error)
+
+
+class FakeJob:
+    """Collects what a Job would: raw writes and events."""
+    cancelled = False
+
+    def __init__(self):
+        self.raw, self.events = "", []
+
+    def write(self, text):
+        self.raw += text
+
+    def event(self, kind, label, detail=""):
+        self.events.append((kind, label, detail))
+
+    def elapsed(self):
+        return 0
+
+    def attach(self, proc):
+        pass
+
+
+TRANSCRIPT = "\n".join(json.dumps(x) for x in [
+    {"type": "system", "subtype": "init", "model": "opus", "cwd": "/p"},
+    {"type": "assistant", "message": {"content": [{"type": "text", "text": "Let me look."}]}},
+    {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Read", "input": {"file_path": "/p/src/a.py"}},
+        {"type": "tool_use", "name": "Edit", "input": {"file_path": "/p/src/\u00e9.py"}},
+        {"type": "tool_use", "name": "Bash", "input": {"command": "pytest -q", "description": "Run tests"}}]}},
+    {"type": "user", "message": {"content": [{"type": "tool_result", "is_error": True, "content": "boom"},
+                                             {"type": "tool_result", "content": "huge file body"}]}},
+    {"type": "result", "is_error": False, "result": "Final answer", "num_turns": 3, "duration_ms": 2000,
+     "total_cost_usd": 0.5},
+]) + "\n"
+
+
+class StreamJsonTests(unittest.TestCase):
+    def feed(self, text, size):
+        job = FakeJob()
+        stream = _StreamJson(job, "/p")
+        for i in range(0, len(text), size):  # split anywhere, even mid-line
+            stream.write(text[i:i + size])
+        stream.flush()
+        return job, stream
+
+    def test_events_from_transcript_at_any_chunk_size(self):
+        for size in (1000, 7, 1):
+            job, stream = self.feed(TRANSCRIPT, size)
+            kinds = [(k, l) for k, l, _ in job.events]
+            self.assertEqual(kinds[0][0], "note")
+            self.assertIn(("say", "Let me look."), kinds)
+            self.assertIn(("tool", "Reading src/a.py"), kinds)
+            self.assertIn(("tool", "Editing src/\u00e9.py"), kinds)
+            self.assertIn(("tool", "Running `pytest -q`"), kinds)
+            self.assertIn(("error", "boom"), kinds)
+            self.assertEqual([k for k, _ in kinds].count("error"), 1)  # successful results are not events
+            self.assertEqual(stream.result_text, "Final answer")
+            self.assertIn("Finished: 2s, 3 turns, $0.50", [l for _, l, _ in job.events])
+            self.assertTrue(any(d == "Run tests" for _, _, d in job.events))
+
+    def test_non_json_lines_go_to_raw_output(self):
+        job, stream = self.feed('warning: hi\n{"type": "weird"}\n[1, 2]\n', 5)
+        self.assertEqual(job.raw, "warning: hi\n[1, 2]\n")
+        self.assertIsNone(stream.result_text)
+
+    def test_describe_tool(self):
+        self.assertEqual(describe_tool("Grep", {"pattern": "foo"})[0], "Searching `foo`")
+        self.assertEqual(describe_tool("Task", {})[0], "Starting sub-agent")
+        self.assertEqual(describe_tool("TodoWrite", {"todos": [{"content": "x", "status": "pending"}]}),
+                         ("Updating plan", "[pending] x"))
+        self.assertEqual(describe_tool("Other", {"a": 1})[0], 'Other {"a": 1}')
+        self.assertEqual(describe_tool("write_file", {"path": "a/b.txt"})[0], "Writing a/b.txt")
+        self.assertEqual(describe_tool("Read", {"file_path": "C:\\proj\\x.py"}, "C:/proj")[0], "Reading x.py")
+
+    def run_with(self, stdout, argv=("claude", "-p", "--output-format", "stream-json")):
+        host = mock.Mock()
+        host.run.side_effect = lambda *a, **kw: (kw["on_output"](stdout), Result(0, stdout, ""))[1]
+        job = FakeJob()
+        outcome = run_claude({"plan": list(argv), "run": list(argv)}, "plan", "p", host=host, cwd="/p",
+                             model="", timeout=5, job=job)
+        return outcome, job
+
+    def test_run_claude_takes_text_from_result(self):
+        outcome, job = self.run_with(TRANSCRIPT)
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.text, "Final answer")
+
+    def test_run_claude_failures(self):
+        outcome, _ = self.run_with(TRANSCRIPT.rsplit("\n", 2)[0] + "\n")
+        self.assertFalse(outcome.ok)
+        self.assertIn("ended without a result", outcome.error)
+        bad = json.dumps({"type": "result", "is_error": True, "result": "Credit balance is too low"}) + "\n"
+        outcome, _ = self.run_with(bad)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.error, "Credit balance is too low")
+
+    def test_run_claude_text_mode_falls_back(self):
+        outcome, job = self.run_with("plain answer\n", argv=("claude", "-p", "--output-format", "text"))
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.text, "plain answer")
+        self.assertEqual(job.events, [])
+
+
+class ActivityTests(AppTestCase):
+    def setUp(self):
+        super().setUp()
+        self.app.config["SETTINGS"].update({"commands": {"claude": {
+            "plan": [sys.executable, FAKE, "plan", "--stream-json", "--output-format", "stream-json"],
+            "run": [sys.executable, FAKE, "run", "--stream-json", "--output-format", "stream-json"]}}})
+
+    def test_plan_and_run_end_to_end(self):
+        pid = self.add_project()["id"]
+        tid = self.post_task(pid, "Do it")["id"]
+        self.assertEqual(self.action(pid, tid, "plan").status_code, 200)
+        task = self.wait_for(pid, tid, ("planned",))
+        self.assertIn("Step one", task["plan"])
+        self.assertNotIn('"type"', task["plan"])
+        self.assertEqual(self.action(pid, tid, "queue").status_code, 200)
+        task = self.wait_for(pid, tid, ("review", "failed"))
+        self.assertEqual(task["status"], "review", task["error"])
+        self.assertTrue(task["commit"])
+        self.assertTrue(os.path.exists(os.path.join(self.proj_dir, "agent_output.txt")))
+        self.assertIn("Created agent_output.txt", task["output"])
+
+    def test_job_events_reach_live_and_task_view(self):
+        pid = self.add_project()["id"]
+        tid = self.post_task(pid, "Do it")["id"]
+        job = Job("run")
+        job.event("tool", "Editing app.py", "detail")
+        with mock.patch.object(self.app.config["ENGINE"], "job", return_value=job):
+            live = self.client.get(f"/api/projects/{pid}/tasks/{tid}/live").get_json()
+            tasks = self.client.get(f"/api/projects/{pid}/tasks").get_json()["tasks"]
+        self.assertEqual(live["current"], "Editing app.py")
+        self.assertEqual(live["events"][0]["kind"], "tool")
+        self.assertIn("Editing app.py", live["output"])
+        self.assertEqual(next(t for t in tasks if t["id"] == tid)["activity"], "Editing app.py")
+
+    def test_job_caps_events(self):
+        from patchgoblin.engine import MAX_EVENTS
+        job = Job("run")
+        for i in range(MAX_EVENTS + 20):
+            job.event("note", f"n{i}")
+        events = job.events()
+        self.assertEqual(len(events), MAX_EVENTS)
+        self.assertEqual(events[0]["label"], "n20")
+        job.event("say", "x", "y" * 10000)
+        self.assertLessEqual(len(job.events()[-1]["detail"]), 4001)
+
+    def test_openai_agent_emits_events(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = FakeJob()
+            agent = OpenAIAgent(LocalHost(), root, {"base_url": "http://x", "model": "m", "max_steps": 5},
+                                "", "run", job)
+            replies = [
+                {"choices": [{"message": {"role": "assistant", "content": "Working", "tool_calls": [{
+                    "id": "c1", "type": "function",
+                    "function": {"name": "read_file", "arguments": json.dumps({"path": "../x"})}}]}}]},
+                {"choices": [{"message": {"role": "assistant", "content": "Done"}}]},
+            ]
+            with mock.patch.object(agent, "_request", side_effect=replies):
+                agent.run("go", timeout=60)
+            kinds = [(k, l) for k, l, _ in job.events]
+            self.assertEqual(kinds[0], ("say", "Working"))
+            self.assertEqual(kinds[1], ("tool", "Reading ../x"))
+            self.assertEqual(kinds[2][0], "error")
+            self.assertEqual(kinds[3], ("say", "Done"))
+
+
+class ClaudeMigrationTests(unittest.TestCase):
+    def settings_with(self, claude):
+        from patchgoblin.store import Settings
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        with open(os.path.join(d, "settings.json"), "w") as fh:
+            json.dump({"commands": {"claude": claude}}, fh)
+        return Settings(d).get()["commands"]["claude"]
+
+    def test_legacy_defaults_upgraded_and_custom_kept(self):
+        from patchgoblin.store import LEGACY_CLAUDE_COMMANDS
+        got = self.settings_with(dict(LEGACY_CLAUDE_COMMANDS))
+        self.assertIn("stream-json --verbose", got["plan"])
+        self.assertIn("stream-json --verbose", got["run"])
+        got = self.settings_with({"plan": "my claude -p", "run": LEGACY_CLAUDE_COMMANDS["run"]})
+        self.assertEqual(got["plan"], "my claude -p")
+        self.assertIn("stream-json", got["run"])
 
 
 if __name__ == "__main__":

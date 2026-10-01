@@ -702,6 +702,7 @@ function renderCard(t) {
     el("span", { class: "tid" }, `#${t.id}`),
     el("span", { class: `badge ${t.status}` }, STATUS_LABEL[t.status])),
   el("div", { class: "card-title" }, t.title),
+  t.active && t.activity ? el("div", { class: "card-activity", title: t.activity }, `▶ ${t.activity}`) : null,
   el("div", { class: "card-meta" },
     t.provider && t.provider !== p.provider ? el("span", { class: "chip" }, providerName(t.provider)) : null,
     t.plan_model ? el("span", { class: "chip", title: "Planning model for this task" }, `plan: ${t.plan_model}`) : null,
@@ -1239,6 +1240,42 @@ async function deleteTask() {
 
 /* ---------------- live output ---------------- */
 
+const ACTIVITY_ICON = { say: "💬", tool: "🔧", error: "⚠", note: "·" };
+
+function activityAtBottom(list) {
+  return list.scrollTop + list.clientHeight >= list.scrollHeight - 30;
+}
+
+// Appends only new events; re-renders fully if the list shrank (cap rollover or a new job).
+function renderActivity(list, events) {
+  const stick = activityAtBottom(list);
+  let done = Number(list.dataset.count || 0);
+  if (events.length < done || (done && list.dataset.first !== String(events[0] && events[0].at))) {
+    list.replaceChildren();
+    done = 0;
+  }
+  if (events.length === done) return;
+  list.dataset.first = String(events[0].at);
+  list.append(...events.slice(done).map(ev => {
+    const long = ev.detail && ev.detail !== ev.label;
+    const label = el("span", { class: "act-label" }, ev.label);
+    return el("li", { class: `act ${ev.kind}` },
+      el("span", { class: "act-icon" }, ACTIVITY_ICON[ev.kind] || "·"),
+      long ? el("details", {}, el("summary", {}, label, " ", el("span", { class: "muted act-at" }, `+${Math.round(ev.at)}s`)),
+                el("pre", { class: "act-detail" }, ev.detail))
+           : el("span", {}, label, " ", el("span", { class: "muted act-at" }, `+${Math.round(ev.at)}s`)));
+  }));
+  list.dataset.count = events.length;
+  if (stick) list.scrollTop = list.scrollHeight;
+}
+
+function showLiveTab(raw) {
+  $("#d-activity").hidden = raw;
+  $("#d-live").hidden = !raw;
+  $("#d-tab-activity").classList.toggle("active", !raw);
+  $("#d-tab-raw").classList.toggle("active", raw);
+}
+
 async function pollLive() {
   clearTimeout(pollLive.timer);
   pollLive.timer = null;
@@ -1248,6 +1285,15 @@ async function pollLive() {
   try {
     const live = await api("GET", `/api/projects/${state.pid}/tasks/${t.id}/live`);
     if (state.openTid !== t.id) { pollLive.timer = null; return; }
+    renderActivity($("#d-activity"), live.events || []);
+    $("#d-current").textContent = live.current ? `▶ ${live.current}` : "";
+    $("#d-kind").textContent = live.kind === "plan" ? "· Planning" : live.kind ? "· Running" : "";
+    if (pollLive.tabFor !== t.id) {  // first poll for this task: pick a default tab
+      pollLive.tabFor = t.id;
+      showLiveTab(!(live.events || []).length);
+    } else if ((live.events || []).length && !pollLive.userTab && $("#d-activity").hidden) {
+      showLiveTab(false);
+    }
     const pre = $("#d-live");
     const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
     pre.textContent = live.output || "Waiting for output…";
@@ -1255,7 +1301,7 @@ async function pollLive() {
     $("#d-elapsed").textContent = live.active ? `${live.elapsed}s` : "finished";
     if (!live.active) { pollLive.timer = null; loadTasks(); return; }
   } catch { /* transient; next tick retries */ }
-  pollLive.timer = setTimeout(pollLive, 1500);
+  pollLive.timer = setTimeout(pollLive, 1000);
 }
 
 /* ---------------- chat ---------------- */
@@ -1306,6 +1352,11 @@ function renderChat(data) {
   }, el("span", { class: "when" }, `${m.role === "user" ? "You" : "AI"} · ${new Date(m.at).toLocaleTimeString()}`),
      m.text)));
   $("#c-live-wrap").hidden = !data.active;
+  const events = data.events || [];
+  renderActivity($("#c-activity"), events);
+  $("#c-current").textContent = data.current ? `▶ ${data.current}` : "";
+  $("#c-raw-toggle").hidden = !data.active;
+  if (!events.length) $("#c-live").hidden = false;
   $("#c-live").textContent = data.output || "Waiting for output…";
   $("#c-elapsed").textContent = data.active ? `${data.elapsed}s` : "";
   $("#c-send").disabled = data.active;
@@ -1339,6 +1390,13 @@ function setupChat() {
   $("#chat-form").onsubmit = sendChat;
   $("#c-input").onkeydown = e => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) sendChat(e);
+  };
+  $("#d-tab-activity").onclick = () => { pollLive.userTab = true; showLiveTab(false); };
+  $("#d-tab-raw").onclick = () => { pollLive.userTab = true; showLiveTab(true); };
+  $("#c-raw-toggle").onclick = () => {
+    const pre = $("#c-live");
+    pre.hidden = !pre.hidden;
+    $("#c-raw-toggle").textContent = pre.hidden ? "Show raw output" : "Hide raw output";
   };
   $("#c-cancel").onclick = () => chatRequest("POST", "/cancel");
   $("#c-clear").onclick = () => {

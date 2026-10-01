@@ -209,7 +209,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
 
     def task_view(pid: str, task: dict) -> dict:
         job = engine.job(pid, task["id"])
-        return {**task, "active": job is not None, "questions": plan_questions(task.get("plan", ""))}
+        return {**task, "active": job is not None, "activity": job.current if job else "",
+                "questions": plan_questions(task.get("plan", ""))}
 
     def plan_answers(value) -> list[dict] | None:
         if value is None:
@@ -620,7 +621,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         chat = engine.chat(pid)
         job = chat.job
         return {"messages": list(chat.messages), "active": job is not None,
-                "output": job.text() if job else "", "elapsed": round(job.elapsed()) if job else 0}
+                "output": job.text() if job else "", "elapsed": round(job.elapsed()) if job else 0,
+                "events": job.events() if job else [], "current": job.current if job else ""}
 
     @app.get("/api/projects/<pid>/chat")
     def get_chat(pid):
@@ -889,6 +891,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         job = engine.job(pid, tid)
         return jsonify(active=job is not None, kind=job.kind if job else None,
                        output=job.text() if job else "",
+                       events=job.events() if job else [], current=job.current if job else "",
                        elapsed=round(job.elapsed()) if job else 0)
 
     @app.get("/api/projects/<pid>/tasks/<int:tid>/changes")

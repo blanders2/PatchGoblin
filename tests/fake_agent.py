@@ -5,6 +5,33 @@ import sys
 
 mode = sys.argv[1]
 prompt = sys.stdin.read()
+
+if "--stream-json" in sys.argv:
+    # Behave like `claude --output-format stream-json`: events as JSON lines, then the result.
+    import atexit
+    import io
+    import json
+    real_stdout, sys.stdout = sys.stdout, io.StringIO()
+    captured = sys.stdout
+
+    def emit_stream():
+        sys.stdout = real_stdout
+        if "FAIL" in prompt:
+            return
+        lines = [
+            {"type": "system", "subtype": "init", "model": "fake", "cwd": os.getcwd()},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Looking around"}]}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Read", "input": {"file_path": os.path.join(os.getcwd(), "a.txt")}}]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "is_error": True, "content": "no such file"}]}},
+            {"type": "result", "subtype": "success", "is_error": False, "result": captured.getvalue().strip(),
+             "num_turns": 2, "duration_ms": 1500, "total_cost_usd": 0.01},
+        ]
+        for line in lines:
+            print(json.dumps(line), flush=True)
+
+    atexit.register(emit_stream)
 print("working...", file=sys.stderr, flush=True)
 if os.environ.get("OPENCODE_CONFIG_CONTENT"):
     print("inline config: " + os.environ["OPENCODE_CONFIG_CONTENT"], file=sys.stderr, flush=True)

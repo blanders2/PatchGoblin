@@ -276,8 +276,9 @@ def run_ai(provider: str, mode: str, prompt: str, *, host, project: dict, settin
     if provider == "cline":
         return run_cline(settings["commands"][provider], mode, prompt, host=host, cwd=project["path"],
                          model=model, timeout=timeout, job=job, run_marker=run_marker, tracked=is_tracked, svn=svn_wc)
-    return run_cli(settings["commands"][provider], mode, prompt, host=host, cwd=project["path"],
-                   model=model, timeout=timeout, job=job)
+    runner = run_claude if provider == "claude" else run_cli
+    return runner(settings["commands"][provider], mode, prompt, host=host, cwd=project["path"],
+                  model=model, timeout=timeout, job=job)
 
 
 def agent_for(cfg: dict, mode: str) -> str:
@@ -444,6 +445,143 @@ def run_cli(cfg: dict, mode: str, prompt: str, *, host, cwd: str, model: str,
     if not text:
         return Outcome(False, text, f"{argv[0]} produced no output.")
     return Outcome(True, text)
+
+
+def _rel_path(path: str, cwd: str) -> str:
+    """``path`` relative to the project directory when it lies inside it."""
+    norm, base = path.replace("\\", "/"), (cwd or "").replace("\\", "/").rstrip("/")
+    if base and norm.lower().startswith(base.lower() + "/"):
+        return norm[len(base) + 1:]
+    return path
+
+
+def describe_tool(name: str, args, cwd: str = "") -> tuple[str, str]:
+    """A readable (label, detail) for a tool call, for the live activity feed."""
+    args = args if isinstance(args, dict) else {}
+
+    def arg(*keys) -> str:
+        for key in keys:
+            if isinstance(args.get(key), str) and args[key]:
+                return args[key]
+        return ""
+
+    verbs = {"Read": "Reading", "Edit": "Editing", "Write": "Writing", "MultiEdit": "Editing",
+             "NotebookEdit": "Editing", "read_file": "Reading", "write_file": "Writing"}
+    if name in verbs:
+        return f"{verbs[name]} {_rel_path(arg('file_path', 'notebook_path', 'path'), cwd) or '(file)'}", ""
+    if name in ("Bash", "run_command"):
+        return f"Running `{_clip(arg('command'), 200)}`", arg("description")
+    if name in ("Grep", "Glob", "search"):
+        return f"Searching `{arg('pattern')}`", ""
+    if name == "list_files":
+        return f"Listing files {arg('prefix')}".rstrip(), ""
+    if name == "TodoWrite":
+        todos = args.get("todos")
+        lines = [f"[{t.get('status', '')}] {t.get('content', '')}" for t in todos if isinstance(t, dict)] \
+            if isinstance(todos, list) else []
+        return "Updating plan", "\n".join(lines)
+    if name == "Task":
+        return "Starting sub-agent", arg("description")
+    return f"{name} {_clip(json.dumps(args), 200)}".strip(), ""
+
+
+class _StreamJson:
+    """A job adapter for Claude Code's ``--output-format stream-json``: complete JSON lines
+    become activity events; anything else (stderr, non-JSON) goes to the raw log unchanged."""
+
+    def __init__(self, job, cwd: str = ""):
+        self._job, self._cwd, self._buf = job, cwd, ""
+        self.result_text: str | None = None
+        self.is_error = False
+        self.stray = ""  # the tail of the non-JSON output, for error messages
+
+    def write(self, text: str) -> None:
+        self._buf += text
+        *lines, self._buf = self._buf.split("\n")
+        for line in lines:
+            self._line(line)
+
+    def flush(self) -> None:
+        line, self._buf = self._buf, ""
+        self._line(line)
+
+    def _line(self, line: str) -> None:
+        if not line.strip():
+            return
+        try:
+            data = json.loads(line)
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            self._raw(line)
+            return
+        try:
+            self._handle(data)
+        except Exception:  # a surprising shape must never fail the job
+            self._raw(line[:500])
+
+    def _raw(self, line: str) -> None:
+        self.stray = (self.stray + line + "\n")[-2000:]
+        self._job.write(line + "\n")
+
+    def _handle(self, data: dict) -> None:
+        job, kind = self._job, data.get("type")
+        if kind == "system" and data.get("subtype") == "init":
+            job.event("note", f"Started: model {data.get('model', '?')}, in {data.get('cwd', '?')}")
+        elif kind == "assistant":
+            content = (data.get("message") or {}).get("content")
+            for block in content if isinstance(content, list) else []:
+                if not isinstance(block, dict):
+                    continue
+                text = block.get("text")
+                if block.get("type") == "text" and isinstance(text, str) and text.strip():
+                    job.event("say", text.strip(), text.strip() if len(text) > 200 else "")
+                elif block.get("type") == "tool_use":
+                    job.event("tool", *describe_tool(block.get("name") or "tool", block.get("input"), self._cwd))
+        elif kind == "user":
+            content = (data.get("message") or {}).get("content")
+            for block in content if isinstance(content, list) else []:
+                if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
+                    body = block.get("content")
+                    if isinstance(body, list):
+                        body = " ".join(b.get("text", "") for b in body if isinstance(b, dict))
+                    job.event("error", _clip(str(body or "Tool error"), 500).strip())
+        elif kind == "result":
+            self.result_text = data["result"] if isinstance(data.get("result"), str) else ""
+            self.is_error = bool(data.get("is_error"))
+            bits = []
+            if data.get("duration_ms") is not None:
+                bits.append(f"{float(data['duration_ms']) / 1000:.0f}s")
+            if data.get("num_turns") is not None:
+                bits.append(f"{data['num_turns']} turns")
+            if data.get("total_cost_usd") is not None:
+                bits.append(f"${float(data['total_cost_usd']):.2f}")
+            job.event("note", "Finished" + (f": {', '.join(bits)}" if bits else ""))
+
+    def __getattr__(self, name):
+        return getattr(self._job, name)
+
+
+def run_claude(cfg: dict, mode: str, prompt: str, *, host, cwd: str, model: str,
+               timeout: float, job) -> Outcome:
+    """Claude Code. With ``--output-format stream-json`` its steps feed the live activity view
+    and the final answer is the ``result`` event; other commands run as plain CLIs."""
+    if "stream-json" not in cli_argv(cfg, mode, model):
+        return run_cli(cfg, mode, prompt, host=host, cwd=cwd, model=model, timeout=timeout, job=job)
+    stream = _StreamJson(job, cwd)
+    outcome = run_cli(cfg, mode, prompt, host=host, cwd=cwd, model=model, timeout=timeout, job=stream)
+    stream.flush()
+    if stream.result_text is None:
+        if not outcome.ok:  # timed out or exited with an error: that message says why
+            return outcome
+        tail = stream.stray.strip()
+        return Outcome(False, "", "Claude Code ended without a result." + (f"\n{tail}" if tail else ""))
+    text = stream.result_text.strip()
+    if stream.is_error:
+        return Outcome(False, text, text or "Claude Code reported an error.")
+    if not outcome.ok:
+        return Outcome(False, text, outcome.error)
+    return Outcome(bool(text), text, "" if text else "claude produced no output.")
 
 
 class ProjectFiles:
@@ -686,7 +824,7 @@ class OpenAIAgent:
                 echo["tool_calls"] = calls
             messages.append(echo)
             if content:
-                self.job.write(content.rstrip() + "\n")
+                self.job.event("say", content.strip(), content.strip() if len(content) > 200 else "")
             if not calls:
                 text = content.strip()
                 return Outcome(bool(text), text, "" if text else "The model returned an empty reply.")
@@ -696,12 +834,13 @@ class OpenAIAgent:
                     args = json.loads(fn["arguments"] or "{}")
                     if not isinstance(args, dict):
                         raise ValueError("tool arguments must be a JSON object")
-                    self.job.write(f"→ {fn['name']} {_clip(json.dumps(args), 200)}\n")
+                    self.job.event("tool", *describe_tool(fn["name"], args))
                     result = self.call_tool(fn["name"], args)
                 except Cancelled:
                     raise
                 except Exception as exc:  # report tool errors back to the model
                     result = f"Error: {exc}"
+                    self.job.event("error", _clip(f"{fn['name']}: {exc}", 300))
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
         return Outcome(False, error="Stopped: reached the maximum number of agent steps.")
 

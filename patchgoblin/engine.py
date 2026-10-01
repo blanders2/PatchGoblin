@@ -22,6 +22,9 @@ log = logging.getLogger("patchgoblin")
 
 MAX_OUTPUT = 60000
 MAX_LIVE = 200000
+MAX_EVENTS = 500
+EVENT_KINDS = ("say", "tool", "error", "note")
+_EVENT_MARK = {"say": "", "tool": "→ ", "error": "! ", "note": "· "}
 
 
 class Job:
@@ -35,6 +38,23 @@ class Job:
         self._size = 0
         self._proc = None
         self._lock = threading.Lock()
+        self._events: list[dict] = []
+        self.current = ""
+
+    def event(self, kind: str, label: str, detail: str = "") -> None:
+        """Record a step of the agent's work (kind: say, tool, error or note) for the live feed;
+        it is also written to the raw log."""
+        detail = detail if len(detail) <= 4000 else detail[:4000] + "…"
+        with self._lock:
+            self._events.append({"at": round(self.elapsed(), 1), "kind": kind, "label": label, "detail": detail})
+            del self._events[:-MAX_EVENTS]
+            if kind in ("tool", "say"):
+                self.current = label.strip().splitlines()[0][:200] if label.strip() else self.current
+        self.write(f"{_EVENT_MARK.get(kind, '')}{label}\n")
+
+    def events(self) -> list[dict]:
+        with self._lock:
+            return list(self._events)
 
     def write(self, text: str) -> None:
         with self._lock:

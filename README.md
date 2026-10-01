@@ -44,6 +44,14 @@ each project in the sidebar shows whether its directory can be reached right now
 (green), can't be (red; hover for the reason), or is still being checked (grey). It
 is re-checked every minute and when you return to the tab.
 
+**Live activity.** While the AI plans, runs or answers in chat, PatchGoblin shows a live feed of
+what it is doing: files it reads and edits, commands it runs, and its own messages, plus a one-line
+"now: …" status on the task card. Claude Code runs with `--output-format stream-json --verbose` to
+provide this (the final answer is taken from its closing result), as do endpoint agents. If you
+customize the Claude commands, keep those two flags to get the feed; a text-mode command still
+works but only shows the raw output. Codex, opencode and Cline show their raw output on the
+**Raw output** tab. Activity is kept in memory with the job; nothing is written to the project.
+
 **Tasks** are stored in `.patchgoblin/tasks.json` inside the project directory (on the
 remote host for SSH projects), so the task list and plans live with the code and are
 committed along with it.

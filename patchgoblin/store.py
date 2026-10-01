@@ -36,12 +36,19 @@ MODELS = {
 TASKS_DIR = ".patchgoblin"
 TASKS_FILE = "tasks.json"
 
+LEGACY_CLAUDE_COMMANDS = {
+    "plan": "claude -p --output-format text --allowedTools Read,Glob,Grep "
+            "--disallowedTools Edit,Write,NotebookEdit,Bash",
+    "run": "claude -p --output-format text --permission-mode acceptEdits "
+           "--allowedTools Read,Glob,Grep,Edit,Write,Bash",
+}
+
 DEFAULT_SETTINGS = {
     "commands": {
         "claude": {
-            "plan": "claude -p --output-format text --allowedTools Read,Glob,Grep "
+            "plan": "claude -p --output-format stream-json --verbose --allowedTools Read,Glob,Grep "
                     "--disallowedTools Edit,Write,NotebookEdit,Bash",
-            "run": "claude -p --output-format text --permission-mode acceptEdits "
+            "run": "claude -p --output-format stream-json --verbose --permission-mode acceptEdits "
                    "--allowedTools Read,Glob,Grep,Edit,Write,Bash",
             "model_flag": "--model",
             "plan_model": "",
@@ -316,13 +323,24 @@ class Settings:
         (possibly on an offline SSH host, or pulled in later) can be pointed at the new id.
         """
         data = self.file.load()
+        changed = False
+        # Saved copies of the old text-mode Claude defaults move to the stream-json defaults
+        # (which feed the live activity view); custom commands are left alone.
+        claude = (data.get("commands") or {}).get("claude")
+        if isinstance(claude, dict):
+            for key, old in LEGACY_CLAUDE_COMMANDS.items():
+                if claude.get(key) == old:
+                    del claude[key]
+                    changed = True
         endpoints = data.get("endpoints")
-        if not isinstance(endpoints, list):
-            return {}
-        endpoints, renames = rename_reserved_endpoints(endpoints)
-        if renames:
-            data["endpoints"] = endpoints
-            data["provider_renames"] = {**(data.get("provider_renames") or {}), **renames}
+        renames: dict = {}
+        if isinstance(endpoints, list):
+            endpoints, renames = rename_reserved_endpoints(endpoints)
+            if renames:
+                data["endpoints"] = endpoints
+                data["provider_renames"] = {**(data.get("provider_renames") or {}), **renames}
+                changed = True
+        if changed:
             self.file.save(data)
         return renames
 

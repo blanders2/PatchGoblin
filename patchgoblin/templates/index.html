@@ -279,9 +279,16 @@
       <summary>Files changed <span class="muted" id="d-changes-count"></span></summary>
       <ul id="d-changes-list" class="changes-list mono small"></ul>
     </details>
-    <details id="d-live-wrap" open hidden>
-      <summary>Live output <span class="muted" id="d-elapsed"></span></summary>
-      <pre id="d-live" class="log"></pre>
+    <details id="d-live-wrap" class="live" open hidden>
+      <summary><span class="live-dot"></span> Live activity
+        <span class="muted" id="d-kind"></span> <span class="muted" id="d-elapsed"></span></summary>
+      <div class="live-current mono small" id="d-current"></div>
+      <div class="tabs live-tabs">
+        <button type="button" class="ghost active" id="d-tab-activity">Activity</button>
+        <button type="button" class="ghost" id="d-tab-raw">Raw output</button>
+      </div>
+      <ol id="d-activity" class="activity"></ol>
+      <pre id="d-live" class="log" hidden></pre>
     </details>
     <details id="d-output-wrap" hidden>
       <summary>Last AI output</summary>
@@ -309,7 +316,10 @@
     <ul id="c-messages" class="chat-messages"></ul>
     <details id="c-live-wrap" open hidden>
       <summary>Thinking… <span class="muted" id="c-elapsed"></span></summary>
-      <pre id="c-live" class="log"></pre>
+      <div class="live-current mono small" id="c-current"></div>
+      <ol id="c-activity" class="activity"></ol>
+      <button type="button" class="ghost small" id="c-raw-toggle" hidden>Show raw output</button>
+      <pre id="c-live" class="log" hidden></pre>
     </details>
   </div>
   <form id="chat-form" class="chat-form">
