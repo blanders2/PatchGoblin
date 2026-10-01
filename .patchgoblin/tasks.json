@@ -1232,13 +1232,13 @@
       "code_model": "",
       "plan_trust": "",
       "created_at": "2026-09-28T15:49:16+00:00",
-      "updated_at": "2026-10-01T20:19:09+00:00",
+      "updated_at": "2026-10-01T20:19:11+00:00",
       "queued_at": "2026-10-01T20:12:45+00:00",
       "started_at": "2026-10-01T20:12:45+00:00",
       "finished_at": "2026-10-01T20:19:09+00:00",
       "output": "`paused` is now a real task status with Pause and Resume actions. The full suite passed except two failures, and both are fixed. I re-ran only the Automation and Opencode test classes afterwards (23 tests, all OK), not the full suite. I didn't do the manual run in the app.\n\n- **Backend:** `store.py` has the `paused` status, `PAUSABLE`, `DOC_VERSION = 6`, and a `paused` option on `new_task`. In `app.py`, `pause` and `resume` are new transitions, so batch pause and resume work without extra code. `resume` restores `paused_from`, falls back to `unplanned`, and runs a planned target through `ready_status`. A task resumed to `queued` gets a fresh `queued_at` and kicks the runner. Creating with `paused: true` skips Auto-plan. `engine.py` only gained comments.\n- **UI:**\n  - **Paused tab and buttons:** `app.js`, `index.html` and `app.css` have the Paused tab and badge. They also have drawer Pause and Resume buttons, the batch actions, and an \"Add paused\" checkbox that switches to the Paused tab after creating.\n  - **README:** it has the new status row and batch-actions entry.\n- **Tests:** I added tests for pause and resume, resume landing in `drafted` when the plan gained questions, automation skipping paused tasks, and batch pause and resume with a partial failure. Two existing tests expected `version` 5, so I changed them to 6.\n- **Test runner:** pytest isn't installed in `.venv`, so I ran the suite with `python -m unittest discover -s tests`.\n\nThe first full run had one real failure, which was the stale version-5 expectation, and one error from my own batch test calling a helper that didn't exist in that class. Both are fixed.",
       "error": "",
-      "commit": "",
+      "commit": "f3ff9ebe87f99f01b18f4f64495127df8b3888b9",
       "history": [
         {
           "at": "2026-09-28T15:49:16+00:00",
@@ -1279,6 +1279,10 @@
         {
           "at": "2026-10-01T20:19:09+00:00",
           "event": "AI run finished; awaiting review"
+        },
+        {
+          "at": "2026-10-01T20:19:11+00:00",
+          "event": "Committed f3ff9ebe87"
         }
       ],
       "prev_status": "unplanned",
@@ -1443,18 +1447,18 @@
       "title": "Add a \"VS Code\" button that opens the project directory in VS Code",
       "description": "",
       "plan": "Add a **VS Code** button next to **Terminal**, built the same way as the Terminal feature. A pure helper `vscode_command(host, path, platform, which)` in `patchgoblin/hosts.py` works out the command to run, and a launcher `open_vscode(project)` starts it without waiting. A new `POST /api/projects/<pid>/vscode` route in `patchgoblin/app.py` calls the launcher. Local projects run `code <path>`. SSH projects run `code --remote ssh-remote+<target> <path>`, which uses the VS Code Remote-SSH extension. If the `code` command isn't on PATH, macOS falls back to `open -a \"Visual Studio Code\" <path>`, and every other case raises a clear `HostError`. That error already becomes a 502 with a message, and the frontend shows it as a toast.\n\n## Steps\n\n1. **`patchgoblin/hosts.py`: add `vscode_command`** below `terminal_command` (around line 376):\n   ```python\n   def vscode_command(host, path: str, platform: str = sys.platform,\n                      which: Callable[[str], Optional[str]] = shutil.which) -> list[str]:\n       \"\"\"Argv that opens ``path`` in VS Code on this computer (via Remote-SSH for SSH projects).\"\"\"\n   ```\n   - Find the `code` executable with `which(\"code\")`. On Windows this resolves to `code.cmd`. If that fails on win32, also try `%LOCALAPPDATA%\\Programs\\Microsoft VS Code\\bin\\code.cmd` (the default per-user install location), passed in through the same `which`/an `exists` check so it can be tested.\n   - Local project: `[code, path]`.\n   - SSH project: `[code, \"--remote\", f\"ssh-remote+{host.target}\", path]`. If `host.port` is set, raise `HostError(\"VS Code Remote-SSH needs an ~/.ssh/config Host alias for a custom port; use the alias as the SSH target.\")`. Use the real attribute names from `SSHHost.__init__`, the ones `shell_argv` already uses (`self.target`, `self.port`).\n   - If `code` isn't found: on darwin with a local project, return `[\"open\", \"-a\", \"Visual Studio Code\", path]`. Otherwise raise `HostError(\"VS Code's 'code' command was not found on PATH. In VS Code run \\\"Shell Command: Install 'code' command in PATH\\\".\")`.\n\n2. **`patchgoblin/hosts.py`: add `open_vscode(project)`**, modelled on `open_terminal`:\n   - Check that the directory exists for local projects.\n   - Call `subprocess.Popen(argv, stdin/stdout/stderr=DEVNULL, ...)`.\n   - On Windows use `creationflags=subprocess.CREATE_NO_WINDOW`, not `CREATE_NEW_CONSOLE`, so running `code.cmd` doesn't flash a console window. Elsewhere use `start_new_session=True`.\n   - Wrap `OSError` in `HostError(\"Could not open VS Code: \u2026\")`.\n   - To avoid copying the Popen block, pull it out of `open_terminal` into a small `_spawn(argv, cwd, creationflags)` helper that both functions use.\n\n3. **`patchgoblin/app.py`**:\n   - Import `open_vscode` on line 16.\n   - Add the route after `terminal` (line 554):\n     ```python\n     @app.post(\"/api/projects/<pid>/vscode\")\n     def vscode(pid):\n         open_vscode(project_or_404(pid))\n         return jsonify(ok=True)\n     ```\n\n4. **`patchgoblin/templates/index.html`** line 50: add this right after the Terminal button:\n   `<button class=\"ghost\" id=\"vscode-btn\" title=\"Open the project directory in VS Code\">VS Code</button>`\n\n5. **`patchgoblin/static/app.js`** around line 1649: add a click handler that mirrors `#terminal-btn`. It calls `api(\"POST\", `/api/projects/${state.pid}/vscode`)`, shows `toast(\"VS Code opened\")` on success, and `toast(e.message, true)` on failure.\n\n6. **`tests/test_patchgoblin.py`**:\n   - Add `test_open_vscode` next to `test_open_terminal` (line 207). Patch `patchgoblin.hosts.subprocess.Popen` and `patchgoblin.hosts.shutil.which` to return a fake `code` path. Check for a 200, one Popen call, `proj_dir` in argv, a 403 without the header, and a 404 for an unknown project.\n   - Add `test_vscode_commands` next to `test_terminal_commands` (line 1349), reusing its `have(...)` helper. Cover: local on linux/win32 \u2192 `[code, path]`; SSH \u2192 contains `--remote` and `ssh-remote+me@box`; SSH with a port \u2192 `HostError`; no `code` on darwin \u2192 the `open -a` fallback; no `code` on linux \u2192 `HostError`.\n\n## Verification\n- Run `python -m pytest tests/test_patchgoblin.py -k \"vscode or terminal\"`, then the full suite.\n- Manual check: start the app, open a local project and click **VS Code**. VS Code should open in that folder with no stray console window on Windows. Rename `code` off PATH (or test on a machine without it) and confirm the error toast appears. If an SSH project is available, confirm Remote-SSH opens the remote folder.\n\n## Assumptions\n- VS Code is launched on the machine running PatchGoblin, the same as Terminal.\n- SSH projects use Remote-SSH (`--remote ssh-remote+<target>`) instead of being refused. The button doesn't check whether the extension is installed; VS Code shows its own prompt if it isn't.\n- SSH projects with a custom port raise an error rather than trying an unreliable `host:port` authority.\n- The button label is \"VS Code\" and it goes right after \"Terminal\".\n- The button shows for every project and isn't hidden when `code` is missing. The error toast explains what to do.\n\n## Risks\n- **Running `code.cmd` on Windows:** Popen runs it through `cmd.exe`, so a path containing `&`, `^` or `%` could be misread (the \"BatBadBut\" problem). Project paths come from the user's own registry, so the risk is low. Still, test with a path that has spaces, which is the common case here (`G:\\My Drive\\...`).\n- **No `shell=True`:** don't use it, and don't build a command string; keep argv as a list.\n- **Wrong window flag:** `CREATE_NEW_CONSOLE` would leave an empty console window open after `code.cmd` exits. Use `CREATE_NO_WINDOW`.\n- **PATH differences:** PATH may differ when PatchGoblin runs as a service or from a launcher that doesn't load the user's PATH. This is why there's a fallback to the default install location.\n- **SSH targets:** the target is used straight in `ssh-remote+\u2026`. Targets that contain unusual characters may need VS Code's hex-encoded authority form; that's out of scope.\n\n## Questions for you\nNone.",
-      "status": "queued",
+      "status": "review",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "created_at": "2026-09-30T11:28:28+00:00",
-      "updated_at": "2026-10-01T20:12:45+00:00",
+      "updated_at": "2026-10-01T20:21:43+00:00",
       "queued_at": "2026-10-01T20:12:45+00:00",
-      "started_at": "2026-10-01T20:05:25+00:00",
-      "finished_at": "2026-10-01T20:05:25+00:00",
-      "output": "",
-      "error": "git status failed: Command not found: git",
+      "started_at": "2026-10-01T20:19:11+00:00",
+      "finished_at": "2026-10-01T20:21:43+00:00",
+      "output": "I added the **VS Code** button next to **Terminal**. The full suite passes: 132 tests via `python -m unittest tests.test_patchgoblin`. pytest isn't installed in the venv, so I ran the suite with unittest instead. I did not do the manual check: no real VS Code launch, no Windows console-flash check, and no Remote-SSH test.\n\n- **Command:** `vscode_command(host, path, platform, which)` in `patchgoblin/hosts.py`:\n  - **Local:** runs `code <path>`. On Windows it also tries the default per-user install at `%LOCALAPPDATA%\\Programs\\Microsoft VS Code\\bin\\code.cmd` if `code` isn't on PATH.\n  - **SSH:** runs `code --remote ssh-remote+<target> <path>`. An SSH project with a custom port raises `HostError` and asks for an `~/.ssh/config` alias.\n  - **No `code`:** on macOS a local project falls back to `open -a \"Visual Studio Code\"`. Every other case raises `HostError` with install instructions.\n- **Launcher:** `open_vscode(project)` checks the directory exists and starts VS Code without waiting. On Windows it uses `CREATE_NO_WINDOW` so no console flashes; elsewhere it uses `start_new_session`. I pulled the shared Popen code out of `open_terminal` into a `_spawn` helper that both now use.\n- **Route and UI:** `POST /api/projects/<pid>/vscode` in `patchgoblin/app.py`, the button in `index.html`, and a click handler in `app.js` that shows a toast on success or failure.\n- **Tests:** `test_open_vscode` covers the route (200, one Popen call, `proj_dir` in argv, 403 without the header, 404 for an unknown project). `test_vscode_commands` covers the command cases above.\n\nOne case the plan didn't spell out: an SSH project on macOS without `code` raises `HostError` rather than using the `open -a` fallback, because that fallback can't open a remote folder. I added a test for it.",
+      "error": "",
       "commit": "",
       "review_feedback": "",
       "history": [
@@ -1489,6 +1493,14 @@
         {
           "at": "2026-10-01T20:12:45+00:00",
           "event": "Queued for AI"
+        },
+        {
+          "at": "2026-10-01T20:19:11+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-10-01T20:21:43+00:00",
+          "event": "AI run finished; awaiting review"
         }
       ],
       "prev_status": "unplanned"

@@ -11,7 +11,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from patchgoblin import create_app  # noqa: E402
-from patchgoblin.hosts import HostError, LocalHost, Result, SSHHost, probe, terminal_command  # noqa: E402
+from patchgoblin.hosts import HostError, LocalHost, Result, SSHHost, probe, terminal_command, vscode_command  # noqa: E402
 from patchgoblin.providers import OpenAIAgent, Outcome, ProjectFiles  # noqa: E402
 
 FAKE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_agent.py")
@@ -215,6 +215,18 @@ class ProjectTests(AppTestCase):
         self.assertTrue(self.proj_dir in argv or kwargs["cwd"] == self.proj_dir, (argv, kwargs))
         self.assertEqual(self.client.post(url).status_code, 403)
         self.assertEqual(self.client.post("/api/projects/nope/terminal", headers=H).status_code, 404)
+
+    def test_open_vscode(self):
+        project = self.add_project()
+        url = f"/api/projects/{project['id']}/vscode"
+        with mock.patch("patchgoblin.hosts.subprocess.Popen") as popen, \
+                mock.patch("patchgoblin.hosts.shutil.which", return_value="/usr/bin/code"):
+            res = self.client.post(url, headers=H)
+            self.assertEqual(res.status_code, 200, res.get_json())
+            self.assertEqual(popen.call_count, 1)
+            self.assertIn(self.proj_dir, popen.call_args[0][0])
+            self.assertEqual(self.client.post(url).status_code, 403)
+            self.assertEqual(self.client.post("/api/projects/nope/vscode", headers=H).status_code, 404)
 
     def test_project_status_reports_reachability(self):
         pid = self.add_project()["id"]
@@ -1462,6 +1474,22 @@ class HostTests(unittest.TestCase):
         self.assertEqual(argv[:3], ["gnome-terminal", "--", "ssh"])
         with self.assertRaises(HostError):
             terminal_command(local, "/a", "linux", have(set()))
+
+    def test_vscode_commands(self):
+        local, ssh = LocalHost(), SSHHost("me@box")
+        have = lambda names: (lambda n: n if n in names else None)  # noqa: E731
+        self.assertEqual(vscode_command(local, "/a b", "linux", have({"code"})), ["code", "/a b"])
+        self.assertEqual(vscode_command(local, "C:\\a b", "win32", have({"code"})), ["code", "C:\\a b"])
+        self.assertEqual(vscode_command(ssh, "/srv/p", "linux", have({"code"})),
+                         ["code", "--remote", "ssh-remote+me@box", "/srv/p"])
+        with self.assertRaises(HostError):
+            vscode_command(SSHHost("me@box", 2222), "/a", "linux", have({"code"}))
+        self.assertEqual(vscode_command(local, "/a", "darwin", have(set())),
+                         ["open", "-a", "Visual Studio Code", "/a"])
+        with self.assertRaises(HostError):
+            vscode_command(local, "/a", "linux", have(set()))
+        with self.assertRaises(HostError):
+            vscode_command(ssh, "/a", "darwin", have(set()))
 
     def test_ssh_list_dirs_parses_find_output(self):
         host = SSHHost("me@box")

@@ -13,7 +13,7 @@ from flask import Flask, abort, jsonify, render_template, request
 
 from . import gitops, opencode
 from .engine import Engine
-from .hosts import HostError, host_for, open_terminal, probe
+from .hosts import HostError, host_for, open_terminal, open_vscode, probe
 from .providers import PLAN_TRUST_LEVELS, endpoint_key, list_models, plan_questions, ready_status
 from .store import (AUTO_MODES, CLI_PROVIDERS, MODELS, PAUSABLE, STATUSES, Registry, Settings, TaskStore, empty_doc,
                     find_endpoint, find_task, log_event, new_task, now, provider_choices, resolve_auto,
@@ -554,6 +554,11 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     @app.post("/api/projects/<pid>/terminal")
     def terminal(pid):
         open_terminal(project_or_404(pid))
+        return jsonify(ok=True)
+
+    @app.post("/api/projects/<pid>/vscode")
+    def vscode(pid):
+        open_vscode(project_or_404(pid))
         return jsonify(ok=True)
 
     # ---- chat ---------------------------------------------------------------

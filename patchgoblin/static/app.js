@@ -1669,6 +1669,12 @@ function init() {
       toast("Terminal opened");
     } catch (e) { toast(e.message, true); }
   };
+  $("#vscode-btn").onclick = async () => {
+    try {
+      await api("POST", `/api/projects/${state.pid}/vscode`);
+      toast("VS Code opened");
+    } catch (e) { toast(e.message, true); }
+  };
   for (const btn of $$(".queue-tab")) btn.onclick = () => selectTab(btn.dataset.col);
   $(".queue-tabs").onkeydown = onTabKeydown;
   // The chat drawer's model is a quick override that saves immediately.

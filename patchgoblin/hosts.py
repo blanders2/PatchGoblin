@@ -382,17 +382,59 @@ def open_terminal(project: dict) -> None:
     if host.kind == "local" and not host.is_dir(path):
         raise HostError(f"Directory does not exist: {path}")
     argv, cwd = terminal_command(host, path)
+    try:
+        _spawn(argv, cwd, "CREATE_NEW_CONSOLE")
+    except OSError as exc:
+        raise HostError(f"Could not open a terminal: {exc}") from exc
+
+
+def _spawn(argv: list[str], cwd: Optional[str], windows_flag: str) -> None:
+    """Start ``argv`` detached without waiting; ``windows_flag`` names the subprocess creation flag."""
     kwargs = {}
     if os.name == "nt":
-        kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+        kwargs["creationflags"] = getattr(subprocess, windows_flag)
     else:
         kwargs["start_new_session"] = True
     exe = shutil.which(argv[0]) or argv[0]
+    subprocess.Popen([exe, *argv[1:]], cwd=cwd, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs)
+
+
+def vscode_command(host, path: str, platform: str = sys.platform,
+                   which: Callable[[str], Optional[str]] = shutil.which) -> list[str]:
+    """Argv that opens ``path`` in VS Code on this computer (via Remote-SSH for SSH projects)."""
+    code = which("code")
+    if not code and platform == "win32":
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        if local_app:
+            candidate = os.path.join(local_app, "Programs", "Microsoft VS Code", "bin", "code.cmd")
+            code = which(candidate)
+    if host.kind == "ssh":
+        if host.port:
+            raise HostError("VS Code Remote-SSH needs an ~/.ssh/config Host alias for a custom port; "
+                            "use the alias as the SSH target.")
+        remote = ["--remote", f"ssh-remote+{host.target}", path]
+    else:
+        remote = [path]
+    if code:
+        return [code, *remote]
+    if platform == "darwin" and host.kind != "ssh":
+        return ["open", "-a", "Visual Studio Code", path]
+    raise HostError("VS Code's 'code' command was not found on PATH. "
+                    "In VS Code run \"Shell Command: Install 'code' command in PATH\".")
+
+
+def open_vscode(project: dict) -> None:
+    """Open the project's directory in VS Code on this computer."""
+    host = host_for(project)
+    path = project["path"]
+    if host.kind == "local" and not host.is_dir(path):
+        raise HostError(f"Directory does not exist: {path}")
+    argv = vscode_command(host, path)
     try:
-        subprocess.Popen([exe, *argv[1:]], cwd=cwd, stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs)
+        _spawn(argv, None, "CREATE_NO_WINDOW")
     except OSError as exc:
-        raise HostError(f"Could not open a terminal: {exc}") from exc
+        raise HostError(f"Could not open VS Code: {exc}") from exc
 
 
 def host_for(project: dict):
