@@ -109,7 +109,8 @@ jobs that are already running.
 finishes, then waits in the **Review** tab for you to check it. The drawer lists the files
 its commit changed. Unreviewed work is therefore already on your branch, and pushed if
 auto-sync is on.
-- **Approve → Finished** moves the task to Finished (Done). It also works as a batch action.
+- **Approve → Finished** moves the task to Finished (Done). It also works as a batch action,
+  and each Review card has an **Approve** button that does the same in one click.
 - **Send back to AI** (from Review or Finished) needs feedback. The AI re-plans with it as
   a follow-up on top of the existing commit, rather than redoing the work. Queue the new
   plan as usual; the follow-up run is committed on top and lands in Review again.

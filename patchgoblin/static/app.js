@@ -827,7 +827,26 @@ function renderCard(t) {
       `? ${t.questions.length} question${t.questions.length === 1 ? "" : "s"}`) : null,
     t.error && t.status !== "failed" ? el("span", { class: "chip warn", title: t.error }, "last attempt failed") : null,
     t.commit ? el("span", { class: "chip mono" }, t.commit.slice(0, 7)) : null,
-    el("span", { class: "muted" }, relTime(t.updated_at))));
+    el("span", { class: "muted" }, relTime(t.updated_at))),
+  t.status === "review" ? el("button", {
+    type: "button", class: "card-action primary", title: "The work is good; move it to Finished",
+    onclick: e => { e.stopPropagation(); e.currentTarget.disabled = true; approveFromCard(t); },
+    onkeydown: e => e.stopPropagation(),
+  }, "Approve") : null);
+}
+
+async function approveFromCard(t) {
+  if (t.id === state.openTid) return doAction("approve");
+  try {
+    const updated = await api("POST", `/api/projects/${state.pid}/tasks/${t.id}/action`, { action: "approve" });
+    Object.assign(t, updated);
+    state.selected.delete(t.id);
+    renderBoard();
+    toast("Approved");
+  } catch (e) {
+    toast(e.message, true);
+    renderBoard();
+  }
 }
 
 async function createTask(ev) {
