@@ -4,12 +4,31 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PatchGoblin</title>
+  <script>
+    (function () {
+      var t = "system";
+      try { t = localStorage.getItem("pg.theme") || "system"; } catch (e) {}
+      if (["light", "dark", "midnight", "sepia"].indexOf(t) < 0) {
+        t = window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      }
+      document.documentElement.dataset.theme = t;
+    })();
+  </script>
   <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
 </head>
 <body data-models="{{ models|tojson|forceescape }}" data-providers="{{ providers|tojson|forceescape }}">
 <header class="topbar">
   <div class="brand"><img src="{{ url_for('static', filename='favicon.svg') }}" alt=""> PatchGoblin</div>
+  <label class="inline theme-picker">Theme
+    <select id="theme-select" aria-label="Color theme">
+      <option value="system">System</option>
+      <option value="light">Light</option>
+      <option value="dark">Dark</option>
+      <option value="midnight">Midnight</option>
+      <option value="sepia">Sepia</option>
+    </select>
+  </label>
 </header>
 
 <div class="layout">

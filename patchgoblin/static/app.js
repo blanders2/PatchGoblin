@@ -37,6 +37,33 @@ function validTab(col) { return Object.values(COLUMN_OF).includes(col) ? col : "
 function localStorageGet(key) { try { return localStorage.getItem(key); } catch { return null; } }
 function localStorageSet(key, value) { try { localStorage.setItem(key, value); } catch { /* ignore */ } }
 
+const THEMES = ["system", "light", "dark", "midnight", "sepia"];
+function validTheme(v) { return THEMES.includes(v) ? v : "system"; }
+function applyTheme(choice) {
+  let theme = validTheme(choice);
+  if (theme === "system") {
+    theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+  document.documentElement.dataset.theme = theme;
+}
+function setupThemePicker() {
+  const select = document.getElementById("theme-select");
+  const stored = () => validTheme(localStorageGet("pg.theme"));
+  select.value = stored();
+  select.onchange = () => {
+    localStorageSet("pg.theme", select.value);
+    applyTheme(select.value);
+  };
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+    if (stored() === "system") applyTheme("system");
+  });
+  window.addEventListener("storage", (e) => {
+    if (e.key !== "pg.theme") return;
+    select.value = stored();
+    applyTheme(select.value);
+  });
+}
+
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -1654,6 +1681,7 @@ function setupRemoteDialog() {
 /* ---------------- wiring ---------------- */
 
 function init() {
+  setupThemePicker();
   setupProjectDialog();
   setupSettingsDialog();
   setupChat();

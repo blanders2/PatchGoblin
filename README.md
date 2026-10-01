@@ -24,6 +24,8 @@ Then open <http://127.0.0.1:5050>. Set `PATCHGOBLIN_PORT` to change the port and
 
 ## How it works
 
+**Theme.** Pick System, Light, Dark, Midnight or Sepia from the Theme menu in the top bar; the choice is remembered per browser.
+
 **Projects.** Add a project by giving it a directory, either on this computer or
 on an SSH host. Type the path or use **Browse…** to pick a folder. The browser lists
 folders on whichever machine the project is on (drives on Windows, the remote file

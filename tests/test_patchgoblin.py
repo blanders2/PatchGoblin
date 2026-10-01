@@ -258,6 +258,13 @@ class ProjectTests(AppTestCase):
             self.assertIn(f'role="tab" id="tab-{col}" data-col="{col}"', html)
             self.assertIn(f'id="col-{col}" data-col="{col}" role="tabpanel" aria-labelledby="tab-{col}"', html)
 
+    def test_index_has_theme_picker(self):
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn('id="theme-select"', html)
+        for theme in ("system", "light", "dark", "midnight", "sepia"):
+            self.assertIn(f'<option value="{theme}">', html)
+        self.assertIn("pg.theme", html)
+
 
 class WorkflowTests(AppTestCase):
     def test_plan_queue_run_commit(self):
