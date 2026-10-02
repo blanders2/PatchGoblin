@@ -329,7 +329,7 @@ function renderProjects() {
 async function selectProject(pid) {
   // Switching projects leaves settings for the new project's board; refreshes of the same pid don't.
   if (state.view === "settings" && pid !== state.pid && !closeProjectSettings()) return;
-  if (pid !== state.pid) closeDrawer();
+  if (pid !== state.pid && !closeDrawer()) return;
   if (pid !== state.pid) clearSelection(false);
   state.pid = pid;
   if (pid) localStorageSet("pg.pid", pid);
@@ -555,12 +555,12 @@ async function saveProjectSettings(ev) {
 async function removeProject() {
   const p = currentProject();
   if (!p || !confirm(`Remove "${p.name}" from PatchGoblin? Files, tasks.json and git history are kept.`)) return;
+  if (!closeDrawer()) return;
   try {
     await api("DELETE", `/api/projects/${p.id}`);
     state.view = "board";
     state.settingsDirty = false;
     state.pid = null;
-    closeDrawer();
     await loadProjects();
   } catch (e) { toast(e.message, true); }
 }
@@ -657,12 +657,28 @@ function setupProjectSettings() {
 
 /* ---------------- tasks & board ---------------- */
 
-async function loadTasks() {
+let tasksJob = null, tasksAgain = false, tasksVersion = 0;
+const markTasksChanged = () => { tasksVersion++; };
+
+// Polls never overlap: a call made while one is in flight re-runs once after it.
+function loadTasks() {
+  if (tasksJob) { tasksAgain = true; return tasksJob; }
+  tasksJob = (async () => {
+    try {
+      do { tasksAgain = false; await fetchTasksOnce(); } while (tasksAgain);
+    } finally { tasksJob = null; }
+  })();
+  return tasksJob;
+}
+
+async function fetchTasksOnce() {
   const pid = state.pid;
   if (!pid) return;
+  const version = tasksVersion;
   try {
     const data = await api("GET", `/api/projects/${pid}/tasks`);
     if (pid !== state.pid) return;
+    if (version !== tasksVersion) { tasksAgain = true; return; } // a local change landed meanwhile
     state.tasks = data.tasks;
     state.tasksLoaded = true;
     updateCheckinCount();
@@ -715,7 +731,7 @@ function renderBoard() {
     const count = $(".count", tab);
     count.textContent = actionable || "";
     count.classList.toggle("empty", !actionable);
-    $(".activity", tab).hidden = !tasks.some(t => BUSY.has(t.status));
+    $(".tab-activity", tab).hidden = !tasks.some(t => BUSY.has(t.status));
     tab.title = summary;
     tab.setAttribute("aria-label", summary);
     tab.setAttribute("aria-selected", String(active));
@@ -824,7 +840,7 @@ function renderCard(t) {
   t.active && t.activity ? el("div", { class: "card-activity", title: t.activity }, `▶ ${t.activity}`) : null,
   el("div", { class: "card-meta" },
     t.paused ? el("span", { class: "chip paused", title: "Automation won't touch this task" }, "Paused") : null,
-    t.provider && t.provider !== p.provider ? el("span", { class: "chip" }, providerName(t.provider)) : null,
+    t.provider && t.provider !== (p.provider || "claude") ? el("span", { class: "chip" }, providerName(t.provider)) : null,
     t.plan_model ? el("span", { class: "chip", title: "Planning model for this task" }, `plan: ${t.plan_model}`) : null,
     t.code_model ? el("span", { class: "chip", title: "Coding model for this task" }, `code: ${t.code_model}`) : null,
     t.plan_trust ? el("span", { class: "chip", title: "Planning trust for this task" }, `trust: ${t.plan_trust}`) : null,
@@ -844,7 +860,7 @@ async function approveFromCard(t) {
   if (t.id === state.openTid) return doAction("approve");
   try {
     const updated = await api("POST", `/api/projects/${state.pid}/tasks/${t.id}/action`, { action: "approve" });
-    Object.assign(t, updated);
+    Object.assign(t, updated); markTasksChanged();
     state.selected.delete(t.id);
     renderBoard();
     toast("Approved");
@@ -865,7 +881,7 @@ async function createTask(ev) {
     $("#nt-title").value = "";
     $("#nt-desc").value = "";
     renderImagePreviews($("#nt-desc"), $("#nt-desc-img"));
-    state.tasks.push(task);
+    state.tasks.push(task); markTasksChanged();
     if (state.tab !== "unplanned") selectTab("unplanned");
     else renderBoard();
   } catch (e) { toast(e.message, true); }
@@ -972,7 +988,7 @@ async function doBatch(action, extra = {}) {
     data = await api("POST", `/api/projects/${state.pid}/tasks/batch`, body);
   } catch (e) { toast(e.message, true); return; }
 
-  state.tasks = data.tasks;
+  state.tasks = data.tasks; markTasksChanged();
   state.tasksLoaded = true;
   const ok = data.results.filter(r => r.ok);
   const failed = data.results.filter(r => !r.ok);
@@ -1411,7 +1427,7 @@ async function saveTask(quiet) {
   if (!t) return false;
   try {
     const updated = await api("PATCH", `/api/projects/${state.pid}/tasks/${t.id}`, formFields());
-    Object.assign(t, updated);
+    Object.assign(t, updated); markTasksChanged();
     state.dirty = false;
     state.formStamp = formStamp(t);
     if (quiet !== true) toast("Saved");
@@ -1437,7 +1453,7 @@ async function doAction(action, extra = {}) {
   if (action === "approve") body.note = $("#d-approval-note").value;
   try {
     const updated = await api("POST", `/api/projects/${state.pid}/tasks/${t.id}/action`, body);
-    Object.assign(t, updated);
+    Object.assign(t, updated); markTasksChanged();
     if (action === "approve") $("#d-approval-note").value = "";
     if (action === "plan" || action === "send_back") {
       $("#d-feedback").value = "";
@@ -1455,7 +1471,7 @@ async function deleteTask() {
   if (!t || !confirm(`Delete task #${t.id} "${t.title}"?`)) return;
   try {
     await api("DELETE", `/api/projects/${state.pid}/tasks/${t.id}`);
-    state.tasks = state.tasks.filter(x => x.id !== t.id);
+    state.tasks = state.tasks.filter(x => x.id !== t.id); markTasksChanged();
     state.dirty = false;
     closeDrawer();
   } catch (e) { toast(e.message, true); }
@@ -1513,6 +1529,7 @@ async function pollLive() {
     $("#d-kind").textContent = live.kind === "plan" ? "· Planning" : live.kind ? "· Running" : "";
     if (pollLive.tabFor !== t.id) {  // first poll for this task: pick a default tab
       pollLive.tabFor = t.id;
+      pollLive.userTab = false;
       showLiveTab(!(live.events || []).length);
     } else if ((live.events || []).length && !pollLive.userTab && $("#d-activity").hidden) {
       showLiveTab(false);
@@ -1529,7 +1546,7 @@ async function pollLive() {
 
 /* ---------------- chat ---------------- */
 
-const chat = { messages: [], active: false, timer: null };
+const chat = { messages: [], active: false, timer: null, errorShown: false };
 
 function openChat() {
   if (!$("#drawer").hidden && !closeDrawer()) return;
@@ -1551,8 +1568,9 @@ async function loadChat() {
   if (!pid || $("#chat").hidden) return;
   try {
     const data = await api("GET", `/api/projects/${pid}/chat`);
+    chat.errorShown = false;
     if (pid === state.pid) renderChat(data);
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { if (!chat.errorShown) toast(e.message, true); chat.errorShown = true; }
   if (chat.active && !$("#chat").hidden) chat.timer = setTimeout(loadChat, 1500);
 }
 

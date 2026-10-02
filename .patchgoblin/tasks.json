@@ -1,6 +1,6 @@
 {
   "version": 7,
-  "next_id": 42,
+  "next_id": 49,
   "tasks": [
     {
       "id": 1,
@@ -1982,13 +1982,13 @@
       "title": "Show local-repo and remote push-status icons next to each project in the sidebar",
       "description": "",
       "plan": "The sidebar row (`renderProjects` in `app.js`) already has a reachability dot that comes from the background `/api/projects/status` poll. I'll add a small version-control summary to that same response and show up to two icons after the project name. The first icon means \"this project has a local repository\" (git or SVN tracking is on). The second appears only when the repository points to a remote, and its colour and glyph tell you at a glance whether everything has been pushed. The summary comes from a new `gitops.vcs_summary()` built on the existing `remote_status()` logic, which only reads local refs and never fetches. It runs in the same parallel worker as the reachability probe, and only when the directory is reachable. That way it stays inside the existing 60-second, visibility-aware polling and the in-flight guard, with no new timer.\n\n## Steps\n\n1. **`patchgoblin/gitops.py`**: add `vcs_summary(host, path) -> dict`, which reuses `remote_status`. It returns `{\"kind\": \"git\", \"remote\": bool(url), \"upstream\", \"ahead\", \"behind\", \"dirty\"}`, where `dirty` comes from `has_changes(host, path, ignore_metadata=True)`. Otherwise PatchGoblin's own `.patchgoblin/tasks.json` would keep marking every project as \"unpushed\". The cleanest way is to give `remote_status` an `ignore_metadata=False` parameter and pass it through, so the Sync dialog behaves exactly as before.\n2. **`patchgoblin/svnops.py`**: add a matching `vcs_summary(host, path)` that returns `{\"kind\": \"svn\", \"remote\": True, \"pending\": N}`. `N` is the number of non-metadata entries from `status_entries`. An SVN working copy always has a repository, and \"pushed\" there means \"checked in\".\n3. **`patchgoblin/app.py` `projects_status`**: replace `pool.map(probe, projects)` with a local `status_of(project)` helper. It calls `probe(project)`. If that returns ok and the project is git- or SVN-tracked (`gitops.tracked` / `svn_tracking is True`), it adds a `\"vcs\"` key from the right `vcs_summary`. Wrap that call in `try/except (HostError, OSError, ValueError)` and leave `vcs` out on failure, so a broken repo never breaks the reachability dot. Untracked projects get no `vcs` key.\n4. **`patchgoblin/static/app.js`**:\n   - Rename the `state.reach` comment to describe `{ok, error, vcs?}`. Keep the name to keep the diff small.\n   - Add `vcsIcons(p)`, which returns 0\u20132 `span.p-vcs` elements with `title`/`aria-label`/`role=\"img\"`, the same accessibility pattern as `reachDot`.\n     - **Local icon** (`p-vcs local`): shown when `vcs` exists. The tooltip is \"Local git repository\" or \"SVN working copy\".\n     - **Remote icon** (`p-vcs remote <state>`), shown only when `vcs.remote` is true. States:\n       - `synced`: green, cloud with a check, when `ahead === 0 && behind === 0 && !dirty`. Tooltip: \"All changes pushed to origin\". For SVN, when `pending === 0`: \"All changes checked in\".\n       - `unpushed`: amber (`--warn`), cloud with an up arrow, with a small count badge if `ahead > 0`. Tooltip lists the details, e.g. \"3 commits not pushed \u00b7 uncommitted changes\". For SVN: \"N changes pending check-in\".\n       - `behind`: shown when `ahead === 0 && !dirty && behind > 0`, cloud with a down arrow and a muted colour. Tooltip: \"N commits on origin not pulled (as of last fetch)\".\n   - Build the glyphs as inline SVG strings set through `innerHTML` on the span. The strings are static constants, never user data. This is needed because `el()` uses `createElement`, which can't create SVG elements. Use the same stroke style as the SVG in `index.html` (`stroke=\"currentColor\"`, width 2, round caps), at 14 px.\n   - In `renderProjects`, append `...vcsIcons(p)` after the `p-name` span in `.p-title`.\n   - Call `loadReachability()` after a successful Sync (the `/remote/sync` handler around `app.js:1806`), after a successful Check in (around `app.js:1755`), after saving a remote URL, and after git/SVN enable (around `app.js:555` and `app.js:575`). That way the icon updates immediately instead of on the next 60-second poll.\n5. **`patchgoblin/static/app.css`**: next to the `.p-dot` rules, add `.p-vcs { flex-shrink: 0; display: inline-flex; color: var(--muted); line-height: 0; }`, `.p-vcs.synced { color: var(--accent); }`, `.p-vcs.unpushed { color: var(--warn); }`, and a tiny `.p-vcs .count` badge with font-size 10px. Add `margin-left: auto` on the first `.p-vcs` so the icons sit right-aligned and `.p-name` still truncates with an ellipsis. Check the result in every theme, since `--warn` and `--accent` are defined per theme.\n6. **`tests/test_patchgoblin.py`**:\n   - Update the existing `/api/projects/status` assertion (line 238), which compares for exact equality with `{\"ok\": True, \"error\": \"\"}`. Check `ok`/`error` individually, or include the expected `vcs`.\n   - Add tests for git projects:\n     - A tracked project with no remote gives `vcs.remote == False`.\n     - Add a local bare repo as `origin` with `set_remote`, then commit: `ahead > 0`.\n     - After `gitops.sync(..., push=True)`: `ahead == 0`, `dirty == False`, `remote == True`.\n     - Editing a file gives `dirty == True`, but changing only `.patchgoblin/tasks.json` does not.\n   - Add tests for the remaining cases:\n     - An untracked project has no `vcs` key.\n     - An unreachable directory has no `vcs` key and still shows the existing error.\n   - Add an SVN test only if the suite already has SVN fixtures (it skips when `svn` isn't installed).\n\n## Verification\n- `python -m pytest tests/test_patchgoblin.py` passes, including the new status/vcs tests.\n- Manual check: run the app with a local git project and a bare local remote.\n  - No remote: only the local icon shows.\n  - Add the remote and commit a task: the amber cloud shows the commit count.\n  - Click Sync: it turns green straight away.\n  - Edit a file outside PatchGoblin: it turns amber within 60 s, or immediately on tab refocus.\n  - Check that an SSH project and an untracked project still render correctly, and that long names still truncate.\n- Look at Light, Dark and the extra themes to make sure the icons have enough contrast.\n\n## Assumptions\n- \"Synced locally\" means \"the project has a local version-control repository\" (git or SVN tracking on). Whether a project is local or SSH is already shown in the `p-sub` line.\n- Uncommitted changes count as \"not pushed\", because the user wants to know that *all* changes reached the remote. PatchGoblin's own `.patchgoblin/` metadata is ignored.\n- The status never runs `git fetch`. Ahead/behind reflects the last fetch or sync, and the tooltip says so. Fetching every 60 s would be slow and could hang on credentials.\n- If `origin` exists but the branch has no upstream yet, all local commits count as unpushed. This matches the existing `remote_status` behaviour.\n- For SVN, the remote icon reflects pending check-ins. SVN projects always show it.\n- Icons are inline SVG in the existing stroke style, not emoji, to stay consistent across platforms and themes.\n\n## Risks\n- **SSH cost:** `remote_status` runs about 5 git commands, and each one is a separate SSH round trip. That makes the status poll slower for SSH projects, and the reach dot waits for it. If that's noticeable, combine the work into fewer commands, e.g. one `git status --porcelain=v2 --branch`, which gives branch, upstream, ahead/behind and dirty in a single call. That's worth doing up front.\n- **Polling during long tasks:** this runs `git status` on every project every minute while the tab is visible. The repos are usually small, but large ones may make the poll heavy. `status --untracked-files=all` can be costly, so consider `-uno` plus a separate untracked check, or `--untracked-files=normal`.\n- **Running alongside an active task:** the read-only git commands can run while an agent is writing files or committing. They take no index lock except `status`'s opportunistic index refresh. If lock contention shows up, pass `--no-optional-locks` to the status calls.\n- **Existing test breaks:** the exact-equality assertion at `tests/test_patchgoblin.py:238` will fail until it's updated.\n- **SVG and `innerHTML`:** keep the SVG strings as hard-coded constants. Never put the remote URL or branch name into markup; put them only in `title` via `setAttribute`.\n- **Sidebar layout:** the icons must not push the name off-screen. Keep `.p-name` as the `min-width: 0` flex item that shrinks.\n\n## Questions for you\nNone.",
-      "status": "review",
+      "status": "done",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "created_at": "2026-10-01T20:46:45+00:00",
-      "updated_at": "2026-10-01T21:10:48+00:00",
+      "updated_at": "2026-10-01T21:42:44+00:00",
       "queued_at": "2026-10-01T20:56:10+00:00",
       "started_at": "2026-10-01T21:06:57+00:00",
       "finished_at": "2026-10-01T21:10:43+00:00",
@@ -2028,22 +2028,27 @@
         {
           "at": "2026-10-01T21:10:48+00:00",
           "event": "Committed e467bd5f69"
+        },
+        {
+          "at": "2026-10-01T21:42:44+00:00",
+          "event": "Approved by engineer"
         }
       ],
-      "prev_status": "unplanned"
+      "prev_status": "unplanned",
+      "approval_note": ""
     },
     {
       "id": 36,
       "title": "Replace auto-mode dots with a forward arrow, struck through in red when off",
       "description": "",
       "plan": "Replace the plain dot inside each `.auto-flow` button with a small inline SVG \"forward arrow\" (\u2192), since these toggles sit between two tabs and move tasks from one tab to the next. When the mode is on, the arrow uses the accent colour at full opacity. When it is off, the arrow is muted and a red diagonal line (`var(--danger)`) is drawn across it, so the off state reads as \"auto-advance disabled\" without depending on colour alone. Everything is done in markup and CSS keyed off the existing `.on` class, so `renderAutoFlow()` / `toggleAutoFlow()` logic stays the same.\n\n1. **`patchgoblin/templates/index.html` (line 94)**: inside `<button class=\"auto-flow\">`, replace `<span class=\"dot\"></span>` with an inline SVG marked `aria-hidden=\"true\"` and `focusable=\"false\"`, about 14\u00d714, `viewBox=\"0 0 16 16\"`, containing:\n   - `<path class=\"arrow\" d=\"M2 8h10M8 4l4 4-4 4\"/>` (stroke-based right arrow)\n   - `<line class=\"strike\" x1=\"3\" y1=\"13\" x2=\"13\" y2=\"3\"/>` (the \"off\" slash)\n2. **`patchgoblin/static/app.css` (lines 245\u2013246)**: remove the `.auto-flow .dot` rules and add:\n   - `.auto-flow svg { width: 14px; height: 14px; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }`\n   - `.auto-flow .arrow { stroke: var(--muted); opacity: .6; }`\n   - `.auto-flow.on .arrow { stroke: var(--accent); opacity: 1; }`\n   - `.auto-flow .strike { stroke: var(--danger); }` and `.auto-flow.on .strike { display: none; }`\n   - Keep the 18px button size, or bump it to 20px if 14px looks cramped; this keeps the tab row layout stable.\n3. **`patchgoblin/static/app.js` `renderAutoFlow()`**: no logic change is needed. Optionally adjust the comment at line 683 (\"Lights each \u2026 indicator\") to say arrow instead of dot.\n4. **`README.md` lines 135\u2013137**: change \"a small dot \u2026 A lit dot means the mode is on\" to describe the arrow: \"a small arrow between the tabs \u2026 a coloured arrow means the mode is on; a red line through it means it is off.\"\n\n## Verification\n- Run `python -m pytest tests/test_patchgoblin.py` to confirm nothing regresses. No tests reference `.dot` or `.auto-flow` markup.\n- Run the app with the `run` skill and open the board:\n  - All three toggles show an accent arrow when on and a muted arrow with a red slash when off.\n  - Clicking one flips the icon right away.\n  - Tooltips and aria-pressed still update.\n  - Check both light and dark themes (`--danger` differs between them: `#b3261e` / `#f08a80`).\n  - Check the disabled state when no project is selected.\n- Hover and focus-visible outlines still frame the icon properly.\n\n## Assumptions\n- A right-pointing arrow fits because the toggles sit between tabs and move tasks \"forward\". The same arrow is used for all three modes.\n- The \"no project selected\" state shows the off style (struck arrow), matching the current unlit dot.\n- Inline SVG is used rather than Unicode glyphs or an icon font, because it renders the same everywhere and colours come from CSS variables.\n\n## Risks\n- The `.dot` class name is generic. Confirm that no other CSS selector (e.g. `.p-dot`, `.activity`) relies on `.auto-flow .dot` before deleting it. Grep shows it doesn't.\n- The red slash must stay visible against `--panel-2` hover backgrounds in both themes, and the arrow must stay readable under the slash. Tune stroke widths if needed.\n- `display: none` on the strike must not be inherited by the disabled/busy state. While a request is busy the icon should keep the current state, which it does because only `.on` controls it.\n\n## Questions for you\nNone.",
-      "status": "review",
+      "status": "done",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "created_at": "2026-10-01T20:58:43+00:00",
-      "updated_at": "2026-10-01T21:13:22+00:00",
+      "updated_at": "2026-10-01T21:41:59+00:00",
       "queued_at": "2026-10-01T20:59:40+00:00",
       "started_at": "2026-10-01T21:10:48+00:00",
       "finished_at": "2026-10-01T21:13:17+00:00",
@@ -2087,22 +2092,27 @@
         {
           "at": "2026-10-01T21:13:22+00:00",
           "event": "Committed 120404e9a8"
+        },
+        {
+          "at": "2026-10-01T21:41:59+00:00",
+          "event": "Approved by engineer"
         }
       ],
-      "prev_status": "unplanned"
+      "prev_status": "unplanned",
+      "approval_note": ""
     },
     {
       "id": 37,
       "title": "Keep paused tasks in their current status and tab, with a highlighted card",
       "description": "",
       "plan": "**Summary.** Today, pausing changes a task's status to `paused` (saving the old one in `paused_from`) and moves it to a separate Paused tab. The plan is to make pausing a flag instead: a `paused: true` field on the task. The task keeps its status and stays in its normal tab. Automation checks the flag: Auto-plan, Auto-queue and the run queue's claim step all skip paused tasks. The card gets a distinct background and a \"Paused\" chip so it's easy to spot. While a task is paused, only Resume, editing and Delete are allowed, which matches today's behaviour where flow actions are blocked. Existing `tasks.json` files are converted when they load, and `DOC_VERSION` goes up to 7.\n\n## Steps\n\n1. **`patchgoblin/store.py`**\n   - Remove `\"paused\"` from `STATUSES`. Keep `PAUSABLE`, and rewrite its comment: it now lists the statuses where the `paused` flag can be set, and automation skips flagged tasks.\n   - Raise `DOC_VERSION` to 7 and extend the version comment: \"7: paused is a task flag, not a status.\"\n   - Add `migrate_paused(doc) -> bool`, placed next to `rename_task_providers`. For each task with `status == \"paused\"`:\n     - set `status = paused_from` if that value is in `PAUSABLE`, otherwise `\"unplanned\"`;\n     - set `paused = True`;\n     - remove `paused_from`.\n   - Call `migrate_paused` from `TaskStore._load`, next to `rename_task_providers`. That way older files, including ones pulled in by git sync, are converted on every read.\n   - `new_task(..., paused=False)`: always create the task as `\"unplanned\"`, add `\"paused\": paused` to the task dict, and keep the `\"Created (paused)\"` event.\n\n2. **`patchgoblin/app.py`, `TRANSITIONS` / `transition()`**\n   - Take `pause` and `resume` out of `TRANSITIONS`, or keep them there with a `None` target, and handle both at the top of `transition()`:\n     - **pause:** requires `status in PAUSABLE and not task.get(\"paused\")`. Sets `task[\"paused\"] = True` and logs \"Paused\". Leave `queued_at` as it is, so a paused queued task keeps its place in the queue.\n     - **resume:** requires `task.get(\"paused\")`. Removes the flag and logs \"Resumed\". Returns `status == \"queued\"` so the caller kicks the runner.\n   - For every other transition, if the task is paused, raise `ValueError(\"Task is paused; resume it first.\")`.\n   - Keep the existing error wording for the wrong-status case (\"Cannot pause a task that is review.\") so batch results stay the same.\n   - Update the `TRANSITIONS` comment.\n\n3. **`patchgoblin/engine.py`**\n   - `start_planning`: raise the same \"paused; resume it first\" `ValueError` when `task.get(\"paused\")`. This covers manual planning and auto-plan, both of which go through it.\n   - `maybe_auto_queue`: return False if the task is paused. Update the comment.\n   - `_apply_auto`: auto-plan picks only tasks that are `unplanned and not t.get(\"paused\")`. Update the comment.\n   - `_claim`: filter queued tasks with `not t.get(\"paused\")`.\n\n4. **`patchgoblin/templates/index.html`**\n   - Remove `(\"paused\", \"Paused\")` from the tab list and `\"paused\"` from the board columns.\n\n5. **`patchgoblin/static/app.js`**\n   - Remove `paused` from `STATUS_LABEL`, `COLUMN_OF`, `ACTIONABLE` and `NOT_BUSY`.\n   - `renderCard`: add a `\" paused\"` class when `t.paused`, and add `el(\"span\", { class: \"chip paused\", title: \"Automation won't touch this task\" }, \"Paused\")` to `card-meta`.\n   - `createTask`: always go to the `\"unplanned\"` tab.\n   - `BATCH_ACTIONS`:\n     - pause: `when: t => !t.paused`\n     - resume: `from` = the `PAUSABLE` statuses, `when: t => t.paused`\n     - every other action: add `!t.paused` to `when`. A small helper that wraps `when` is fine.\n   - Drawer actions (around line 1198): if `t.paused`, show only Resume plus the note \"Paused: automation won't touch it; resume to continue.\" Otherwise use the existing per-status switch. Delete the `case \"paused\"` branch.\n\n6. **`patchgoblin/static/app.css`**\n   - Add `.card.paused` using the existing `--b-paused` / `--t-paused` variables (light and dark), e.g. `background: var(--b-paused); border-left: 3px solid var(--t-paused);`.\n   - Add `.chip.paused`. Make sure `.card.selected` and `.card.open` still win (put them later or make them more specific).\n   - Keep or remove `.badge.paused` (no longer used).\n\n7. **`README.md`**\n   - Remove the \"Paused\" status row and describe pausing as a flag: \"the task stays where it is, highlighted; automation and the run queue skip it until resumed.\" Add a short note to the batch actions paragraph.\n\n8. **`tests/test_patchgoblin.py`**\n   - Update `test_pause_and_resume`: status stays the same; `paused` is True and then cleared; for queued tasks, `queued_at` is kept and the runner is kicked on resume.\n   - Update `test_paused_skipped_by_automation`: statuses are `[\"unplanned\", \"planned\"]` with `paused` set.\n   - Update `test_batch_pause_and_resume`.\n   - Add:\n     - a test that a paused queued task is not claimed while Auto-run is on, and runs after resume;\n     - a test that a legacy `{\"status\": \"paused\", \"paused_from\": \"planned\"}` document loads as planned + paused;\n     - a test that `plan` / `queue` return 400 while paused.\n\n## Verification\n- Run `python -m pytest tests/test_patchgoblin.py` and confirm everything passes.\n- Manual check:\n  1. Pause tasks in Unplanned, Planned and AI queue. Each should stay in its tab with the highlight and chip.\n  2. Turn on Auto-plan, Auto-queue and Auto-run. Nothing paused should move.\n  3. Resume a queued task; it should run.\n  4. \"Add paused\" should land in Unplanned, highlighted.\n  5. Open an existing `.patchgoblin/tasks.json` that has `paused` tasks. They should show up in their earlier tabs.\n\n## Assumptions\n- While a task is paused, flow actions are still blocked; only Resume, editing and Delete work. This matches the current behaviour and tests.\n- A paused queued task keeps its `queued_at`, so it keeps its place in the queue on resume. Today's behaviour clears it.\n- The highlight reuses the existing `--b-paused` / `--t-paused` grey palette, as a card background and left border plus a \"Paused\" chip.\n- Old `paused` statuses are converted on load in `TaskStore._load`, rather than once in `Engine.reconcile`, so files pulled in later are handled too.\n\n## Risks\n- An older PatchGoblin reading a version-7 file will ignore the `paused` flag and may automate those tasks. This only matters with mixed versions on a shared repo.\n- Any code that loops over `STATUSES` or still writes `\"paused\"` will trip the `set_status` assert. Grep for `\"paused\"` and `paused_from` after the change.\n- The runner's `_claim` must skip paused tasks without stalling: a paused task at the head of the queue must not block the ones behind it.\n- Batch eligibility in JS has to match the server rules, or the toolbar will offer actions that then fail.\n- The CSS order between `.card.paused` and `.card.selected` / `.card.open`.\n\n## Questions for you\nNone.",
-      "status": "review",
+      "status": "done",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "created_at": "2026-10-01T21:00:14+00:00",
-      "updated_at": "2026-10-01T21:18:19+00:00",
+      "updated_at": "2026-10-01T21:41:40+00:00",
       "queued_at": "2026-10-01T21:01:34+00:00",
       "started_at": "2026-10-01T21:13:22+00:00",
       "finished_at": "2026-10-01T21:18:14+00:00",
@@ -2146,22 +2156,27 @@
         {
           "at": "2026-10-01T21:18:19+00:00",
           "event": "Committed 4fda1157bd"
+        },
+        {
+          "at": "2026-10-01T21:41:40+00:00",
+          "event": "Approved by engineer"
         }
       ],
-      "prev_status": "unplanned"
+      "prev_status": "unplanned",
+      "approval_note": ""
     },
     {
       "id": 38,
       "title": "Add an Approve button on Review-tab task cards to move them to Finished",
       "description": "",
       "plan": "The backend already has an `approve` transition (`review` \u2192 `done`, \"Approved by engineer\") in `TRANSITIONS` in `patchgoblin/app.py`. The task drawer already shows an \"Approve \u2192 Finished\" button, and batch actions can approve too. What's missing is a one-click button on the card itself. The plan is to change only the front end: `renderCard` in `patchgoblin/static/app.js` adds a small \"Approve\" button to cards whose status is `review`. Clicking it posts the existing `approve` action without opening the drawer, then updates the task in place and redraws the board. Neither the backend nor the data format changes.\n\n1. **`patchgoblin/static/app.js` \u2192 `renderCard(t)`**\n   - When `t.status === \"review\"`, add a button inside the card: `el(\"button\", { class: \"card-action primary small\", title: \"The work is good; move it to Finished\", ... }, \"Approve\")`. Reuse the button classes the drawer's `actionButton` uses so it matches the existing style.\n   - Its `onclick` calls `e.stopPropagation()` so the click doesn't also open the drawer (the same pattern as the select checkbox), then calls a new `approveFromCard(t)`.\n   - Its `onkeydown` calls `e.stopPropagation()`. Otherwise Enter or Space on the focused button would bubble up to the card's handler and open the drawer or toggle selection.\n   - Disable the button while the request is in flight so a double click doesn't send a second request.\n2. **`patchgoblin/static/app.js` \u2192 new `approveFromCard(t)`** (next to `doAction`)\n   - If `t.id === state.openTid`, call `doAction(\"approve\")`. That path first saves unsaved drawer edits and then redraws the drawer.\n   - Otherwise, `await api(\"POST\", `/api/projects/${state.pid}/tasks/${t.id}/action`, { action: \"approve\" })`, then `Object.assign(t, updated)`, `renderBoard()` and `toast(\"Approved\")`. On an error, call `toast(e.message, true)`.\n   - Remove the id from `state.selected` if it is there, so the batch bar doesn't keep counting a task that has left the tab.\n3. **`patchgoblin/static/app.css`**\n   - Add a `.card .card-action` rule with `order: 3`, a compact padding and font size, and `flex-shrink: 0`. Move `.card .badge` to `order: 4` so the button sits just before the status badge on the right of the row.\n4. **`README.md`**: if the README describes the Review flow, add a line saying Review cards have an Approve button that moves the task straight to Finished.\n\n## Verification\n- `python -m pytest tests/test_patchgoblin.py`. The backend doesn't change, so the existing approve tests (around lines 409\u2013486) should still pass.\n- Manual check with the `run` skill or by starting the app:\n  - Open the Review tab; each card shows \"Approve\".\n  - Clicking it moves the task to Finished without opening the drawer, and the badge, history entry and tab counts update.\n  - Tabbing to the button and pressing Enter approves without opening the drawer.\n  - Approving a card whose drawer is open with unsaved edits saves the edits first, and the drawer then shows the Done actions.\n  - Cards in other tabs (including Finished) have no button.\n  - Batch selection still works on Review cards.\n\n## Assumptions\n- \"The issue\" means the task card on the board. The drawer already has an Approve button.\n- The button approves at once with no confirmation, matching the drawer's Approve button. Reopen can undo it.\n- The label is \"Approve\", with a tooltip explaining that it moves the task to Finished. This keeps the existing wording and keeps the card row compact.\n- Only Review cards get the button. Send back and Reopen stay in the drawer.\n\n## Risks\n- **Event bubbling:** if the button's click or keydown events reach the card, it will also open the drawer or toggle selection. Both handlers must call `stopPropagation`.\n- **Narrow layouts:** the card is a single flex row, so the button must not squeeze the title on narrow screens. Check the mobile width.\n- **Redraws:** the board may redraw from polling during the request. Update the task object from the response rather than relying on the button element still being on the page.\n- **Duplicated logic:** keep `approveFromCard` small and send the open-task case through `doAction`, so the code doesn't grow a second, diverging copy of the action logic.\n\n## Questions for you\nNone.",
-      "status": "review",
+      "status": "done",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "created_at": "2026-10-01T21:01:06+00:00",
-      "updated_at": "2026-10-01T21:18:54+00:00",
+      "updated_at": "2026-10-01T21:41:21+00:00",
       "queued_at": "2026-10-01T21:02:01+00:00",
       "started_at": "2026-10-01T21:18:20+00:00",
       "finished_at": "2026-10-01T21:18:49+00:00",
@@ -2205,22 +2220,27 @@
         {
           "at": "2026-10-01T21:18:54+00:00",
           "event": "Committed fc009d5b80"
+        },
+        {
+          "at": "2026-10-01T21:41:21+00:00",
+          "event": "Approved by engineer"
         }
       ],
-      "prev_status": "unplanned"
+      "prev_status": "unplanned",
+      "approval_note": ""
     },
     {
       "id": 39,
       "title": "Let reviewers add an optional approval note that is committed to the repo",
       "description": "",
       "plan": "The approve action gets an optional note. In the task drawer, an \"Approval note\" textarea appears while a task is in review. `POST \u2026/action` with `{\"action\": \"approve\", \"note\": \"...\"}` saves the note on the task as `approval_note`, so it shows in the UI and history. For git-tracked projects, a non-empty note is also recorded as an **empty commit** on top of HEAD (`PatchGoblin: approve task #N <title>` with the note as the body). The commit is built with `git commit-tree HEAD^{tree}` plus a compare-and-swap `git update-ref`, so it never picks up working-tree or index changes and never conflicts with a run's `add -A`. It reaches origin on the next sync, or right away when auto-sync is on. For SVN projects, which can't make empty commits, the note goes into the task's pending check-in message. Batch approve stays note-less, the same way `send_back` is per-task only.\n\n## Steps\n\n1. **`patchgoblin/gitops.py`**: add `note_commit(host, path, message) -> str`:\n   - If `_has_head` is false, return `\"\"`.\n   - `old = rev-parse HEAD`, then `tree = rev-parse HEAD^{tree}`.\n   - `sha = git *_identity(...) commit-tree <tree> -p <old> -m <message>`.\n   - `_check(git update-ref -m \"PatchGoblin: approval note\" HEAD <sha> <old>)`. The old-value argument makes it fail rather than overwrite if HEAD moved.\n   - Return `sha`. Add a docstring saying it leaves the index and working tree alone.\n2. **`patchgoblin/store.py` `new_task`**: add `\"approval_note\": \"\"` and `\"approval_commit\": \"\"`, with a comment that older tasks lack them (read with `.get()`, like `review_feedback`).\n3. **`patchgoblin/app.py` `apply_action`**:\n   - Handle `approve` before the generic `TRANSITIONS` branch.\n   - Validate `note = data.get(\"note\") or \"\"` is a `str`, the same way `send_back` validates feedback, then strip it and cap it at e.g. 4000 chars.\n   - Inside `store.edit`: call `transition(pid, task, \"approve\")`, set `task[\"approval_note\"] = note`, and keep the title.\n   - After the edit, if `note` and `gitops.tracked(project)`: take `engine._sync_lock(pid)` (or a new public `engine.record_approval(project, tid, title, note)` helper in `engine.py`, which is cleaner) and call `gitops.note_commit`. Then, in a second `store.edit`, set `approval_commit` and `log_event(task, f\"Approval note committed {sha[:10]}\")`. If there is no HEAD, log \"No commits yet; approval note kept on the task only\".\n   - Catch `HostError` and log it on the task. The approval itself must not fail.\n   - If `project.get(\"auto_sync\")` is true, sync afterwards with the same pattern as `Engine._auto_sync`. Refactor `_auto_sync` to accept an optional `job` and `message` so no new code path is needed.\n   - Keep `\"approve\"` in `TRANSITIONS` so batch approve still works (no note).\n4. **`patchgoblin/engine.py`**: add `record_approval(...)` as described, and run it in a background thread so the HTTP request doesn't block on git or a push. Re-read the task with `store.read(..., fresh=True)` in `task_action` as it does now; the commit hash shows up on the next poll.\n5. **`patchgoblin/svnops.py` `default_checkin_message`**: after each task's summary, append `  Approval note: \u2026` (indented, multi-line safe) when `t.get(\"approval_note\")` is set. This only applies while the task is still `checkin_pending`, so the note is part of the pending check-in.\n6. **`patchgoblin/templates/index.html`**: in the drawer, next to `#d-feedback-wrap`, add `#d-approval-wrap` containing a label \"Approval note (optional, committed to the repository)\" and `<textarea id=\"d-approval-note\">`.\n7. **`patchgoblin/static/app.js`**:\n   - In the drawer render (around line 1176), set `$(\"#d-approval-wrap\").hidden = t.status !== \"review\"`, and clear the field when the drawer opens a different task (where `#d-feedback` is reset, around line 971).\n   - In `doAction` (around line 1358), set `body.note = $(\"#d-approval-note\").value` when `action === \"approve\"`, and clear it on success.\n   - Show a saved note on review/done tasks the way `#d-review-feedback` shows feedback: a read-only \"Approval note\" block plus \"Note committed as <sha>\" when `approval_commit` is set.\n   - Update the Approve button tooltip to mention that the note is committed.\n8. **`patchgoblin/static/app.css`**: add minimal styles for the new block, reusing the existing feedback styles.\n\n## Verification\n- Add to `tests/test_patchgoblin.py`, following the existing git-project fixtures:\n  - Approving with a note on a git-tracked project creates exactly one new commit. Its message has the expected subject and body, its tree equals the parent's tree, and a dirty working-tree file stays uncommitted and still dirty.\n  - Approving without a note creates no commit.\n  - Approving with a non-string `note` returns 400.\n  - Approving on a repo with no HEAD, or with git tracking off, succeeds, stores `approval_note` and logs an event.\n  - Batch approve still works.\n  - `default_checkin_message` includes the approval note.\n- Run `python -m pytest tests`.\n- Manual check with the `run` skill: approve a review task with a note, confirm `git log -1` shows the note, the drawer shows the note and its sha, and Sync pushes it.\n\n## Assumptions\n- \"Checked into the repository\" means a git commit whose message carries the note, not a new tracked file such as `APPROVALS.md`. This works even when `.patchgoblin/` is gitignored and keeps the project tree clean.\n- Only non-empty notes create a commit. Plain approvals behave exactly as today.\n- Approval notes are per-task only. Batch approve doesn't prompt for one.\n- The approval commit follows the project's existing auto-sync setting and is never pushed otherwise.\n- SVN notes go into the pending check-in message. Tasks already checked in keep the note in tasks.json only.\n\n## Risks\n- A concurrent run's commit could move HEAD. `update-ref` with the old value fails safely: log the error, don't retry blindly. Holding the per-project sync lock avoids most cases.\n- `commit-tree` needs a git identity. Reuse `_identity()`, or it fails on hosts with no `user.email` configured.\n- Rebase-mode sync replays empty commits only if `--keep-empty`/`--empty=keep` is in effect. Check that `git rebase` keeps them (newer git keeps commits that started empty by default), or the note could disappear on sync.\n- On SSH hosts the note goes through argv. Keep passing it with `-m` as a list argument, never through a shell string, and strip NUL characters.\n- When `.patchgoblin/` is tracked, saving `approval_note` dirties tasks.json, which the next task's checkpoint commit picks up. That's expected but worth knowing.\n\n## Questions for you\nNone.",
-      "status": "review",
+      "status": "done",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "created_at": "2026-10-01T21:04:11+00:00",
-      "updated_at": "2026-10-01T21:23:19+00:00",
+      "updated_at": "2026-10-01T21:41:05+00:00",
       "queued_at": "2026-10-01T21:05:27+00:00",
       "started_at": "2026-10-01T21:18:54+00:00",
       "finished_at": "2026-10-01T21:23:14+00:00",
@@ -2264,9 +2284,14 @@
         {
           "at": "2026-10-01T21:23:19+00:00",
           "event": "Committed 1d1de278b9"
+        },
+        {
+          "at": "2026-10-01T21:41:05+00:00",
+          "event": "Approved by engineer"
         }
       ],
-      "prev_status": "unplanned"
+      "prev_status": "unplanned",
+      "approval_note": ""
     },
     {
       "id": 41,
@@ -2323,6 +2348,287 @@
         {
           "at": "2026-10-01T21:29:50+00:00",
           "event": "Committed 548ec2e828"
+        }
+      ],
+      "prev_status": "unplanned"
+    },
+    {
+      "id": 42,
+      "title": "Fix drawer-discard, tab-dot, stale-poll and small frontend bugs (Cleanup T1)",
+      "description": "Fix these bugs in patchgoblin/static/app.js, app.css and templates/index.html:\n1. selectProject (~app.js:327) and removeProject (~558) ignore closeDrawer() returning false. If the user cancels the \"discard changes?\" prompt, the project still switches and renderDrawer then drops the kept edits. Stop the switch or remove when closeDrawer() returns false.\n2. CSS class clash: the queue-tab pulse dot (index.html ~90) uses class `activity`, the same as the activity feed <ol> (app.css ~492), so it inherits padding: 8px and renders ~16px instead of 7px. Rename the dot's class to `tab-activity` and update its CSS/JS references.\n3. loadTasks (~655, polled every 3 s at ~2163) has no in-flight guard, so a slow (SSH) response can overwrite a newer doAction/doBatch result. Add a guard like loadReachability's (~246-256): skip overlapping polls, and ignore a response older than the latest state change.\n4. Small ones:\n   - renderCard (~822) compares t.provider !== p.provider without the `|| \"claude\"` fallback used elsewhere.\n   - pollLive.userTab (~1613) is never reset when a different task opens, so the Activity/Raw tab stops auto-selecting.\n   - loadChat (~1550) toasts on every failed 1.5 s poll; stay quiet like loadReachability (show it once, or in the chat pane).\n   - Add .live-dot's animation to the prefers-reduced-motion rules (app.css ~485).\n\nRules: this is part of a cleanup series (T1-T6). Behaviour must not change except for the listed bug fixes. Line numbers below are approximate (from a review at commit 1d1de27); find the real code before editing. Run `python -m unittest discover tests` before finishing; it must stay green. Don't touch unrelated code.",
+      "plan": "**Summary:** All changes go in `patchgoblin/static/app.js`, `app.css` and `templates/index.html`, and each one is small. Project switch and project removal will stop when `closeDrawer()` returns false. The queue-tab dot gets its own class so it no longer picks up the activity list's styles. `loadTasks` gets two protections. First, an in-flight guard modelled on `loadReachability`: a request made meanwhile runs once after the current one finishes. Unlike `loadReachability`, it returns a promise, so `await loadTasks()` in `selectProject` still waits for fresh data. Second, a `tasksVersion` counter that every local task change increments. A poll response that started before the latest change is thrown away and fetched again. The four small fixes are each one or two lines. Nothing else changes.\n\n## Steps\n\n1. **`selectProject` (app.js ~329):** change `if (pid !== state.pid) closeDrawer();` to `if (pid !== state.pid && !closeDrawer()) return;`. Keep the settings check before it and `clearSelection` after it, so the order is unchanged.\n2. **`removeProject` (app.js ~555):** after the `confirm(...)` and before `api(\"DELETE\", \u2026)`, add `if (!closeDrawer()) return;`. Remove the later `closeDrawer();` call inside the `try`. The project is then never deleted on the server while the user keeps the drawer edits.\n3. **Tab dot class:**\n   - `templates/index.html` ~90: change `<span class=\"activity\" hidden>` to `<span class=\"tab-activity\" hidden>`.\n   - `app.css` ~239, ~243: change `.queue-tab .activity` to `.queue-tab .tab-activity`.\n   - `app.css` ~323 (the reduced-motion rule): make the same rename there.\n   - `app.js` `renderBoard` ~718: change `$(\".activity\", tab)` to `$(\".tab-activity\", tab)`.\n   - Leave `#d-activity` and `#c-activity` (`<ol class=\"activity\">`) and the `.activity` rules at ~492 alone.\n4. **`loadTasks` guard (app.js ~660):**\n   - Add module state `let tasksJob = null, tasksAgain = false, tasksVersion = 0;` and a helper `const markTasksChanged = () => { tasksVersion++; };`.\n   - Move the current body into `fetchTasksOnce()`. It reads `const version = tasksVersion` before the request. After the response, it already returns early when `pid !== state.pid`; it should also return when `version !== tasksVersion`, after setting `tasksAgain = true` so a fresh fetch follows.\n   - `loadTasks()`: if `tasksJob` is set, set `tasksAgain = true` and return `tasksJob`. Otherwise set `tasksJob` to an async loop that runs `do { tasksAgain = false; await fetchTasksOnce(); } while (tasksAgain)` and clears `tasksJob` in a `finally`, then return `tasksJob`.\n   - Call `markTasksChanged()` wherever local code applies a task change from the server:\n     - `doAction` (after `Object.assign`)\n     - `doBatch` (after `state.tasks = data.tasks`)\n     - `saveTask`\n     - `approveFromCard`\n     - `createTask` (after `push`)\n     - `deleteTask` (after `filter`)\n   - Leave the `setInterval` at ~2169 and the other `loadTasks()` callers as they are.\n5. **`renderCard` (~827):** change the check to `t.provider && t.provider !== (p.provider || \"claude\")`.\n6. **`pollLive` (~1514):** inside the `if (pollLive.tabFor !== t.id)` branch, add `pollLive.userTab = false;` so each newly opened task starts with auto-selection.\n7. **`loadChat` (~1555):**\n   - Change the catch to `catch (e) { if (!chat.errorShown) toast(e.message, true); chat.errorShown = true; }`.\n   - Set `chat.errorShown = false` after a successful fetch.\n   - Add `errorShown: false` to the `chat` object (~1532).\n   - `chatRequest` keeps toasting, because those are user actions.\n8. **Reduced motion (app.css ~485\u2013487):** after the `@keyframes live-pulse` line, add `@media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }`. This follows the one-line style at ~179.\n\n## Verification\n- Run `python -m unittest discover tests`; it must stay green. No test refers to the `.activity` class.\n- `grep -n '\"activity\"\\|\\.activity' patchgoblin/static/app.js patchgoblin/static/app.css` should show only the feed-list uses (`#d-activity`, `#c-activity`, the `.activity` rules from ~492).\n- Manual checks:\n  - Edit a task in the drawer, click another project, choose Cancel. The project and the edits stay.\n  - Do the same from Settings \u2192 Remove. The project is not removed.\n  - The tab dot measures 7\u00d77 px in devtools.\n  - Throttle the network, click Approve while a poll is in flight. The card does not jump back.\n  - Open task A, click Raw, then open running task B. B's tab is chosen automatically again.\n  - Stop the server with chat open. Only one toast appears.\n  - Turn on reduced motion. The live dot stops pulsing.\n\n## Assumptions\n- In `removeProject`, the drawer is closed after the remove confirmation and before the DELETE request. If the delete fails, the drawer stays closed, which is acceptable.\n- In `selectProject`, the settings check stays ahead of the drawer check. If the user leaves settings and then cancels the drawer prompt, settings stays closed and the project does not switch.\n- A stale `loadTasks` response is dropped and fetched again straight away instead of waiting for the next 3 s tick. This keeps `pollLive`'s \"job finished \u2192 `loadTasks()`\" refresh reliable.\n- The version counter is incremented when a change's response is applied, not when its request is sent. That is enough to discard polls that overlap the change.\n- The chat error toast is shown once per run of failures and allowed again after a successful load. There is no new chat-pane error element, to keep the change small.\n\n## Risks\n- `selectProject` and `loadProjects` `await loadTasks()`. The guarded version must return a promise that settles only after any queued re-fetch. Otherwise a project switch could finish with an empty board until the next poll.\n- When a poll for the old project is in flight during a switch, the existing `pid !== state.pid` check discards it. The queued re-run must then use the current `state.pid`, which it does because `fetchTasksOnce` reads it fresh each time.\n- If a local change is missed when adding `markTasksChanged()`, the stale-response bug stays for that path. Grep for `state.tasks =`, `state.tasks.push` and `Object.assign(t` to find them all.\n- `closeDrawer()` calls `renderBoard()` and can return early. Make sure the new early returns don't skip any code that must run.\n\n## Questions for you\nNone.",
+      "status": "review",
+      "provider": "",
+      "plan_model": "",
+      "code_model": "",
+      "plan_trust": "",
+      "paused": false,
+      "created_at": "2026-10-01T21:39:22+00:00",
+      "updated_at": "2026-10-02T01:07:55+00:00",
+      "queued_at": "2026-10-02T01:02:15+00:00",
+      "started_at": "2026-10-02T01:02:15+00:00",
+      "finished_at": "2026-10-02T01:07:55+00:00",
+      "output": "All the listed fixes are in `app.js`, `app.css` and `index.html`. `python -m unittest discover tests` passes (222 tests, 9 skipped). I didn't run the app in a browser, so none of the manual checks in the plan have been done.\n\n- **Drawer discard:** `selectProject` now returns when `closeDrawer()` returns false. `removeProject` calls `closeDrawer()` right after the confirm and before the DELETE, and returns if it's false. I removed the later `closeDrawer()` call.\n- **Tab dot:** the dot's class is now `tab-activity` in the template, the CSS and `renderBoard`. The `<ol class=\"activity\">` feed and its rules are untouched.\n- **`loadTasks` polling:** polls no longer overlap. A call made while one is running triggers one more fetch afterwards, and `loadTasks()` still returns a promise that waits for it. A `tasksVersion` counter goes up whenever a local change is applied, and a poll response that started before the latest change is dropped and re-fetched. The counter is bumped in `approveFromCard`, `createTask`, `doBatch`, `saveTask`, `doAction` and `deleteTask`.\n- **Small fixes:**\n  - `renderCard` now uses `p.provider || \"claude\"`.\n  - `pollLive.userTab` resets when a new task opens.\n  - `loadChat` toasts a failure once and re-arms after a successful load.\n  - `.live-dot` has a `prefers-reduced-motion` rule.\n\nThe `.patchgoblin/tasks.json` change in `git status` was already there before I started, and I didn't touch it.",
+      "error": "",
+      "commit": "",
+      "changes": [],
+      "summary": "",
+      "checkin_pending": false,
+      "checkin": "",
+      "review_feedback": "",
+      "approval_note": "",
+      "approval_commit": "",
+      "history": [
+        {
+          "at": "2026-10-01T21:39:22+00:00",
+          "event": "Created"
+        },
+        {
+          "at": "2026-10-01T21:39:22+00:00",
+          "event": "Auto-planned: AI planning started"
+        },
+        {
+          "at": "2026-10-01T21:40:37+00:00",
+          "event": "Title rewritten by AI (was: Cleanup T1: fix frontend bugs (drawer discard on project switch, tab dot styling, stale task polls))"
+        },
+        {
+          "at": "2026-10-01T21:40:37+00:00",
+          "event": "AI plan ready"
+        },
+        {
+          "at": "2026-10-02T01:02:15+00:00",
+          "event": "Auto-queued"
+        },
+        {
+          "at": "2026-10-02T01:02:15+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-10-02T01:07:55+00:00",
+          "event": "AI run finished; awaiting review"
+        }
+      ],
+      "prev_status": "unplanned"
+    },
+    {
+      "id": 43,
+      "title": "Cleanup T2: remove dead code and stale migrations",
+      "description": "Backend bloat removal:\n- Dead code to delete: store.endpoint_ids (~store.py:146; only a test *name* mentions it), AUTO_TARGETS (~store.py:107), engine.EVENT_KINDS (~engine.py:26), the never-passed `checkpoint=` parameter of Engine.sync (~engine.py:569), and the never-passed `ssh_bin=` parameter of SSHHost (~hosts.py:252).\n- opencode.py's `dirs=` parameter (~71, 84, 136) is never passed, so run_opencode (~providers.py:344-345) calls host.home() twice (two SSH round trips). Thread the computed dirs through so home() is called once.\n- Remove these migrations and their tests (the local data/ has nothing left for them to migrate):\n  - LEGACY_CLAUDE_COMMANDS (store.py ~45-50, used ~350-355; test class ClaudeMigrationTests)\n  - the legacy single \"openai\" settings block in Settings.get (~store.py:370-374, ~391; test ~1991)\n  - the `model` -> `plan_model` migration in Registry._migrate (~231-235), in update_project (`\"model\" in data`, ~app.py:507) and in engine.py (~150); tests ~2097, ~2126-2151\n  - the git_tracking default in Registry._migrate (~236-238)\n  - the doc version < 2 \"drafted\" pass in Engine.reconcile (~engine.py:180-190) and test_old_planned_tasks_with_questions_become_drafted\n- KEEP migrate_paused (this repo's tasks.json may still be an older version) and all provider_renames / rename_reserved_endpoints / RESERVED_SINCE handling.\n- There are two _clip functions with opposite behaviour: engine.py ~99 keeps the tail, providers.py ~642 keeps the head. Rename them to say so (e.g. clip_tail / clip_head).\n\nRules: this is part of a cleanup series (T1-T6). Behaviour must not change except for the listed bug fixes. Line numbers below are approximate (from a review at commit 1d1de27); find the real code before editing. Run `python -m unittest discover tests` before finishing; it must stay green. Don't touch unrelated code.",
+      "plan": "",
+      "status": "unplanned",
+      "provider": "",
+      "plan_model": "",
+      "code_model": "",
+      "plan_trust": "",
+      "paused": true,
+      "created_at": "2026-10-01T21:39:22+00:00",
+      "updated_at": "2026-10-02T01:05:20+00:00",
+      "queued_at": null,
+      "started_at": null,
+      "finished_at": null,
+      "output": "",
+      "error": "",
+      "commit": "",
+      "changes": [],
+      "summary": "",
+      "checkin_pending": false,
+      "checkin": "",
+      "review_feedback": "",
+      "approval_note": "",
+      "approval_commit": "",
+      "history": [
+        {
+          "at": "2026-10-01T21:39:22+00:00",
+          "event": "Created (paused)"
+        },
+        {
+          "at": "2026-10-02T01:04:56+00:00",
+          "event": "Resumed"
+        },
+        {
+          "at": "2026-10-02T01:05:20+00:00",
+          "event": "Paused"
+        }
+      ]
+    },
+    {
+      "id": 44,
+      "title": "Cleanup T3: shared backend helpers to remove duplicated boilerplate",
+      "description": "Collapse repeated code without changing behaviour:\n- store: add an `edit_task(project, tid)` context manager that yields the task or None. Use it where `with store.edit(...) as doc: current = find_task(doc, tid); if current is None ...` repeats (engine.py ~479, 489, 496, 519, 600, 631; app.py ~723, 832, 843).\n- app.py guards:\n  - `require_idle(project, msg)` for the 4 copies of `engine.busy(pid) or any(t[\"status\"] in LOCKED ...)` (~451, 469, 608, 643)\n  - `git_project(pid)` mirroring the existing svn_project (~585) for the \"Git tracking is off\" checks (~620, 627, 639; engine.py ~571 can use gitops.tracked)\n  - one helper for the 5 \"Unknown provider\" checks\n  - one helper for the copy-pasted git_tracking/svn_tracking \"false only\" blocks in update_project (~485-496)\n- hosts.py:\n  - `_fail(res, verb, path)` for the ~13 copies of `f\"Could not ... on {self.label}: {res.stderr.strip() or 'ssh failed'}\"`\n  - one tmp-file and retry writer behind LocalHost.write_text/write_bytes (~192-228), and the same for read_text/read_bytes\n  - one helper for the `-p port` argv prefix (~261, 376, 551)\n  - one shared local-directory guard for open_terminal and open_vscode\n  - the duplicated check() in both SSH classes if it's cleanly shareable\n- VCS:\n  - one shared `hash-object --stdin-paths` helper (gitops.py ~94-101 and svnops.py ~86-95)\n  - a `vcs_for(project)` that returns gitops, svnops or None, replacing the ternaries in app.py ~373, engine.py ~438-440, providers.py ~296-297\n- app.py: one `cached(key, loader, refresh)` helper shared by endpoint_models (~304-320) and opencode_models (~325-349), plus any similar cline models route; one `job_view(job)` for chat_view (~659) and live (~942).\n- Consistency:\n  - clean_endpoints should pass model/code_model through model_name() (~172-173)\n  - update_project should reject non-bool rewrite_titles/auto_sync like clean_automation does instead of coercing with bool()\n  - base-URL and header validation are duplicated between app.py (~144, 153) and providers.py (~670, 686-690); keep one copy and call it from both places.\n\nRules: this is part of a cleanup series (T1-T6). Behaviour must not change except for the listed bug fixes. Line numbers below are approximate (from a review at commit 1d1de27); find the real code before editing. Run `python -m unittest discover tests` before finishing; it must stay green. Don't touch unrelated code.",
+      "plan": "",
+      "status": "unplanned",
+      "provider": "",
+      "plan_model": "",
+      "code_model": "",
+      "plan_trust": "",
+      "paused": true,
+      "created_at": "2026-10-01T21:39:22+00:00",
+      "updated_at": "2026-10-01T21:39:22+00:00",
+      "queued_at": null,
+      "started_at": null,
+      "finished_at": null,
+      "output": "",
+      "error": "",
+      "commit": "",
+      "changes": [],
+      "summary": "",
+      "checkin_pending": false,
+      "checkin": "",
+      "review_feedback": "",
+      "approval_note": "",
+      "approval_commit": "",
+      "history": [
+        {
+          "at": "2026-10-01T21:39:22+00:00",
+          "event": "Created (paused)"
+        }
+      ]
+    },
+    {
+      "id": 45,
+      "title": "Cleanup T4: shrink create_app and split providers.py into modules",
+      "description": "Structural refactor, no behaviour change:\n- app.py create_app is ~860 lines (36 routes plus ~20 nested helpers). Move the helpers that use no closure state to module level, or to a new patchgoblin/validators.py, and define them before use: plan_answers, plan_limit, sync_mode, plan_trust, require_secrets_ack, remote_view, TRANSITIONS, MAX_BATCH, and transition() (pass in what it needs from engine). Today some are defined after the routes that use them (e.g. update_project uses plan_limit/sync_mode/plan_trust before their definitions; put_settings uses models_cache before it's defined); fix that ordering.\n- Split patchgoblin/providers.py (~920 lines, three concerns):\n  - patchgoblin/prompts.py: prompts and plan parsing (~lines 32-274). Build the three RUN_INSTRUCTIONS* strings (~100-121), which share 4 of 5 lines, from one base.\n  - patchgoblin/providers.py: the CLI runners (run_ai and friends). Remove the duplicated kwargs between the opencode and cline branches of run_ai (~304-309).\n  - patchgoblin/openai_agent.py: the OpenAI-compatible HTTP tool loop (~618-end).\n- Update imports in app.py, engine.py and the tests, and update mock.patch targets in the tests that point at moved names. Don't leave compatibility shims unless a patch target genuinely needs one.\n- Afterwards, start the app (create_app in a test is enough) to confirm imports work.\n\nRules: this is part of a cleanup series (T1-T6). Behaviour must not change except for the listed bug fixes. Line numbers below are approximate (from a review at commit 1d1de27); find the real code before editing. Run `python -m unittest discover tests` before finishing; it must stay green. Don't touch unrelated code.",
+      "plan": "",
+      "status": "unplanned",
+      "provider": "",
+      "plan_model": "",
+      "code_model": "",
+      "plan_trust": "",
+      "paused": true,
+      "created_at": "2026-10-01T21:39:22+00:00",
+      "updated_at": "2026-10-01T21:39:22+00:00",
+      "queued_at": null,
+      "started_at": null,
+      "finished_at": null,
+      "output": "",
+      "error": "",
+      "commit": "",
+      "changes": [],
+      "summary": "",
+      "checkin_pending": false,
+      "checkin": "",
+      "review_feedback": "",
+      "approval_note": "",
+      "approval_commit": "",
+      "history": [
+        {
+          "at": "2026-10-01T21:39:22+00:00",
+          "event": "Created (paused)"
+        }
+      ]
+    },
+    {
+      "id": 46,
+      "title": "Cleanup T5: frontend dedupe and CSS/HTML tidy",
+      "description": "Reduce duplication in patchgoblin/static/app.js, templates/index.html and static/app.css without changing behaviour:\n- app.js helpers:\n  - withBusy(btn, errNode, fn) for the repeated disable -> clear error -> try/catch showError -> re-enable sequence (around setupProjectSettings, settings submit, remote dialog, etc.)\n  - merge the near-identical git-enable and svn-enable handlers\n  - projectProvider(p) for the ~9 copies of `p.provider || \"claude\"`\n  - small helpers for normalisation that's repeated twice (on/off/\"\" values, sync_mode, trust, the ssh \"where\" string, \"Loading...\" + loadSettingsRemote)\n  - derive SETTING_FIELDS from the settings form's element names (all names containing \".\") instead of a hand-kept list\n- Use existing functions instead of copies:\n  - the batch model select's onchange should use pickModel\n  - use plural() everywhere instead of inline `n === 1 ? \"\" : \"s\"`\n  - one postAndToast(path, msg) for the Terminal and VS Code buttons\n  - one isScrolledToBottom(el) helper (3 copies with different thresholds)\n- Long functions:\n  - pull the status -> buttons switch out of renderDrawer into drawerActions(t), table-driven if it stays readable\n  - split init into setupDrawer() and setupGlobalKeys()\n- Move mutable globals (reachInFlight/reachAgain, remoteUrl, chat, function-property state like pollLive.timer/tabFor/userTab, renderChanges.key, toast.timer) into `state` or one small object per area. Move constants declared after first use (AUTO_MODES, KEEP_MODEL) above their users.\n- Dead JS: the unreachable `label` fallback in doBatch, BATCH_VERB.send_back if unused, chat.messages if never read, NOT_BUSY if it's just the complement of BUSY.\n- CSS:\n  - remove .badge.paused if nothing generates it\n  - remove [hidden] overrides on elements whose display isn't set by author CSS\n  - remove the undefined var(--border, ...) fallback and the redundant fallbacks in the live activity block\n  - merge the three near-identical pulse keyframes\n  - move the .remote-* rules before the media queries\n- HTML:\n  - a Jinja macro for the duplicated secrets warning (~194 and ~404)\n  - a single source for the automation tooltips (~172-186 vs ~569-574), which have drifted\n  - render the CLI fieldsets from a loop with per-CLI extras if that stays readable\n  - fix the missing spaces at app.js `t =>PLANNABLE` and app.css `{background`\n\nRules: this is part of a cleanup series (T1-T6). Behaviour must not change except for the listed bug fixes. Line numbers below are approximate (from a review at commit 1d1de27); find the real code before editing. Run `python -m unittest discover tests` before finishing; it must stay green. Don't touch unrelated code.",
+      "plan": "",
+      "status": "unplanned",
+      "provider": "",
+      "plan_model": "",
+      "code_model": "",
+      "plan_trust": "",
+      "paused": true,
+      "created_at": "2026-10-01T21:39:22+00:00",
+      "updated_at": "2026-10-01T21:39:22+00:00",
+      "queued_at": null,
+      "started_at": null,
+      "finished_at": null,
+      "output": "",
+      "error": "",
+      "commit": "",
+      "changes": [],
+      "summary": "",
+      "checkin_pending": false,
+      "checkin": "",
+      "review_feedback": "",
+      "approval_note": "",
+      "approval_commit": "",
+      "history": [
+        {
+          "at": "2026-10-01T21:39:22+00:00",
+          "event": "Created (paused)"
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "title": "Cleanup T6: dedupe and split the test suite, refresh README",
+      "description": "Tests (tests/test_patchgoblin.py, ~3000 lines):\n- The three secrets-ack tests (test_git_tracking_requires_secrets_ack, test_enable_git_requires_secrets_ack, test_untracked_add_needs_no_secrets_ack, ~49-65) are defined on the base class AppTestCase, so all 12 subclasses inherit them and they run 13 times each, each with a real git init. Move them into ProjectTests.\n- Remove the duplicate helpers: events (~532, ~931), slow_ai (~752, ~1000), batch (~748, ~1165), and git_log (~27) vs git (~1232).\n- Add base helpers on AppTestCase: engine/store/registry/settings properties (replacing ~49 app.config[...] lookups), get_task(pid, tid), put_settings(...), fake_cmd(mode, *flags) for the [sys.executable, FAKE, ...] lists.\n- Replace fixed time.sleep calls with wait_for(...) where a condition exists.\n- Split into a tests/ package along class boundaries: helpers.py (AppTestCase, H, FAKE, git helpers), test_projects.py, test_workflow.py (WorkflowTests + AutomationTests), test_remote.py, test_svn.py, test_hosts.py, test_providers.py, test_opencode.py, test_store.py, test_chat_activity_images.py. `python -m unittest discover tests` must still find everything; check the test count is unchanged except for the removed duplicate runs.\n\nREADME.md:\n- Document the reviewer approval note (task #39) and the sidebar push-status icons (task #35) where Approve and the sidebar are described.\n- Fix the contradiction between \"tasks/attachments are committed\" (~55-58) and \"new repos ignore .patchgoblin/ by default\" (~36-37).\n- Move the long \"How it works\" section (~25-206) into docs/usage.md, leaving a short overview and a link. Remove the repeated automation and pause explanations.\n\nRules: this is part of a cleanup series (T1-T6). Behaviour must not change except for the listed bug fixes. Line numbers below are approximate (from a review at commit 1d1de27); find the real code before editing. Run `python -m unittest discover tests` before finishing; it must stay green. Don't touch unrelated code.",
+      "plan": "",
+      "status": "unplanned",
+      "provider": "",
+      "plan_model": "",
+      "code_model": "",
+      "plan_trust": "",
+      "paused": true,
+      "created_at": "2026-10-01T21:39:22+00:00",
+      "updated_at": "2026-10-01T21:39:22+00:00",
+      "queued_at": null,
+      "started_at": null,
+      "finished_at": null,
+      "output": "",
+      "error": "",
+      "commit": "",
+      "changes": [],
+      "summary": "",
+      "checkin_pending": false,
+      "checkin": "",
+      "review_feedback": "",
+      "approval_note": "",
+      "approval_commit": "",
+      "history": [
+        {
+          "at": "2026-10-01T21:39:22+00:00",
+          "event": "Created (paused)"
+        }
+      ]
+    },
+    {
+      "id": 48,
+      "title": "Remove the Auto-run toggle and add an Auto-promote arrow after Drafted",
+      "description": "",
+      "plan": "## Summary\n\nAuto-run becomes permanent: the runner always picks up queued tasks. The `auto_run` mode goes away along with its tab arrow, its Project-settings select and its global Settings checkbox. A new automation mode, `auto_promote` (\"Auto-promote\"), takes the arrow slot after the **Drafted** tab. It works like the existing modes: a global default in Settings (**On**), a per-project On/Off/Default override, and a clickable arrow on the board.\n\n- **When on:** a drafted task moves to **Planned** as soon as its plan has no open questions left. That covers an AI re-plan with answers that comes back with no questions, and a hand edit that removes the last question. Turning the mode on also promotes any existing drafted tasks that have no questions.\n- **When off:** those tasks stay in **Drafted** until you click **Mark planned**.\n\nThe shared plumbing (`AUTO_MODES`, `resolve_auto`, `apply_auto_now`, `renderAutoFlow`) already handles a list of modes, so most of the work is replacing one key with another.\n\n## Steps\n\n1. **`patchgoblin/store.py`**\n   - `DEFAULTS[\"automation\"]` \u2192 `{\"auto_plan\": False, \"auto_queue\": False, \"auto_promote\": True}`.\n   - `AUTO_MODES = (\"auto_plan\", \"auto_queue\", \"auto_promote\")`.\n   - `AUTO_TARGETS`: drop `auto_run` and add `\"auto_promote\": \"drafted\"`.\n   - Update the comment above `PAUSABLE` to mention Auto-promote instead of Auto-run.\n\n2. **`patchgoblin/engine.py`**\n   - `_claim`: delete the `if not self.auto(pid, \"auto_run\")` early return, so queued tasks always run.\n   - `_apply_auto`: remove the `\"auto_run\"` branch. Add an `\"auto_promote\"` branch that runs `self.maybe_auto_promote(pid, t)` over every task inside `store.edit`.\n   - Add `maybe_auto_promote(self, pid, task) -> bool`, next to `maybe_auto_queue`. If the task is `drafted`, not paused, has no `plan_questions(task[\"plan\"])`, and `self.auto(pid, \"auto_promote\")` is on, it calls `set_status(task, \"planned\", \"Auto-promoted: plan has no open questions\")` and returns True.\n   - `_plan`: when `ready_status(...)` is `\"planned\"` and the previous status was `drafted` (`current.get(\"prev_status\") == \"drafted\"`), only move to `planned` if `self.auto(pid, \"auto_promote\")` is on. Otherwise keep it in `drafted` with the history message \"AI plan ready (no open questions; move to Planned by hand)\". Planning from unplanned, planned or failed keeps its current behaviour. Leave `first_plan` / auto-queue logic unchanged; a promoted re-plan is still not auto-queued.\n\n3. **`patchgoblin/app.py`**\n   - In `update_task`, after the fields are applied, call `engine.maybe_auto_promote(pid, task)` when `\"plan\"` is in `changed`. Log the event so the history shows the move.\n   - `clean_automation` and the project PATCH loop already iterate `AUTO_MODES`, so a stale `auto_run` key sent by an old client is ignored. No validation changes are needed.\n   - In `settings_view` (or wherever the automation defaults are returned), make sure only `AUTO_MODES` keys are exposed, so a leftover `automation.auto_run` in an existing settings.json isn't shown.\n\n4. **`patchgoblin/templates/index.html`**\n   - Line 92: change the `flow` map to `{\"unplanned\": (\"auto_plan\", \"Auto-plan\"), \"drafted\": (\"auto_promote\", \"Auto-promote\"), \"planned\": (\"auto_queue\", \"Auto-queue\")}`. With this, the AI-queue tab no longer gets an arrow.\n   - Project settings, Automation fieldset: replace the Auto-run `<label><select name=\"auto_run\">` with an Auto-promote select and this tooltip: \"Move a drafted task to Planned as soon as its plan has no open questions. When Off, it waits in Drafted until you click Mark planned. Turning this on promotes every question-free Drafted task now.\"\n   - Global Settings (~line 579): replace the `automation.auto_run` checkbox with `automation.auto_promote`, labelled \"Auto-promote drafted tasks once their questions are answered\".\n   - Line 82 tooltip: change \"Auto-plan / Auto-queue / Auto-run\" to \"Auto-plan / Auto-promote / Auto-queue\".\n\n5. **`patchgoblin/static/app.js`**\n   - `AUTO_MODES` (line 452) \u2192 `[\"auto_plan\", \"auto_queue\", \"auto_promote\"]`.\n   - `AUTO_FLOW_HINT`: replace `auto_run` with `auto_promote: \"moves every question-free Drafted task to Planned now\"`.\n   - Settings field list (~line 1794): replace `\"automation.auto_run\"` with `\"automation.auto_promote\"`.\n   - Update the line-740 comment.\n   - Drafted card hint (~line 1305): when Auto-promote is off for the project (`effectiveAuto(currentProject(), \"auto_promote\")`), say \"\u2026and click Mark planned\". When it is on, say \"\u2026it moves to Planned automatically once no questions remain\".\n\n6. **`README.md`** (Automation section, lines 131\u2013145): describe three modes:\n   - Auto-plan and Auto-queue (off by default).\n   - Auto-promote (on by default).\n   - A note that queued tasks always run.\n\n   Update the arrow description to say the arrows sit after Unplanned, Drafted and Planned.\n\n7. **`tests/test_patchgoblin.py`**\n   - `test_settings_round_trip_and_resolution`: expected defaults become `{\"auto_plan\": False, \"auto_queue\": False, \"auto_promote\": True}`.\n   - Replace `test_auto_run_off_holds_queue_until_turned_on` with:\n     - a test that a stale `auto_run: False` override doesn't hold the queue;\n     - a test that with `auto_promote` off, a drafted task stays drafted after a question-free re-plan, and after a PATCH that removes the questions;\n     - a test that with it on, both cases move the task to `planned`;\n     - a test that turning it on promotes existing question-free drafted tasks, skipping paused ones.\n   - `test_paused_queued_task_is_not_claimed_until_resumed`: remove the `auto_run` toggling and use the existing `kick` mock helper (around line 935) to hold the queue instead.\n\n## Verification\n\n- `python -m pytest tests/test_patchgoblin.py -q` should pass, including the new tests.\n- Manual check in the app:\n  - The AI-queue tab has no arrow, and an arrow now sits after Drafted.\n  - Clicking that arrow toggles it and shows the red strike line when off.\n  - With it off, answer a drafted task's questions and re-plan: the task stays in Drafted until **Mark planned**.\n  - With it on, the same task moves to Planned.\n  - Delete the questions from a plan by hand and save: the task follows the same on/off behaviour.\n  - Queue a task: it runs right away for a project that had `auto_run: false` saved before this change.\n\n## Assumptions\n\n- \"Fully drafted\" means a drafted task whose plan has no open questions left, whether after an AI re-plan with answers or a hand edit.\n- The new mode is called `auto_promote` / \"Auto-promote\", is on by default, and follows the same global default + per-project override pattern as the other modes.\n- Leftover `auto_run` values in `projects.json` and `settings.json` are ignored, not migrated or deleted. They're harmless, and leaving them avoids rewriting user files.\n- An auto-promoted re-plan is not auto-queued, which matches the existing \"only a first plan is auto-queued\" rule.\n- Paused drafted tasks are never auto-promoted, the same as with the other modes.\n\n## Risks\n\n- The `_plan` change alters current behaviour: today a question-free re-plan from Drafted always goes to Planned. Check `prev_status` carefully so first plans from Unplanned still land in Planned no matter what this mode is set to.\n- Tests that rely on `auto_run=False` to hold the queue (lines 960\u2013977, 1107\u20131121, and any others) need another way to do that. Use the `kick` mock, or they become flaky.\n- `renderAutoFlow` and the settings form iterate `AUTO_MODES`. Any element still named `auto_run` (for example `form.auto_run`) will throw if it's missed, so grep for `auto_run` before finishing.\n- Promoting from `update_task` happens inside `store.edit`. Don't call `kick` or start threads while holding that lock.\n\n## Questions for you\n\nNone.",
+      "status": "queued",
+      "provider": "",
+      "plan_model": "",
+      "code_model": "",
+      "plan_trust": "",
+      "paused": false,
+      "created_at": "2026-10-01T21:39:59+00:00",
+      "updated_at": "2026-10-02T01:02:15+00:00",
+      "queued_at": "2026-10-02T01:02:15+00:00",
+      "started_at": null,
+      "finished_at": null,
+      "output": "[2026-10-01T21:39:59+00:00] plan with claude in g:\\My Drive\\Projects\\PatchGoblin\n$ claude -p --output-format stream-json --verbose --allowedTools Read,Glob,Grep --disallowedTools Edit,Write,NotebookEdit,Bash\n\u00b7 Started: model claude-opus-5-5, in g:\\My Drive\\Projects\\PatchGoblin\n\u2192 Searching `(?i)auto-?run|autoRun`\n\u2192 Reading patchgoblin/templates/index.html\n\u2192 Searching `(?i)drafted|auto_run|auto_queue|auto_plan`\n\u2192 Reading patchgoblin/engine.py\n\u2192 Reading patchgoblin/app.py\n\u2192 Reading patchgoblin/static/app.js\n\u2192 Reading patchgoblin/static/app.js\n\u2192 Reading patchgoblin/static/app.js\n\u2192 Searching `AUTO_MODES|AUTO_TARGETS|resolve_auto|auto_run`\nChecking the store/app automation plumbing and the tests now, then I'll write the plan.\n\u2192 Reading patchgoblin/store.py\n\u2192 Reading patchgoblin/app.py\n\u2192 Reading patchgoblin/app.py\n\u2192 Reading patchgoblin/app.py\n\u2192 Searching `^EDITABLE|EDITABLE =|AUTO_TARGETS`\n\u2192 Reading tests/test_patchgoblin.py\n\u2192 Reading tests/test_patchgoblin.py\n\u2192 Reading README.md\nTitle: Remove the Auto-run toggle and add an Auto-promote arrow after Drafted\n\n## Summary\n\nAuto-run becomes permanent: the runner always picks up queued tasks. The `auto_run` mode goes away along with its tab arrow, its Project-settings select and its global Settings checkbox. A new automation mode, `auto_promote` (\"Auto-promote\"), takes the arrow slot after the **Drafted** tab. It works like the existing modes: a global default in Settings (**On**), a per-project On/Off/Default override, and a clickable arrow on the board.\n\n- **When on:** a drafted task moves to **Planned** as soon as its plan has no open questions left. That covers an AI re-plan with answers that comes back with no questions, and a hand edit that removes the last question. Turning the mode on also promotes any existing drafted tasks that have no questions.\n- **When off:** those tasks stay in **Drafted** until you click **Mark planned**.\n\nThe shared plumbing (`AUTO_MODES`, `resolve_auto`, `apply_auto_now`, `renderAutoFlow`) already handles a list of modes, so most of the work is replacing one key with another.\n\n## Steps\n\n1. **`patchgoblin/store.py`**\n   - `DEFAULTS[\"automation\"]` \u2192 `{\"auto_plan\": False, \"auto_queue\": False, \"auto_promote\": True}`.\n   - `AUTO_MODES = (\"auto_plan\", \"auto_queue\", \"auto_promote\")`.\n   - `AUTO_TARGETS`: drop `auto_run` and add `\"auto_promote\": \"drafted\"`.\n   - Update the comment above `PAUSABLE` to mention Auto-promote instead of Auto-run.\n\n2. **`patchgoblin/engine.py`**\n   - `_claim`: delete the `if not self.auto(pid, \"auto_run\")` early return, so queued tasks always run.\n   - `_apply_auto`: remove the `\"auto_run\"` branch. Add an `\"auto_promote\"` branch that runs `self.maybe_auto_promote(pid, t)` over every task inside `store.edit`.\n   - Add `maybe_auto_promote(self, pid, task) -> bool`, next to `maybe_auto_queue`. If the task is `drafted`, not paused, has no `plan_questions(task[\"plan\"])`, and `self.auto(pid, \"auto_promote\")` is on, it calls `set_status(task, \"planned\", \"Auto-promoted: plan has no open questions\")` and returns True.\n   - `_plan`: when `ready_status(...)` is `\"planned\"` and the previous status was `drafted` (`current.get(\"prev_status\") == \"drafted\"`), only move to `planned` if `self.auto(pid, \"auto_promote\")` is on. Otherwise keep it in `drafted` with the history message \"AI plan ready (no open questions; move to Planned by hand)\". Planning from unplanned, planned or failed keeps its current behaviour. Leave `first_plan` / auto-queue logic unchanged; a promoted re-plan is still not auto-queued.\n\n3. **`patchgoblin/app.py`**\n   - In `update_task`, after the fields are applied, call `engine.maybe_auto_promote(pid, task)` when `\"plan\"` is in `changed`. Log the event so the history shows the move.\n   - `clean_automation` and the project PATCH loop already iterate `AUTO_MODES`, so a stale `auto_run` key sent by an old client is ignored. No validation changes are needed.\n   - In `settings_view` (or wherever the automation defaults are returned), make sure only `AUTO_MODES` keys are exposed, so a leftover `automation.auto_run` in an existing settings.json isn't shown.\n\n4. **`patchgoblin/templates/index.html`**\n   - Line 92: change the `flow` map to `{\"unplanned\": (\"auto_plan\", \"Auto-plan\"), \"drafted\": (\"auto_promote\", \"Auto-promote\"), \"planned\": (\"auto_queue\", \"Auto-queue\")}`. With this, the AI-queue tab no longer gets an arrow.\n   - Project settings, Automation fieldset: replace the Auto-run `<label><select name=\"auto_run\">` with an Auto-promote select and this tooltip: \"Move a drafted task to Planned as soon as its plan has no open questions. When Off, it waits in Drafted until you click Mark planned. Turning this on promotes every question-free Drafted task now.\"\n   - Global Settings (~line 579): replace the `automation.auto_run` checkbox with `automation.auto_promote`, labelled \"Auto-promote drafted tasks once their questions are answered\".\n   - Line 82 tooltip: change \"Auto-plan / Auto-queue / Auto-run\" to \"Auto-plan / Auto-promote / Auto-queue\".\n\n5. **`patchgoblin/static/app.js`**\n   - `AUTO_MODES` (line 452) \u2192 `[\"auto_plan\", \"auto_queue\", \"auto_promote\"]`.\n   - `AUTO_FLOW_HINT`: replace `auto_run` with `auto_promote: \"moves every question-free Drafted task to Planned now\"`.\n   - Settings field list (~line 1794): replace `\"automation.auto_run\"` with `\"automation.auto_promote\"`.\n   - Update the line-740 comment.\n   - Drafted card hint (~line 1305): when Auto-promote is off for the project (`effectiveAuto(currentProject(), \"auto_promote\")`), say \"\u2026and click Mark planned\". When it is on, say \"\u2026it moves to Planned automatically once no questions remain\".\n\n6. **`README.md`** (Automation section, lines 131\u2013145): describe three modes:\n   - Auto-plan and Auto-queue (off by default).\n   - Auto-promote (on by default).\n   - A note that queued tasks always run.\n\n   Update the arrow description to say the arrows sit after Unplanned, Drafted and Planned.\n\n7. **`tests/test_patchgoblin.py`**\n   - `test_settings_round_trip_and_resolution`: expected defaults become `{\"auto_plan\": False, \"auto_queue\": False, \"auto_promote\": True}`.\n   - Replace `test_auto_run_off_holds_queue_until_turned_on` with:\n     - a test that a stale `auto_run: False` override doesn't hold the queue;\n     - a test that with `auto_promote` off, a drafted task stays drafted after a question-free re-plan, and after a PATCH that removes the questions;\n     - a test that with it on, both cases move the task to `planned`;\n     - a test that turning it on promotes existing question-free drafted tasks, skipping paused ones.\n   - `test_paused_queued_task_is_not_claimed_until_resumed`: remove the `auto_run` toggling and use the existing `kick` mock helper (around line 935) to hold the queue instead.\n\n## Verification\n\n- `python -m pytest tests/test_patchgoblin.py -q` should pass, including the new tests.\n- Manual check in the app:\n  - The AI-queue tab has no arrow, and an arrow now sits after Drafted.\n  - Clicking that arrow toggles it and shows the red strike line when off.\n  - With it off, answer a drafted task's questions and re-plan: the task stays in Drafted until **Mark planned**.\n  - With it on, the same task moves to Planned.\n  - Delete the questions from a plan by hand and save: the task follows the same on/off behaviour.\n  - Queue a task: it runs right away for a project that had `auto_run: false` saved before this change.\n\n## Assumptions\n\n- \"Fully drafted\" means a drafted task whose plan has no open questions left, whether after an AI re-plan with answers or a hand edit.\n- The new mode is called `auto_promote` / \"Auto-promote\", is on by default, and follows the same global default + per-project override pattern as the other modes.\n- Leftover `auto_run` values in `projects.json` and `settings.json` are ignored, not migrated or deleted. They're harmless, and leaving them avoids rewriting user files.\n- An auto-promoted re-plan is not auto-queued, which matches the existing \"only a first plan is auto-queued\" rule.\n- Paused drafted tasks are never auto-promoted, the same as with the other modes.\n\n## Risks\n\n- The `_plan` change alters current behaviour: today a question-free re-plan from Drafted always goes to Planned. Check `prev_status` carefully so first plans from Unplanned still land in Planned no matter what this mode is set to.\n- Tests that rely on `auto_run=False` to hold the queue (lines 960\u2013977, 1107\u20131121, and any others) need another way to do that. Use the `kick` mock, or they become flaky.\n- `renderAutoFlow` and the settings form iterate `AUTO_MODES`. Any element still named `auto_run` (for example `form.auto_run`) will throw if it's missed, so grep for `auto_run` before finishing.\n- Promoting from `update_task` happens inside `store.edit`. Don't call `kick` or start threads while holding that lock.\n\n## Questions for you\n\nNone.\n\u00b7 Finished: 73s, 18 turns, $0.49\n",
+      "error": "",
+      "commit": "",
+      "changes": [],
+      "summary": "",
+      "checkin_pending": false,
+      "checkin": "",
+      "review_feedback": "",
+      "approval_note": "",
+      "approval_commit": "",
+      "history": [
+        {
+          "at": "2026-10-01T21:39:59+00:00",
+          "event": "Created"
+        },
+        {
+          "at": "2026-10-01T21:39:59+00:00",
+          "event": "Auto-planned: AI planning started"
+        },
+        {
+          "at": "2026-10-01T21:41:15+00:00",
+          "event": "Title rewritten by AI (was: remove the auto-run arrow, it should always be default on and I dont want the arrow. add an arrow after drafted, when on fully drafted gets put in plan, when off you need to manually move. default this to be on)"
+        },
+        {
+          "at": "2026-10-01T21:41:15+00:00",
+          "event": "AI plan ready"
+        },
+        {
+          "at": "2026-10-02T01:02:15+00:00",
+          "event": "Auto-queued"
         }
       ],
       "prev_status": "unplanned"

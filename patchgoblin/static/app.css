@@ -236,11 +236,11 @@ button.link:hover { filter: none; }
 .queue-tab .count.empty { display: none; }
 .queue-tab[hidden] { display: none; }
 .queue-tab[data-col="failed"] .count { background: var(--danger); color: var(--danger-ink); }
-.queue-tab .activity {
+.queue-tab .tab-activity {
   width: 7px; height: 7px; border-radius: 50%; background: var(--t-running);
   animation: pulse 1.2s ease-in-out infinite;
 }
-.queue-tab .activity[hidden] { display: none; }
+.queue-tab .tab-activity[hidden] { display: none; }
 /* Automation toggle that sits between two tabs, raised toward the top of the tab row. */
 .auto-flow {
   flex: none; align-self: flex-start; width: 18px; height: 18px; margin: 2px -2px 0; padding: 0;
@@ -320,7 +320,7 @@ button.link:hover { filter: none; }
 }
 @keyframes pulse { 50% { opacity: .25; } }
 @media (prefers-reduced-motion: reduce) {
-  .queue-tab .activity, .badge.planning::before, .badge.running::before { animation: none; }
+  .queue-tab .tab-activity, .badge.planning::before, .badge.running::before { animation: none; }
 }
 
 /* ---- drawer ---- */
@@ -485,6 +485,7 @@ legend { padding: 0 4px; font-weight: 600; }
 .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent, #4aa3ff);
   animation: live-pulse 1.2s ease-in-out infinite; vertical-align: middle; }
 @keyframes live-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.7); } }
+@media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
 .live-current { margin: 6px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .live-tabs { display: flex; gap: 4px; margin-bottom: 6px; }
 .live-tabs button { padding: 2px 10px; }

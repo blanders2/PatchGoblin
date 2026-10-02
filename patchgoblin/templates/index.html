@@ -87,7 +87,7 @@
       <div class="queue-tabs" role="tablist" aria-label="Task queues">
         {% for col, label in [("unplanned", "Unplanned"), ("drafted", "Drafted"), ("planned", "Planned"), ("queue", "AI queue"), ("review", "Review"), ("finished", "Finished"), ("failed", "Failed")] %}
         <button type="button" class="queue-tab" role="tab" id="tab-{{ col }}" data-col="{{ col }}" data-label="{{ label }}" aria-controls="col-{{ col }}"{% if col == "failed" %} hidden{% endif %}>
-          {{ label }} <span class="activity" hidden></span><span class="count empty"></span>
+          {{ label }} <span class="tab-activity" hidden></span><span class="count empty"></span>
         </button>
         {% set flow = {"unplanned": ("auto_plan", "Auto-plan"), "planned": ("auto_queue", "Auto-queue"), "queue": ("auto_run", "Auto-run")}.get(col) %}
         {% if flow %}
