@@ -18,6 +18,24 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
 </head>
 <body data-models="{{ models|tojson|forceescape }}" data-providers="{{ providers|tojson|forceescape }}">
+{% macro secrets_warning(ack_name, id=none, hidden=false) %}
+<div{% if id %} id="{{ id }}"{% endif %} class="secrets-warning"{% if hidden %} hidden{% endif %}>
+  <p>Every file in this directory will be committed to git. Don't use a directory that contains secrets such as API keys, <code>.env</code> files, credentials or private keys. Move them out or add them to <code>.gitignore</code> first.</p>
+  <label class="check"><input type="checkbox" name="{{ ack_name }}"> I confirm this directory contains no secrets that should not be committed</label>
+</div>
+{% endmacro %}
+{# One source for the automation tooltips, shared by Project settings and the global Settings dialog. #}
+{% set auto_tips = {
+  "auto_plan": "Start AI planning as soon as a task is created. Turning this on starts planning every Unplanned task now (up to the plan limit at a time; with no plan limit, that is one AI job per task at once). With Auto-queue also on, AI work runs without you reviewing the plan.",
+  "auto_queue": "Queue a task for the AI as soon as it is first planned (AI plan or Mark planned; not after answering questions). Turning this on queues every Planned task now. With Auto-plan also on, AI work runs without you reviewing the plan.",
+  "auto_promote": "Move a drafted task to Planned as soon as its plan has no open questions. When off, it waits in Drafted until you click Mark planned. Turning this on promotes every question-free Drafted task now.",
+} %}
+{% set clis = [
+  {"id": "claude", "title": "Claude Code", "default": "CLI default"},
+  {"id": "codex", "title": "Codex", "default": "CLI default"},
+  {"id": "opencode", "title": "opencode", "default": "opencode default"},
+  {"id": "cline", "title": "Cline", "default": "Cline default"},
+] %}
 <header class="topbar">
   <div class="brand"><img src="{{ url_for('static', filename='favicon.svg') }}" alt=""> PatchGoblin</div>
   <label class="inline theme-picker">Theme
@@ -169,17 +187,17 @@
           <p class="muted small">Default follows Settings. Turning a mode on also applies it to this project's
             existing tasks right away.</p>
           <div class="row">
-            <label title="Start AI planning as soon as a task is created. Turning this on starts planning every Unplanned task now (up to the plan limit at a time). With Auto-queue also on, AI work runs without you reviewing the plan.">Auto-plan
+            <label title="{{ auto_tips.auto_plan }}">Auto-plan
               <select name="auto_plan" class="auto-select">
                 <option value="">Default</option><option value="on">On</option><option value="off">Off</option>
               </select>
             </label>
-            <label title="Queue a task for the AI as soon as it is first planned (AI plan or Mark planned; not after answering questions). Turning this on queues every Planned task now. With Auto-plan also on, AI work runs without you reviewing the plan.">Auto-queue
+            <label title="{{ auto_tips.auto_queue }}">Auto-queue
               <select name="auto_queue" class="auto-select">
                 <option value="">Default</option><option value="on">On</option><option value="off">Off</option>
               </select>
             </label>
-            <label title="Move a drafted task to Planned as soon as its plan has no open questions. When Off, it waits in Drafted until you click Mark planned. Turning this on promotes every question-free Drafted task now.">Auto-promote
+            <label title="{{ auto_tips.auto_promote }}">Auto-promote
               <select name="auto_promote" class="auto-select">
                 <option value="">Default</option><option value="on">On</option><option value="off">Off</option>
               </select>
@@ -190,10 +208,7 @@
           <legend>Version control</legend>
           <div id="ps-git-off">
             <p class="muted small">Version control tracking is off. Tasks are not committed, and Commits, Check in and Sync are unavailable.</p>
-            <div class="secrets-warning">
-              <p>Every file in this directory will be committed to git. Don't use a directory that contains secrets such as API keys, <code>.env</code> files, credentials or private keys. Move them out or add them to <code>.gitignore</code> first.</p>
-              <label class="check"><input type="checkbox" name="git_secrets_ack"> I confirm this directory contains no secrets that should not be committed</label>
-            </div>
+            {{ secrets_warning("git_secrets_ack") }}
             <button type="button" class="ghost" id="ps-git-enable-btn">Turn on git tracking</button>
             <button type="button" class="ghost" id="ps-svn-enable-btn" title="The project folder must already be the root of an SVN working copy">Use existing SVN working copy</button>
           </div>
@@ -400,10 +415,7 @@
     </div>
     <label class="check"><input type="checkbox" name="create" checked> Create the directory if it doesn't exist</label>
     <label class="check"><input type="checkbox" name="git_tracking"> Track with git (initialize a repository and commit each finished task)</label>
-    <div id="pf-git-warning" class="secrets-warning" hidden>
-      <p>Every file in this directory will be committed to git. Don't use a directory that contains secrets such as API keys, <code>.env</code> files, credentials or private keys. Move them out or add them to <code>.gitignore</code> first.</p>
-      <label class="check"><input type="checkbox" name="secrets_ack"> I confirm this directory contains no secrets that should not be committed</label>
-    </div>
+    {{ secrets_warning("secrets_ack", "pf-git-warning", true) }}
     <div id="project-form-error" class="error" hidden></div>
     <div class="actions right">
       <button type="button" class="ghost" data-close="project-dialog">Cancel</button>
@@ -465,30 +477,12 @@
     <p class="muted small">CLI commands run in the project directory (over SSH for remote projects) with the
       prompt on stdin. Models are chosen per task, then per project, then from these defaults; when all
       are blank the CLI or API uses its own default.</p>
+    {% for cli in clis %}
     <fieldset>
-      <legend>Claude Code</legend>
-      <label>Planning command <input name="claude.plan" class="mono"></label>
-      <label>Run command <input name="claude.run" class="mono"></label>
-      <div class="row">
-        <label class="grow">Default planning model <input name="claude.plan_model" placeholder="CLI default"></label>
-        <label class="grow">Default coding model <input name="claude.code_model" placeholder="CLI default"></label>
-      </div>
-      <label>Model suggestions <input name="claude.models" placeholder="space or comma separated"></label>
-    </fieldset>
-    <fieldset>
-      <legend>Codex</legend>
-      <label>Planning command <input name="codex.plan" class="mono"></label>
-      <label>Run command <input name="codex.run" class="mono"></label>
-      <div class="row">
-        <label class="grow">Default planning model <input name="codex.plan_model" placeholder="CLI default"></label>
-        <label class="grow">Default coding model <input name="codex.code_model" placeholder="CLI default"></label>
-      </div>
-      <label>Model suggestions <input name="codex.models" placeholder="space or comma separated"></label>
-    </fieldset>
-    <fieldset>
-      <legend>opencode</legend>
-      <label>Planning command <input name="opencode.plan" class="mono"></label>
-      <label>Run command <input name="opencode.run" class="mono"></label>
+      <legend>{{ cli.title }}</legend>
+      <label>Planning command <input name="{{ cli.id }}.plan" class="mono"></label>
+      <label>Run command <input name="{{ cli.id }}.run" class="mono"></label>
+      {% if cli.id == "opencode" %}
       <p class="muted small"><code>{agent}</code> in a command is replaced by the agent below; a command
         without it ignores the agent names. Planning and chat use the planning agent.</p>
       <div class="row">
@@ -497,32 +491,27 @@
         <label class="grow">Run agent <input name="opencode.run_agent" class="mono" required
           pattern="[A-Za-z0-9._/\-]+" placeholder="build"></label>
       </div>
+      {% endif %}
       <div class="row">
-        <label class="grow">Default planning model <input name="opencode.plan_model" placeholder="opencode default"></label>
-        <label class="grow">Default coding model <input name="opencode.code_model" placeholder="opencode default"></label>
+        <label class="grow">Default planning model <input name="{{ cli.id }}.plan_model" placeholder="{{ cli.default }}"></label>
+        <label class="grow">Default coding model <input name="{{ cli.id }}.code_model" placeholder="{{ cli.default }}"></label>
       </div>
-      <label>Model suggestions <input name="opencode.models" placeholder="space or comma separated"></label>
+      <label>Model suggestions <input name="{{ cli.id }}.models" placeholder="space or comma separated"></label>
+      {% if cli.id == "opencode" %}
       <p class="muted small">Models are <code>provider/model</code>, e.g. <code>anthropic/claude-sonnet-5-5</code>.
         Each project's model list comes from its opencode config.</p>
       <label class="check" title="opencode might otherwise fall back to its default agent, which can edit files and run commands">
         <input type="checkbox" name="opencode.require_agents"> Refuse to run if a custom agent isn't defined</label>
       <label class="check" title="Changed files are kept for you to review, not reverted">
         <input type="checkbox" name="opencode.plan_must_not_edit"> Fail planning if the plan agent edits files</label>
-    </fieldset>
-    <fieldset>
-      <legend>Cline</legend>
-      <label>Planning command <input name="cline.plan" class="mono"></label>
-      <label>Run command <input name="cline.run" class="mono"></label>
-      <div class="row">
-        <label class="grow">Default planning model <input name="cline.plan_model" placeholder="Cline default"></label>
-        <label class="grow">Default coding model <input name="cline.code_model" placeholder="Cline default"></label>
-      </div>
-      <label>Model suggestions <input name="cline.models" placeholder="space or comma separated"></label>
+      {% elif cli.id == "cline" %}
       <p class="muted small">Models are ids for the provider set up with <code>cline auth</code>; each
         project's list comes from the installed Cline's catalog for that provider.</p>
       <label class="check" title="Cline's plan mode blocks file edits but can still run commands. Changed files are kept for you to review, not reverted">
         <input type="checkbox" name="cline.plan_must_not_edit"> Fail planning if Cline changes files</label>
+      {% endif %}
     </fieldset>
+    {% endfor %}
     <fieldset>
       <legend>OpenAI-compatible APIs</legend>
       <p class="muted small">Any Chat Completions server with tool calling: OpenAI, OpenRouter, Ollama, LM Studio…
@@ -571,11 +560,11 @@
       <legend>Automation (defaults)</legend>
       <p class="muted small">Each project can override these in its Project settings. Turning a mode on applies
         it right away to existing tasks in every project that uses the default.</p>
-      <label class="check" title="Start AI planning as soon as a task is created. Turning this on starts planning every Unplanned task now; with no plan limit, that is one AI job per task at once. With Auto-queue also on, AI work runs without you reviewing the plan.">
+      <label class="check" title="{{ auto_tips.auto_plan }}">
         <input type="checkbox" name="automation.auto_plan"> Auto-plan new tasks</label>
-      <label class="check" title="Queue a task for the AI as soon as it is first planned (AI plan or Mark planned; not after answering questions). Turning this on queues every Planned task now. With Auto-plan also on, AI work runs without you reviewing the plan.">
+      <label class="check" title="{{ auto_tips.auto_queue }}">
         <input type="checkbox" name="automation.auto_queue"> Auto-queue planned tasks</label>
-      <label class="check" title="Move a drafted task to Planned as soon as its plan has no open questions. When off, it waits in Drafted until you click Mark planned. Turning this on promotes every question-free Drafted task now.">
+      <label class="check" title="{{ auto_tips.auto_promote }}">
         <input type="checkbox" name="automation.auto_promote"> Auto-promote drafted tasks once their questions are answered</label>
     </fieldset>
     <fieldset>

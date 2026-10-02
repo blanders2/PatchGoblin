@@ -2557,13 +2557,13 @@
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-01T21:39:22+00:00",
-      "updated_at": "2026-10-02T01:37:14+00:00",
+      "updated_at": "2026-10-02T01:37:22+00:00",
       "queued_at": "2026-10-02T01:21:47+00:00",
       "started_at": "2026-10-02T01:30:42+00:00",
       "finished_at": "2026-10-02T01:37:14+00:00",
       "output": "The refactor is in place, and `python -m unittest discover tests` passes: 221 tests, 9 skipped. `create_app` also builds cleanly, so the new imports work.\n\n**providers split**\n- `patchgoblin/prompts.py` (new) holds the prompts, trust levels, title and plan-question parsing, image refs and `run_prompt`. The three `RUN_INSTRUCTIONS*` strings are now built from one shared intro and outro, with only the git/svn line differing.\n- `patchgoblin/openai_agent.py` (new) holds `ProjectFiles`, the endpoint helpers, `list_models` and `OpenAIAgent`.\n- `patchgoblin/providers.py` is down to the CLI runners, `Cancelled`, `Outcome`, `describe_tool` and `clip_head`.\n- The opencode and cline branches of `run_ai` now share one call. That was the duplicated kwargs.\n- `openai_agent.py` imports `Cancelled`, `Outcome`, `clip_head` and `describe_tool` from `providers`. To avoid a circular import, `run_ai` imports `OpenAIAgent` inside the function. There are no compatibility shims.\n\n**`app.py`**\n- The new `patchgoblin/validators.py` holds `plan_answers`, `plan_limit`, `sync_mode`, `plan_trust`, `require_secrets_ack`, `remote_view`, `TRANSITIONS`, `MAX_BATCH` and `transition`.\n- `transition` now takes `engine` as its first argument, since it calls `engine.maybe_auto_queue`.\n- The models cache and its lock are now defined before `put_settings`. The validators are module-level imports, so they are defined before any route uses them.\n- I also trimmed `app.py` imports that nothing uses any more.\n\nThe imports in `engine.py` and the tests now point at the new modules. No `mock.patch` target needed changing; the only patches on these names were `engine.plan_prompt` and `engine._ai`, which still live in `engine`.\n\nI only moved the helpers named in the task, so `create_app` is shorter but still holds the other nested helpers and the routes.",
       "error": "",
-      "commit": "",
+      "commit": "4e681415b028098859623a2fa350deda2c3960b0",
       "changes": [],
       "summary": "",
       "checkin_pending": false,
@@ -2595,6 +2595,10 @@
         {
           "at": "2026-10-02T01:37:14+00:00",
           "event": "AI run finished; awaiting review"
+        },
+        {
+          "at": "2026-10-02T01:37:22+00:00",
+          "event": "Committed 4e681415b0"
         }
       ]
     },
@@ -2603,18 +2607,18 @@
       "title": "Cleanup T5: frontend dedupe and CSS/HTML tidy",
       "description": "Reduce duplication in patchgoblin/static/app.js, templates/index.html and static/app.css without changing behaviour:\n- app.js helpers:\n  - withBusy(btn, errNode, fn) for the repeated disable -> clear error -> try/catch showError -> re-enable sequence (around setupProjectSettings, settings submit, remote dialog, etc.)\n  - merge the near-identical git-enable and svn-enable handlers\n  - projectProvider(p) for the ~9 copies of `p.provider || \"claude\"`\n  - small helpers for normalisation that's repeated twice (on/off/\"\" values, sync_mode, trust, the ssh \"where\" string, \"Loading...\" + loadSettingsRemote)\n  - derive SETTING_FIELDS from the settings form's element names (all names containing \".\") instead of a hand-kept list\n- Use existing functions instead of copies:\n  - the batch model select's onchange should use pickModel\n  - use plural() everywhere instead of inline `n === 1 ? \"\" : \"s\"`\n  - one postAndToast(path, msg) for the Terminal and VS Code buttons\n  - one isScrolledToBottom(el) helper (3 copies with different thresholds)\n- Long functions:\n  - pull the status -> buttons switch out of renderDrawer into drawerActions(t), table-driven if it stays readable\n  - split init into setupDrawer() and setupGlobalKeys()\n- Move mutable globals (reachInFlight/reachAgain, remoteUrl, chat, function-property state like pollLive.timer/tabFor/userTab, renderChanges.key, toast.timer) into `state` or one small object per area. Move constants declared after first use (AUTO_MODES, KEEP_MODEL) above their users.\n- Dead JS: the unreachable `label` fallback in doBatch, BATCH_VERB.send_back if unused, chat.messages if never read, NOT_BUSY if it's just the complement of BUSY.\n- CSS:\n  - remove .badge.paused if nothing generates it\n  - remove [hidden] overrides on elements whose display isn't set by author CSS\n  - remove the undefined var(--border, ...) fallback and the redundant fallbacks in the live activity block\n  - merge the three near-identical pulse keyframes\n  - move the .remote-* rules before the media queries\n- HTML:\n  - a Jinja macro for the duplicated secrets warning (~194 and ~404)\n  - a single source for the automation tooltips (~172-186 vs ~569-574), which have drifted\n  - render the CLI fieldsets from a loop with per-CLI extras if that stays readable\n  - fix the missing spaces at app.js `t =>PLANNABLE` and app.css `{background`\n\nRules: this is part of a cleanup series (T1-T6). Behaviour must not change except for the listed bug fixes. Line numbers below are approximate (from a review at commit 1d1de27); find the real code before editing. Run `python -m unittest discover tests` before finishing; it must stay green. Don't touch unrelated code.",
       "plan": "",
-      "status": "queued",
+      "status": "review",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-01T21:39:22+00:00",
-      "updated_at": "2026-10-02T01:36:10+00:00",
+      "updated_at": "2026-10-02T01:44:33+00:00",
       "queued_at": "2026-10-02T01:36:10+00:00",
-      "started_at": null,
-      "finished_at": null,
-      "output": "",
+      "started_at": "2026-10-02T01:37:22+00:00",
+      "finished_at": "2026-10-02T01:44:33+00:00",
+      "output": "That's the background test run reporting that it finished, which matches the result I already gave. All 221 tests passed (9 skipped), `node --check` accepted `app.js`, and the work is complete.",
       "error": "",
       "commit": "",
       "changes": [],
@@ -2640,6 +2644,14 @@
         {
           "at": "2026-10-02T01:36:10+00:00",
           "event": "Auto-queued"
+        },
+        {
+          "at": "2026-10-02T01:37:22+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-10-02T01:44:33+00:00",
+          "event": "AI run finished; awaiting review"
         }
       ]
     },

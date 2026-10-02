@@ -14,6 +14,8 @@ const COLUMN_OF = {
 // Waiting on the user: not locked by the AI (LOCKED in app.py) and not done.
 const ACTIONABLE = new Set(["unplanned", "drafted", "planned", "queued", "review", "failed"]);
 const BUSY = new Set(["planning", "running"]);
+const NOT_BUSY = Object.keys(STATUS_LABEL).filter(s => !BUSY.has(s));
+const AUTO_MODES = ["auto_plan", "auto_queue", "auto_promote"];
 
 const state = {
   projects: [],
@@ -31,6 +33,13 @@ const state = {
   settingsDirty: false,
   automation: {}, // the global automation defaults, for the project settings' "Default (…)" labels
   reach: {}, // pid -> {ok, error, vcs?} from /api/projects/status; missing means still checking
+  reachInFlight: false,
+  reachAgain: false,
+  remoteUrl: "", // origin's URL as last shown in the Sync dialog
+  changesKey: null, // project/task/commit whose changed files the drawer shows
+  toastTimer: null,
+  chat: { active: false, timer: null, errorShown: false },
+  live: { timer: null, tabFor: null, userTab: false }, // the drawer's live-output poll
 };
 
 function validTab(col) { return Object.values(COLUMN_OF).includes(col) ? col : "unplanned"; }
@@ -95,13 +104,42 @@ function toast(message, isError = false) {
   t.textContent = message;
   t.classList.toggle("error", isError);
   t.hidden = false;
-  clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => { t.hidden = true; }, isError ? 6000 : 2500);
+  clearTimeout(state.toastTimer);
+  state.toastTimer = setTimeout(() => { t.hidden = true; }, isError ? 6000 : 2500);
 }
 
 function showError(node, message) {
   node.textContent = message || "";
   node.hidden = !message;
+}
+
+// Disables `btn` and clears `errNode` while fn runs; a failure is shown in errNode. Returns whether fn succeeded.
+async function withBusy(btn, errNode, fn) {
+  btn.disabled = true;
+  showError(errNode, "");
+  try {
+    await fn();
+    return true;
+  } catch (e) {
+    showError(errNode, e.message);
+    return false;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+function isScrolledToBottom(node, slack = 30) {
+  return node.scrollTop + node.clientHeight >= node.scrollHeight - slack;
+}
+
+// POSTs to a project endpoint that just does something on the server, and toasts the outcome.
+async function postAndToast(path, message) {
+  try {
+    await api("POST", `/api/projects/${state.pid}/${path}`);
+    toast(message);
+  } catch (e) { toast(e.message, true); }
 }
 
 function relTime(iso) {
@@ -117,7 +155,9 @@ function relTime(iso) {
 const formStamp = t => JSON.stringify([t.title, t.description, t.provider, t.plan_model || "",
   t.code_model || "", t.plan_trust || "", t.plan]);
 
+const sshHost = p => `${p.ssh_target}${p.ssh_port ? ":" + p.ssh_port : ""}`;
 const currentProject = () => state.projects.find(p => p.id === state.pid);
+const projectProvider = p => (p && p.provider) || "claude";
 const openTask = () => state.tasks.find(t => t.id === state.openTid);
 
 /* ---------------- model dropdowns ---------------- */
@@ -125,6 +165,8 @@ const openTask = () => state.tasks.find(t => t.id === state.openTid);
 const MODELS = JSON.parse(document.body.dataset.models || "{}");
 let PROVIDERS = JSON.parse(document.body.dataset.providers || "[]");
 const CUSTOM_MODEL = "\u0000custom";
+// Batch model selects: "unchanged" (not sent), "project default" (clears the override) or a model.
+const KEEP_MODEL = "\u0000keep";
 const CLI = new Set(["claude", "codex", "opencode", "cline"]);
 // opencode's models come from each project's own opencode config, and Cline's from its installed
 // catalog on the project's host, so they are listed per project.
@@ -218,12 +260,12 @@ function fillModelSelect(select, provider, current = "", blankLabel = select.dat
 
 // Resolves the select's new value, asking for a name when "Custom…" is picked.
 // Returns null (and restores the previous choice) if the prompt is cancelled.
-function pickModel(select, provider) {
+function pickModel(select, provider, initial = select.dataset.value) {
   if (select.value !== CUSTOM_MODEL) {
     select.dataset.value = select.value;
     return select.value;
   }
-  const name = (prompt("Model name:", select.dataset.value) || "").trim();
+  const name = (prompt("Model name:", initial) || "").trim();
   if (!name) { select.value = select.dataset.value; return null; }
   // Remember it (the server saves it too) so other dropdowns list it without a reload.
   for (const key of new Set([provider, modelKey(provider, selectPid(select))])) {
@@ -248,17 +290,16 @@ async function loadProjects() {
 }
 
 // Whether each project's directory can be reached; SSH checks are slow, so this runs in the background.
-let reachInFlight = false, reachAgain = false;
 async function loadReachability() {
   // Don't pile up slow checks; a request made meanwhile runs once the current one finishes.
-  if (reachInFlight) { reachAgain = true; return; }
-  reachInFlight = true;
+  if (state.reachInFlight) { state.reachAgain = true; return; }
+  state.reachInFlight = true;
   try {
     state.reach = (await api("GET", "/api/projects/status")).status || {};
     renderProjects();
   } catch { /* a failed check shouldn't toast on every poll */ }
-  finally { reachInFlight = false; }
-  if (reachAgain) { reachAgain = false; loadReachability(); }
+  finally { state.reachInFlight = false; }
+  if (state.reachAgain) { state.reachAgain = false; loadReachability(); }
 }
 
 function reachDot(p) {
@@ -277,8 +318,6 @@ const VCS_REMOTE_ICONS = {
   unpushed: svgIcon(CLOUD + '<path d="M12 16v-5M9.8 12.8 12 10.6l2.2 2.2"/>'),
   behind: svgIcon(CLOUD + '<path d="M12 10v5M9.8 13.2 12 15.4l2.2-2.2"/>'),
 };
-
-const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 // 0-2 small icons after a project's name: has a local repository, and (if it has a remote) whether all is pushed.
 function vcsIcons(p) {
@@ -337,8 +376,7 @@ async function selectProject(pid) {
   const p = currentProject();
   if (!p) { closeChat(); return; }
   $("#p-name").textContent = p.name;
-  $("#p-where").textContent = p.location === "ssh"
-    ? `${p.ssh_target}${p.ssh_port ? ":" + p.ssh_port : ""}:${p.path}` : p.path;
+  $("#p-where").textContent = p.location === "ssh" ? `${sshHost(p)}:${p.path}` : p.path;
   updateVcsButtons(p);
   renderProjectModel();
   renderProjectTrust();
@@ -352,8 +390,8 @@ async function selectProject(pid) {
 function renderProjectModel() {
   const p = currentProject();
   if (!p) return;
-  const provider = p.provider || "claude";
-  const stillValid = () => currentProject() === p && (p.provider || "claude") === provider;
+  const provider = projectProvider(p);
+  const stillValid = () => currentProject() === p && projectProvider(p) === provider;
   fillModelSelectLive($("#c-model"), provider, p.chat_model || "", stillValid, "Planning model");
   fillBatchModel($("#batch-plan-model"), provider);
   fillBatchModel($("#batch-code-model"), provider);
@@ -362,12 +400,13 @@ function renderProjectModel() {
 
 const TRUST_NAMES = { low: "Low", normal: "Normal", high: "High" };
 
+const planTrust = p => (TRUST_NAMES[p.plan_trust] ? p.plan_trust : "normal");
+
 // The level a task's "Project default" plan trust resolves to.
 function renderProjectTrust() {
   const p = currentProject();
   if (!p) return;
-  const level = TRUST_NAMES[p.plan_trust] ? p.plan_trust : "normal";
-  $("#d-plan-trust").options[0].textContent = `Project default (${TRUST_NAMES[level]})`;
+  $("#d-plan-trust").options[0].textContent = `Project default (${TRUST_NAMES[planTrust(p)]})`;
 }
 
 async function updateProject(fields) {
@@ -382,6 +421,11 @@ async function updateProject(fields) {
 /* ---------------- project settings view ---------------- */
 
 const SYNC_MODE_NAMES = { "ff-only": "Fast-forward only", rebase: "Rebase" };
+const syncMode = p => (SYNC_MODE_NAMES[p.sync_mode] ? p.sync_mode : "ff-only");
+const syncModeName = mode => SYNC_MODE_NAMES[mode] || SYNC_MODE_NAMES["ff-only"];
+// An automation setting as the project settings' select value: "on", "off" or "" (use the default).
+const autoSelectValue = v => (v === true ? "on" : v === false ? "off" : "");
+const settingsProject = () => state.projects.find(x => x.id === settingsForm().dataset.pid);
 const settingsForm = () => $("#project-settings-form");
 const settingsModelSelects = form => [form.plan_model, form.code_model, form.chat_model];
 
@@ -394,14 +438,14 @@ function openProjectSettings() {
   renderProjects();
 
   const form = settingsForm();
-  const provider = p.provider || "claude";
+  const provider = projectProvider(p);
   form.dataset.pid = p.id;
   delete form.dataset.remoteLoaded;
   delete form.dataset.remoteUrl;
   $("#ps-name").textContent = p.name;
   form.elements.name.value = p.name;
   $("#ps-where").textContent = p.location === "ssh"
-    ? `SSH · ${p.ssh_target}${p.ssh_port ? ":" + p.ssh_port : ""} · ${p.path}` : `Local · ${p.path}`;
+    ? `SSH · ${sshHost(p)} · ${p.path}` : `Local · ${p.path}`;
   setProviderValue(form.provider, provider);
   $("#ps-model-refresh").hidden = !fetchesModels(provider);
   // A late model list must not refill the selects once the form shows another provider or project.
@@ -412,11 +456,11 @@ function openProjectSettings() {
   fillModelSelectLive(form.chat_model, provider, p.chat_model || "", stillValid, "Planning model");
   form.plan_limit.value = p.plan_limit || "";
   form.rewrite_titles.checked = p.rewrite_titles !== false;
-  form.plan_trust.value = TRUST_NAMES[p.plan_trust] ? p.plan_trust : "normal";
-  for (const key of AUTO_MODES) form[key].value = p[key] === true ? "on" : p[key] === false ? "off" : "";
+  form.plan_trust.value = planTrust(p);
+  for (const key of AUTO_MODES) form[key].value = autoSelectValue(p[key]);
   renderAutoDefaults();
   form.auto_sync.checked = p.auto_sync === true;
-  form.sync_mode.value = SYNC_MODE_NAMES[p.sync_mode] ? p.sync_mode : "ff-only";
+  form.sync_mode.value = syncMode(p);
   form.remote_url.value = "";
   form.remote_url.disabled = true;
   form.git_tracking_off.checked = false;
@@ -429,10 +473,7 @@ function openProjectSettings() {
   $("#ps-svn").hidden = !svn;
   showError($("#ps-error"), "");
   state.settingsDirty = false;
-  if (tracked) {
-    $("#ps-remote-status").textContent = "Loading…";
-    loadSettingsRemote(p.id);
-  }
+  if (tracked) startSettingsRemote(p.id);
 }
 
 // Commits shows for either kind of version control; Sync is git-only; Check in is SVN-only.
@@ -449,8 +490,6 @@ function updateCheckinCount() {
   $("#checkin-btn").textContent = n ? `Check in (${n})` : "Check in";
 }
 
-const AUTO_MODES = ["auto_plan", "auto_queue", "auto_promote"];
-
 // Shows what "Default" means for each automation select, from the global settings.
 function renderAutoDefaults() {
   const form = settingsForm();
@@ -465,6 +504,11 @@ async function loadAutomation() {
     renderAutoDefaults();
     renderAutoFlow();
   } catch { /* the labels just say "Default (Off)" */ }
+}
+
+function startSettingsRemote(pid) {
+  $("#ps-remote-status").textContent = "Loading…";
+  loadSettingsRemote(pid);
 }
 
 // Only a successfully loaded URL may be sent back, or a failed load could wipe origin on Save.
@@ -502,7 +546,7 @@ function refillSettingsModels(form, provider, values) {
 async function saveProjectSettings(ev) {
   ev.preventDefault();
   const form = settingsForm();
-  const p = state.projects.find(x => x.id === form.dataset.pid);
+  const p = settingsProject();
   if (!p) return;
   const fields = {
     name: form.elements.name.value,
@@ -527,17 +571,10 @@ async function saveProjectSettings(ev) {
     }
   }
   if (p.svn_tracking === true && form.svn_tracking_off.checked) fields.svn_tracking = false;
-  const btn = $("#ps-save-btn");
-  btn.disabled = true;
-  showError($("#ps-error"), "");
-  try {
+  const saved = await withBusy($("#ps-save-btn"), $("#ps-error"), async () => {
     Object.assign(p, await api("PATCH", `/api/projects/${p.id}`, fields));
-  } catch (e) {
-    showError($("#ps-error"), e.message);
-    return;
-  } finally {
-    btn.disabled = false;
-  }
+  });
+  if (!saved) return;
   renderProjects();
   renderAutoFlow();
   if (currentProject() === p) {
@@ -599,60 +636,36 @@ function setupProjectSettings() {
   $("#ps-back-btn").onclick = () => closeProjectSettings();
   $("#ps-cancel-btn").onclick = () => closeProjectSettings();
   $("#ps-remove-btn").onclick = removeProject;
-  $("#ps-svn-enable-btn").onclick = async () => {
-    const p = state.projects.find(x => x.id === form.dataset.pid);
-    if (!p) return;
-    const btn = $("#ps-svn-enable-btn");
-    btn.disabled = true;
-    showError($("#ps-error"), "");
-    try {
-      Object.assign(p, await api("POST", `/api/projects/${p.id}/svn/enable`));
-      renderProjects();
-      loadReachability();
-      if (currentProject() === p) updateVcsButtons(p);
-      $("#ps-git-off").hidden = true;
-      $("#ps-svn").hidden = false;
-      form.svn_tracking_off.checked = false;
-      toast("SVN tracking turned on");
-    } catch (e) {
-      showError($("#ps-error"), e.message);
-    } finally {
-      btn.disabled = false;
-    }
-  };
-  $("#ps-git-enable-btn").onclick = async () => {
-    const p = state.projects.find(x => x.id === form.dataset.pid);
-    if (!p) return;
-    const btn = $("#ps-git-enable-btn");
-    if (!form.git_secrets_ack.checked) {
-      showError($("#ps-error"), "Tick the confirmation that this directory contains no secrets first.");
-      form.git_secrets_ack.focus();
-      return;
-    }
-    btn.disabled = true;
-    showError($("#ps-error"), "");
-    try {
-      Object.assign(p, await api("POST", `/api/projects/${p.id}/git/enable`, {secrets_ack: true}));
-      renderProjects();
-      loadReachability();
-      if (currentProject() === p) {
-        updateVcsButtons(p);
-      }
-      $("#ps-git-off").hidden = true;
-      $("#ps-svn").hidden = true;
-      $("#ps-git-on").hidden = false;
+  $("#ps-svn-enable-btn").onclick = () => enableVcs("svn");
+  $("#ps-git-enable-btn").onclick = () => enableVcs("git");
+}
+
+async function enableVcs(kind) {
+  const form = settingsForm();
+  const p = settingsProject();
+  if (!p) return;
+  const git = kind === "git";
+  if (git && !form.git_secrets_ack.checked) {
+    showError($("#ps-error"), "Tick the confirmation that this directory contains no secrets first.");
+    form.git_secrets_ack.focus();
+    return;
+  }
+  await withBusy($(`#ps-${kind}-enable-btn`), $("#ps-error"), async () => {
+    Object.assign(p, await api("POST", `/api/projects/${p.id}/${kind}/enable`, git ? { secrets_ack: true } : undefined));
+    renderProjects();
+    loadReachability();
+    if (currentProject() === p) updateVcsButtons(p);
+    $("#ps-git-off").hidden = true;
+    $("#ps-svn").hidden = git;
+    $("#ps-git-on").hidden = !git;
+    form[`${kind}_tracking_off`].checked = false;
+    if (git) {
       form.auto_sync.checked = p.auto_sync === true;
-      form.sync_mode.value = SYNC_MODE_NAMES[p.sync_mode] ? p.sync_mode : "ff-only";
-      form.git_tracking_off.checked = false;
-      $("#ps-remote-status").textContent = "Loading…";
-      loadSettingsRemote(p.id);
-      toast("Git tracking turned on");
-    } catch (e) {
-      showError($("#ps-error"), e.message);
-    } finally {
-      btn.disabled = false;
+      form.sync_mode.value = syncMode(p);
+      startSettingsRemote(p.id);
     }
-  };
+    toast(`${git ? "Git" : "SVN"} tracking turned on`);
+  });
 }
 
 /* ---------------- tasks & board ---------------- */
@@ -778,7 +791,7 @@ async function toggleAutoFlow(btn) {
   try {
     Object.assign(p, await api("PATCH", `/api/projects/${p.id}`, { [mode]: !effectiveAuto(p, mode) }));
     if (state.view === "settings" && settingsForm().dataset.pid === p.id) {
-      for (const key of AUTO_MODES) settingsForm()[key].value = p[key] === true ? "on" : p[key] === false ? "off" : "";
+      for (const key of AUTO_MODES) settingsForm()[key].value = autoSelectValue(p[key]);
     }
     loadTasks(); // turning a mode on may have moved tasks
   } catch (e) {
@@ -811,7 +824,7 @@ function onTabKeydown(e) {
 const PLANNABLE = new Set(["unplanned", "drafted", "planned", "failed"]);
 // Statuses whose finished work can be sent back to the AI with feedback.
 const REVIEWABLE = new Set(["review", "done"]);
-const hasOpenQuestions = t =>PLANNABLE.has(t.status) && (t.questions || []).length > 0;
+const hasOpenQuestions = t => PLANNABLE.has(t.status) && (t.questions || []).length > 0;
 
 function renderCard(t) {
   const p = currentProject();
@@ -840,12 +853,12 @@ function renderCard(t) {
   t.active && t.activity ? el("div", { class: "card-activity", title: t.activity }, `▶ ${t.activity}`) : null,
   el("div", { class: "card-meta" },
     t.paused ? el("span", { class: "chip paused", title: "Automation won't touch this task" }, "Paused") : null,
-    t.provider && t.provider !== (p.provider || "claude") ? el("span", { class: "chip" }, providerName(t.provider)) : null,
+    t.provider && t.provider !== projectProvider(p) ? el("span", { class: "chip" }, providerName(t.provider)) : null,
     t.plan_model ? el("span", { class: "chip", title: "Planning model for this task" }, `plan: ${t.plan_model}`) : null,
     t.code_model ? el("span", { class: "chip", title: "Coding model for this task" }, `code: ${t.code_model}`) : null,
     t.plan_trust ? el("span", { class: "chip", title: "Planning trust for this task" }, `trust: ${t.plan_trust}`) : null,
     hasOpenQuestions(t) ? el("span", { class: "chip question", title: t.questions.map(q => q.text).join("\n") },
-      `? ${t.questions.length} question${t.questions.length === 1 ? "" : "s"}`) : null,
+      `? ${plural(t.questions.length, "question")}`) : null,
     t.error && t.status !== "failed" ? el("span", { class: "chip warn", title: t.error }, "last attempt failed") : null,
     t.commit ? el("span", { class: "chip mono" }, t.commit.slice(0, 7)) : null,
     el("span", { class: "muted" }, relTime(t.updated_at))),
@@ -905,10 +918,9 @@ const BATCH_ACTIONS = [
     when: t => t.paused },
   { action: "cancel", label: "Cancel", from: ["planning", "running"], cls: "danger" },
 ].map(a => a.action === "resume" ? a : { ...a, when: t => !t.paused && (!a.when || a.when(t)) });
-const NOT_BUSY = ["unplanned", "drafted", "planned", "queued", "review", "done", "failed"];
 const BATCH_VERB = { delete: "Deleted", set_provider: "Updated", set_models: "Updated", plan: "Started planning",
   mark_planned: "Marked planned", mark_drafted: "Moved to drafted", queue: "Queued", dequeue: "Removed from queue",
-  unplan: "Moved back", reopen: "Reopened", approve: "Approved", send_back: "Sent back",
+  unplan: "Moved back", reopen: "Reopened", approve: "Approved",
   cancel: "Cancelled", pause: "Paused", resume: "Resumed" };
 
 const tabTasks = () => sortTasks(state.tab, state.tasks.filter(t => COLUMN_OF[t.status] === state.tab));
@@ -964,13 +976,10 @@ function renderBatchBar() {
 }
 
 async function doBatch(action, extra = {}) {
-  const label = action === "delete" ? "Delete" : action === "set_provider" ? "Set AI"
-    : action === "set_models" ? "Set models" : BATCH_ACTIONS.find(a => a.action === action).label;
   const spec = BATCH_ACTIONS.find(a => a.action === action);
   const targets = eligible(spec?.from || NOT_BUSY, spec?.when);
   if (!targets.length) return;
-  const n = targets.length;
-  const many = `${n} task${n === 1 ? "" : "s"}`;
+  const many = plural(targets.length, "task");
   if (action === "delete" && !confirm(`Delete ${many} permanently?\n\n${targets.map(t => `#${t.id} ${t.title}`).join("\n")}`)) return;
   if (action === "cancel" && !confirm(`Cancel the AI job for ${many}?`)) return;
   if (action === "queue") {
@@ -998,7 +1007,7 @@ async function doBatch(action, extra = {}) {
   renderBoard();
   if (state.openTid !== null) renderDrawer(false);
 
-  let message = `${BATCH_VERB[action] || label} ${ok.length}`;
+  let message = `${BATCH_VERB[action]} ${ok.length}`;
   if (failed.length) {
     message += `, skipped ${failed.length}: ` + failed.slice(0, 3).map(r => `#${r.id} ${r.error}`).join("; ")
       + (failed.length > 3 ? "; …" : "");
@@ -1020,10 +1029,10 @@ function setupBatchBar() {
   const batchModels = { plan_model: $("#batch-plan-model"), code_model: $("#batch-code-model") };
   for (const select of Object.values(batchModels)) {
     select.onchange = () => {
-      const provider = currentProject().provider || "claude";
-      if (select.value !== CUSTOM_MODEL) { select.dataset.value = select.value; return; }
-      const name = (prompt("Model name:", "") || "").trim();
-      fillBatchModel(select, provider, name || select.dataset.value);
+      const provider = projectProvider(currentProject());
+      const custom = select.value === CUSTOM_MODEL;
+      const name = pickModel(select, provider, "");
+      if (custom && name !== null) fillBatchModel(select, provider, name); // refill to restore the "unchanged" option
     };
   }
   $("#batch-models-btn").onclick = () => {
@@ -1036,8 +1045,6 @@ function setupBatchBar() {
   };
 }
 
-// Batch model selects: "unchanged" (not sent), "project default" (clears the override) or a model.
-const KEEP_MODEL = "\u0000keep";
 const KEEP_LABEL = { "batch-plan-model": "Planning: unchanged", "batch-code-model": "Coding: unchanged" };
 
 function fillBatchModel(select, provider, current = KEEP_MODEL) {
@@ -1234,7 +1241,7 @@ function enableImagePaste(field, previewEl) {
 function renderDrawer(fillForm) {
   const t = openTask();
   if (!t) { state.openTid = null; state.dirty = false; $("#drawer").hidden = true; return; }
-  const locked = t.status === "planning" || t.status === "running";
+  const locked = BUSY.has(t.status);
 
   $("#d-id").textContent = `#${t.id}`;
   const badge = $("#d-status");
@@ -1277,86 +1284,7 @@ function renderDrawer(fillForm) {
   $("#d-approval-commit").textContent = t.approval_commit ? `Note committed as ${t.approval_commit.slice(0, 10)}` : "";
   renderQuestions(t, canPlan);
   renderEditActions();
-  const hasPlan = (t.plan || "").trim().length > 0;
-  // With open questions, answering them is the main way forward; plain refining is secondary.
-  const asking = hasOpenQuestions(t);
-  const planLabel = hasPlan ? "Refine plan with AI" : "Plan with AI";
-  const planTip = "The AI drafts a new plan (read-only), using any feedback below. Unsaved edits are saved first.";
-  const queueTip = "The AI will implement this plan and commit the result; finished runs wait in Review. "
-    + "Unsaved edits are saved first.";
-  const sendBackTip = "AI re-plans with your feedback; the committed work stays";
-  const sendBack = () => {
-    const b = actionButton("Send back to AI", act("send_back"), "", sendBackTip);
-    b.dataset.needsFeedback = "";
-    b.disabled = !$("#d-feedback").value.trim();
-    return b;
-  };
-  const skipTip = "Accept the plan as written without asking the AI";
-  const pauseButton = () => actionButton("Pause", act("pause"), "ghost",
-    "Keep automation (Auto-plan / Auto-queue) from changing this task");
-
-  const A = [];
-  const act = action => () => doAction(action);
-  if (t.paused) {
-    A.push(actionButton("Resume", act("resume"), "primary", "Let automation and the run queue pick the task up again"));
-    A.push(el("span", { class: "muted small" }, "Paused: automation won't touch it; resume to continue."));
-  } else {
-  switch (t.status) {
-    case "unplanned":
-      A.push(actionButton(planLabel, act("plan"), asking ? "ghost" : "primary", planTip));
-      A.push(actionButton("Mark planned (skip AI)", act("mark_planned"), "ghost", skipTip));
-      A.push(pauseButton());
-      break;
-    case "planning":
-      A.push(actionButton("Cancel planning", act("cancel"), "danger"));
-      break;
-    case "drafted":
-      // Answering the questions (above) is the main way forward.
-      A.push(actionButton(planLabel, act("plan"), "ghost", planTip));
-      A.push(actionButton("Mark planned", act("mark_planned"), "ghost",
-        "Accept the plan once its questions are removed. Unsaved edits are saved first."));
-      A.push(actionButton("Queue anyway", act("queue"), "ghost", queueTip));
-      A.push(actionButton("Back to unplanned", act("unplan"), "ghost"));
-      A.push(pauseButton());
-      A.push(el("span", { class: "muted small" }, effectiveAuto(currentProject(), "auto_promote")
-        ? "Answer the questions, or delete them from the plan and save; it moves to Planned automatically once no questions remain."
-        : "Answer the questions, or delete them from the plan, save, and click Mark planned."));
-      break;
-    case "planned":
-      A.push(actionButton("Queue to run", act("queue"), asking ? "" : "primary", queueTip));
-      A.push(actionButton(planLabel, act("plan"), "ghost", planTip));
-      if (asking) {
-        A.push(actionButton("Move to drafted", act("mark_drafted"), "ghost",
-          "The plan has open questions; park it in Drafted until they're answered"));
-      }
-      A.push(actionButton("Back to unplanned", act("unplan"), "ghost"));
-      A.push(pauseButton());
-      break;
-    case "queued":
-      A.push(actionButton("Remove from queue", act("dequeue")));
-      A.push(pauseButton());
-      break;
-    case "running":
-      A.push(actionButton("Cancel run", act("cancel"), "danger"));
-      break;
-    case "review":
-      A.push(actionButton("Approve → Finished", act("approve"), "primary", "The work is good; move it to Finished. A note is committed to the repository."));
-      A.push(sendBack());
-      A.push(actionButton("Reopen", act("reopen"), "ghost", "Back to Planned without asking the AI"));
-      break;
-    case "done":
-      A.push(actionButton("Reopen", act("reopen"), "", "Back to Planned without asking the AI"));
-      A.push(sendBack());
-      break;
-    case "failed":
-      A.push(actionButton("Queue to run again", act("queue"), asking ? "" : "primary", queueTip));
-      A.push(actionButton(planLabel, act("plan"), "ghost", planTip));
-      A.push(actionButton("Mark planned (skip AI)", act("mark_planned"), "ghost", skipTip));
-      A.push(pauseButton());
-      break;
-  }
-  }
-  $("#d-flow-actions").replaceChildren(...A);
+  $("#d-flow-actions").replaceChildren(...drawerActions(t));
   $("#d-danger-actions").replaceChildren(...(locked ? []
     : [actionButton("Delete task", deleteTask, "ghost danger small", "Delete this task permanently")]));
 
@@ -1374,7 +1302,72 @@ function renderDrawer(fillForm) {
   $("#d-history").replaceChildren(...[...t.history].reverse().map(h =>
     el("li", {}, el("span", { class: "muted" }, new Date(h.at).toLocaleString()), " ", h.event)));
 
-  if (t.active && !pollLive.timer) pollLive();
+  if (t.active && !state.live.timer) pollLive();
+}
+
+const PLAN_TIP = "The AI drafts a new plan (read-only), using any feedback below. Unsaved edits are saved first.";
+const QUEUE_TIP = "The AI will implement this plan and commit the result; finished runs wait in Review. "
+  + "Unsaved edits are saved first.";
+const SEND_BACK_TIP = "AI re-plans with your feedback; the committed work stays";
+const SKIP_TIP = "Accept the plan as written without asking the AI";
+
+// The flow buttons for a task's status (a paused task only offers Resume).
+function drawerActions(t) {
+  const act = action => () => doAction(action);
+  // With open questions, answering them is the main way forward; plain refining is secondary.
+  const asking = hasOpenQuestions(t);
+  const planLabel = (t.plan || "").trim() ? "Refine plan with AI" : "Plan with AI";
+  const sendBack = () => {
+    const b = actionButton("Send back to AI", act("send_back"), "", SEND_BACK_TIP);
+    b.dataset.needsFeedback = "";
+    b.disabled = !$("#d-feedback").value.trim();
+    return b;
+  };
+  const pauseButton = () => actionButton("Pause", act("pause"), "ghost",
+    "Keep automation (Auto-plan / Auto-queue) from changing this task");
+  const plan = (cls = "ghost") => actionButton(planLabel, act("plan"), cls, PLAN_TIP);
+  const backToUnplanned = () => actionButton("Back to unplanned", act("unplan"), "ghost");
+
+  if (t.paused) {
+    return [actionButton("Resume", act("resume"), "primary", "Let automation and the run queue pick the task up again"),
+      el("span", { class: "muted small" }, "Paused: automation won't touch it; resume to continue.")];
+  }
+  switch (t.status) {
+    case "unplanned":
+      return [plan(asking ? "ghost" : "primary"),
+        actionButton("Mark planned (skip AI)", act("mark_planned"), "ghost", SKIP_TIP), pauseButton()];
+    case "planning":
+      return [actionButton("Cancel planning", act("cancel"), "danger")];
+    case "drafted":
+      // Answering the questions (above) is the main way forward.
+      return [plan(),
+        actionButton("Mark planned", act("mark_planned"), "ghost",
+          "Accept the plan once its questions are removed. Unsaved edits are saved first."),
+        actionButton("Queue anyway", act("queue"), "ghost", QUEUE_TIP),
+        backToUnplanned(), pauseButton(),
+        el("span", { class: "muted small" }, effectiveAuto(currentProject(), "auto_promote")
+          ? "Answer the questions, or delete them from the plan and save; it moves to Planned automatically once no questions remain."
+          : "Answer the questions, or delete them from the plan, save, and click Mark planned.")];
+    case "planned":
+      return [actionButton("Queue to run", act("queue"), asking ? "" : "primary", QUEUE_TIP), plan(),
+        asking ? actionButton("Move to drafted", act("mark_drafted"), "ghost",
+          "The plan has open questions; park it in Drafted until they're answered") : null,
+        backToUnplanned(), pauseButton()].filter(Boolean);
+    case "queued":
+      return [actionButton("Remove from queue", act("dequeue")), pauseButton()];
+    case "running":
+      return [actionButton("Cancel run", act("cancel"), "danger")];
+    case "review":
+      return [actionButton("Approve → Finished", act("approve"), "primary",
+          "The work is good; move it to Finished. A note is committed to the repository."),
+        sendBack(), actionButton("Reopen", act("reopen"), "ghost", "Back to Planned without asking the AI")];
+    case "done":
+      return [actionButton("Reopen", act("reopen"), "", "Back to Planned without asking the AI"), sendBack()];
+    case "failed":
+      return [actionButton("Queue to run again", act("queue"), asking ? "" : "primary", QUEUE_TIP), plan(),
+        actionButton("Mark planned (skip AI)", act("mark_planned"), "ghost", SKIP_TIP), pauseButton()];
+  }
+  return [];
 }
 
 // Files changed by the task's commit, fetched once per commit while the drawer shows it.
@@ -1383,16 +1376,16 @@ async function renderChanges(t, show) {
   const p = currentProject();
   const ref = t.commit || (p && p.svn_tracking === true && (t.changes || []).length
     ? `svn:${t.changes.length}:${t.checkin || ""}` : "");
-  if (!show || !ref) { box.hidden = true; renderChanges.key = null; return; }
+  if (!show || !ref) { box.hidden = true; state.changesKey = null; return; }
   const key = `${state.pid}/${t.id}/${ref}`;
-  if (renderChanges.key === key) return;
-  renderChanges.key = key;
+  if (state.changesKey === key) return;
+  state.changesKey = key;
   box.hidden = true;
   let files;
   try {
     files = (await api("GET", `/api/projects/${state.pid}/tasks/${t.id}/changes`)).files;
   } catch { files = []; }
-  if (renderChanges.key !== key) return;
+  if (state.changesKey !== key) return;
   $("#d-changes-count").textContent = `(${files.length})`;
   $("#d-changes-list").replaceChildren(...files.map(f =>
     el("li", {}, el("span", { class: `change-status s-${f.status}` }, f.status), " ", f.path)));
@@ -1403,10 +1396,10 @@ async function renderChanges(t, show) {
 // to the project's model only when the task uses the project's AI.
 function fillTaskModels(planModel, codeModel) {
   const p = currentProject();
-  const projectProvider = (p && p.provider) || "claude";
-  const provider = $("#d-provider").value || projectProvider;
-  const blank = provider === projectProvider ? "Project default" : "Global default";
-  const stillValid = () => ($("#d-provider").value || projectProvider) === provider && !$("#drawer").hidden;
+  const own = projectProvider(p);
+  const provider = $("#d-provider").value || own;
+  const blank = provider === own ? "Project default" : "Global default";
+  const stillValid = () => ($("#d-provider").value || own) === provider && !$("#drawer").hidden;
   fillModelSelectLive($("#d-plan-model"), provider, planModel, stillValid, blank);
   fillModelSelectLive($("#d-code-model"), provider, codeModel, stillValid, blank);
 }
@@ -1445,8 +1438,7 @@ async function doAction(action, extra = {}) {
   const t = openTask();
   if (!t) return;
   if (action === "queue" && hasOpenQuestions(t)) {
-    const n = t.questions.length;
-    if (!confirm(`The plan still has ${n} unanswered question${n === 1 ? "" : "s"}. Queue anyway?`)) return;
+    if (!confirm(`The plan still has ${plural(t.questions.length, "unanswered question")}. Queue anyway?`)) return;
   }
   if (state.dirty && action !== "cancel" && !(await saveTask(true))) return;
   const body = { action, ...extra };
@@ -1482,13 +1474,9 @@ async function deleteTask() {
 
 const ACTIVITY_ICON = { say: "💬", tool: "🔧", error: "⚠", note: "·" };
 
-function activityAtBottom(list) {
-  return list.scrollTop + list.clientHeight >= list.scrollHeight - 30;
-}
-
 // Appends only new events; re-renders fully if the list shrank (cap rollover or a new job).
 function renderActivity(list, events) {
-  const stick = activityAtBottom(list);
+  const stick = isScrolledToBottom(list);
   let done = Number(list.dataset.count || 0);
   if (events.length < done || (done && list.dataset.first !== String(events[0] && events[0].at))) {
     list.replaceChildren();
@@ -1517,37 +1505,35 @@ function showLiveTab(raw) {
 }
 
 async function pollLive() {
-  clearTimeout(pollLive.timer);
-  pollLive.timer = null;
+  clearTimeout(state.live.timer);
+  state.live.timer = null;
   const t = openTask();
   if (!t || !t.active) return;
-  pollLive.timer = -1; // mark as running while the request is in flight
+  state.live.timer = -1; // mark as running while the request is in flight
   try {
     const live = await api("GET", `/api/projects/${state.pid}/tasks/${t.id}/live`);
-    if (state.openTid !== t.id) { pollLive.timer = null; return; }
+    if (state.openTid !== t.id) { state.live.timer = null; return; }
     renderActivity($("#d-activity"), live.events || []);
     $("#d-current").textContent = live.current ? `▶ ${live.current}` : "";
     $("#d-kind").textContent = live.kind === "plan" ? "· Planning" : live.kind ? "· Running" : "";
-    if (pollLive.tabFor !== t.id) {  // first poll for this task: pick a default tab
-      pollLive.tabFor = t.id;
-      pollLive.userTab = false;
+    if (state.live.tabFor !== t.id) {  // first poll for this task: pick a default tab
+      state.live.tabFor = t.id;
+      state.live.userTab = false;
       showLiveTab(!(live.events || []).length);
-    } else if ((live.events || []).length && !pollLive.userTab && $("#d-activity").hidden) {
+    } else if ((live.events || []).length && !state.live.userTab && $("#d-activity").hidden) {
       showLiveTab(false);
     }
     const pre = $("#d-live");
-    const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
+    const atBottom = isScrolledToBottom(pre, 20);
     pre.textContent = live.output || "Waiting for output…";
     if (atBottom) pre.scrollTop = pre.scrollHeight;
     $("#d-elapsed").textContent = live.active ? `${live.elapsed}s` : "finished";
-    if (!live.active) { pollLive.timer = null; loadTasks(); return; }
+    if (!live.active) { state.live.timer = null; loadTasks(); return; }
   } catch { /* transient; next tick retries */ }
-  pollLive.timer = setTimeout(pollLive, 1000);
+  state.live.timer = setTimeout(pollLive, 1000);
 }
 
 /* ---------------- chat ---------------- */
-
-const chat = { messages: [], active: false, timer: null, errorShown: false };
 
 function openChat() {
   if (!$("#drawer").hidden && !closeDrawer()) return;
@@ -1558,36 +1544,35 @@ function openChat() {
 
 function closeChat() {
   $("#chat").hidden = true;
-  clearTimeout(chat.timer);
-  chat.timer = null;
+  clearTimeout(state.chat.timer);
+  state.chat.timer = null;
 }
 
 async function loadChat() {
-  clearTimeout(chat.timer);
-  chat.timer = null;
+  clearTimeout(state.chat.timer);
+  state.chat.timer = null;
   const pid = state.pid;
   if (!pid || $("#chat").hidden) return;
   try {
     const data = await api("GET", `/api/projects/${pid}/chat`);
-    chat.errorShown = false;
+    state.chat.errorShown = false;
     if (pid === state.pid) renderChat(data);
-  } catch (e) { if (!chat.errorShown) toast(e.message, true); chat.errorShown = true; }
-  if (chat.active && !$("#chat").hidden) chat.timer = setTimeout(loadChat, 1500);
+  } catch (e) { if (!state.chat.errorShown) toast(e.message, true); state.chat.errorShown = true; }
+  if (state.chat.active && !$("#chat").hidden) state.chat.timer = setTimeout(loadChat, 1500);
 }
 
 // Chat uses the project's chat model, else its planning model (else the global default).
 function renderChatWhere() {
   const p = currentProject();
   const model = p ? p.chat_model || p.plan_model || "" : "";
-  $("#c-where").textContent = p ? `${p.name} · ${providerName(p.provider || "claude")}${model ? " · " + model : ""}` : "";
+  $("#c-where").textContent = p ? `${p.name} · ${providerName(projectProvider(p))}${model ? " · " + model : ""}` : "";
 }
 
 function renderChat(data) {
   const log = $("#c-log");
-  const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+  const atBottom = isScrolledToBottom(log);
   renderChatWhere();
-  chat.active = data.active;
-  chat.messages = data.messages;
+  state.chat.active = data.active;
   $("#c-empty").hidden = data.messages.length > 0;
   $("#c-messages").replaceChildren(...data.messages.map(m => el("li", {
     class: `${m.role}${m.error ? " error" : ""}`,
@@ -1610,7 +1595,7 @@ function renderChat(data) {
 async function chatRequest(method, suffix, body) {
   try {
     renderChat(await api(method, `/api/projects/${state.pid}/chat${suffix}`, body));
-    if (chat.active) loadChat();
+    if (state.chat.active) loadChat();
     return true;
   } catch (e) { toast(e.message, true); return false; }
 }
@@ -1619,7 +1604,7 @@ async function sendChat(ev) {
   ev.preventDefault();
   const input = $("#c-input");
   const message = input.value.trim();
-  if (!message || chat.active) return;
+  if (!message || state.chat.active) return;
   $("#c-send").disabled = true;
   if (await chatRequest("POST", "", { message })) {
     input.value = "";
@@ -1634,8 +1619,8 @@ function setupChat() {
   $("#c-input").onkeydown = e => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) sendChat(e);
   };
-  $("#d-tab-activity").onclick = () => { pollLive.userTab = true; showLiveTab(false); };
-  $("#d-tab-raw").onclick = () => { pollLive.userTab = true; showLiveTab(true); };
+  $("#d-tab-activity").onclick = () => { state.live.userTab = true; showLiveTab(false); };
+  $("#d-tab-raw").onclick = () => { state.live.userTab = true; showLiveTab(true); };
   $("#c-raw-toggle").onclick = () => {
     const pre = $("#c-live");
     pre.hidden = !pre.hidden;
@@ -1780,13 +1765,12 @@ function setupProjectDialog() {
   form.onsubmit = async ev => {
     ev.preventDefault();
     const btn = $("#project-submit");
-    btn.disabled = true;
     btn.textContent = "Connecting…";
     const f = Object.fromEntries(new FormData(form));
     f.create = form.create.checked;
     f.git_tracking = form.git_tracking.checked;
     f.secrets_ack = form.git_tracking.checked && form.secrets_ack.checked;
-    try {
+    await withBusy(btn, $("#project-form-error"), async () => {
       const project = await api("POST", "/api/projects", f);
       dialog.close();
       state.projects.push(project);
@@ -1794,25 +1778,13 @@ function setupProjectDialog() {
       loadReachability();
       await selectProject(project.id);
       toast(`Added ${project.name}`);
-    } catch (e) {
-      showError($("#project-form-error"), e.message);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "Add project";
-    }
+    });
+    btn.textContent = "Add project";
   };
 }
 
-const SETTING_FIELDS = [
-  "claude.plan", "claude.run", "codex.plan", "codex.run",
-  "claude.plan_model", "claude.code_model", "codex.plan_model", "codex.code_model",
-  "claude.models", "codex.models", "opencode.models", "cline.models",
-  "opencode.plan", "opencode.run", "opencode.plan_agent", "opencode.run_agent",
-  "opencode.plan_model", "opencode.code_model", "opencode.require_agents", "opencode.plan_must_not_edit",
-  "cline.plan", "cline.run", "cline.plan_model", "cline.code_model", "cline.plan_must_not_edit",
-  "timeouts.plan", "timeouts.run", "automation.auto_plan", "automation.auto_queue",
-  "automation.auto_promote", "git.gitignore",
-];
+// The form's dotted input names ("claude.plan", "timeouts.run"…) are the settings fields it edits.
+const settingFields = form => [...new Set([...form.elements].map(e => e.name).filter(n => n.includes(".")))];
 
 /* ---------------- OpenAI-compatible endpoints ---------------- */
 
@@ -1892,7 +1864,7 @@ async function testEndpoint(node) {
   status.classList.remove("error");
   try {
     const r = await api("POST", "/api/endpoints/test", readEndpoint(node));
-    status.textContent = r.ok ? `OK: ${r.count} tool-capable model${r.count === 1 ? "" : "s"}` : r.error;
+    status.textContent = r.ok ? `OK: ${plural(r.count, "tool-capable model")}` : r.error;
     status.classList.toggle("error", !r.ok);
   } catch (e) {
     status.textContent = e.message;
@@ -1927,7 +1899,7 @@ function setupSettingsDialog() {
   $("#settings-btn").onclick = async () => {
     try {
       const s = await api("GET", "/api/settings");
-      for (const name of SETTING_FIELDS) {
+      for (const name of settingFields(form)) {
         const [obj, key] = settingPath(name, s);
         const input = form.elements[name];
         if (input.type === "checkbox") input.checked = !!obj[key];
@@ -1942,7 +1914,7 @@ function setupSettingsDialog() {
     ev.preventDefault();
     const out = { commands: Object.fromEntries([...CLI].map(p => [p, {}])), timeouts: {}, automation: {}, git: {},
       endpoints: $$("#endpoint-list .endpoint").map(readEndpoint) };
-    for (const name of SETTING_FIELDS) {
+    for (const name of settingFields(form)) {
       const [obj, key] = settingPath(name, out);
       const input = form.elements[name];
       obj[key] = input.type === "checkbox" ? input.checked
@@ -1986,7 +1958,7 @@ async function showCheckin() {
     const data = await api("GET", `/api/projects/${pid}/checkin`);
     $("#ci-tasks").replaceChildren(...(data.tasks.length ? data.tasks.map(t => {
       const files = t.changes.length ? el("details", {}, el("summary", { class: "muted small" },
-        `${t.changes.length} file${t.changes.length === 1 ? "" : "s"}`),
+        plural(t.changes.length, "file")),
         ...t.changes.map(f => el("div", { class: "small" },
           el("span", { class: `change-status s-${f.status}` }, f.status), " ", f.path))) : null;
       return el("li", {}, el("strong", {}, `#${t.id} ${t.title}`), files);
@@ -2001,29 +1973,21 @@ async function showCheckin() {
 }
 
 async function submitCheckin() {
-  const btn = $("#ci-submit-btn");
-  btn.disabled = true;
-  showError($("#ci-error"), "");
-  try {
+  await withBusy($("#ci-submit-btn"), $("#ci-error"), async () => {
     const data = await api("POST", `/api/projects/${state.pid}/checkin`, { message: $("#ci-message").value });
     $("#checkin-dialog").close();
     toast(data.revision ? `Checked in as ${data.revision}` : "Nothing to check in");
     loadTasks();
     loadReachability();
-  } catch (e) {
-    showError($("#ci-error"), e.message);
-    btn.disabled = false;
-  }
+  });
 }
 
-let remoteUrl = ""; // origin's URL as last shown in the Sync dialog
-
 function renderRemote(r) {
-  remoteUrl = r.url || "";
-  $("#r-mode-text").textContent = SYNC_MODE_NAMES[r.sync_mode] || SYNC_MODE_NAMES["ff-only"];
+  state.remoteUrl = r.url || "";
+  $("#r-mode-text").textContent = syncModeName(r.sync_mode);
   const parts = [r.url ? `origin ${r.url}` : "", r.branch ? `Branch ${r.branch}` : "Detached HEAD"].filter(Boolean);
   if (r.upstream) parts.push(`tracking ${r.upstream}`, `${r.ahead} ahead, ${r.behind} behind`);
-  else if (r.url) parts.push(`not pushed yet (${r.ahead} local commit${r.ahead === 1 ? "" : "s"})`);
+  else if (r.url) parts.push(`not pushed yet (${plural(r.ahead, "local commit")})`);
   else parts.push("no remote set");
   if (r.dirty) parts.push("uncommitted changes");
   $("#r-status").textContent = parts.join(" · ");
@@ -2035,7 +1999,7 @@ async function showRemote() {
   $("#r-log").hidden = true;
   $("#r-status").textContent = "Loading…";
   const p = currentProject();
-  $("#r-mode-text").textContent = SYNC_MODE_NAMES[p && p.sync_mode] || SYNC_MODE_NAMES["ff-only"];
+  $("#r-mode-text").textContent = syncModeName(p && p.sync_mode);
   $("#r-sync-btn").disabled = true;
   $("#remote-dialog").showModal();
   try {
@@ -2051,83 +2015,43 @@ function setupRemoteDialog() {
   };
   $("#r-sync-btn").onclick = async () => {
     const btn = $("#r-sync-btn");
-    showError($("#r-error"), "");
     $("#r-log").hidden = true;
-    btn.disabled = true;
     btn.textContent = "Syncing…";
-    try {
-      // The server syncs with the project's saved mode.
-      const r = await api("POST", `/api/projects/${state.pid}/remote/sync`, { push: $("#r-push").checked });
-      renderRemote(r);
-      $("#r-log").textContent = r.log.join("\n");
-      $("#r-log").hidden = false;
-      toast("Synced");
-      loadReachability();
-    } catch (e) {
-      showError($("#r-error"), e.message);
-      toast(e.message, true);
-    } finally {
-      btn.textContent = "Sync now";
-      btn.disabled = !remoteUrl;
-      loadTasks();
-    }
+    await withBusy(btn, $("#r-error"), async () => {
+      try {
+        // The server syncs with the project's saved mode.
+        const r = await api("POST", `/api/projects/${state.pid}/remote/sync`, { push: $("#r-push").checked });
+        renderRemote(r);
+        $("#r-log").textContent = r.log.join("\n");
+        $("#r-log").hidden = false;
+        toast("Synced");
+        loadReachability();
+      } catch (e) {
+        toast(e.message, true);
+        throw e;
+      }
+    });
+    btn.textContent = "Sync now";
+    btn.disabled = !state.remoteUrl;
+    loadTasks();
   };
 }
 
 /* ---------------- wiring ---------------- */
 
-function init() {
-  setupThemePicker();
-  setupProjectDialog();
-  setupSettingsDialog();
-  setupChat();
-  for (const [f, p] of Object.entries(IMAGE_FIELDS)) enableImagePaste($(f), $(p));
-  setupBatchBar();
-  setupRemoteDialog();
-  setupProjectSettings();
-  loadAutomation();
-  $("#new-task").onsubmit = createTask;
-  $("#commits-btn").onclick = showCommits;
-  $("#checkin-btn").onclick = showCheckin;
-  $("#ci-submit-btn").onclick = submitCheckin;
-  $("#ci-copy-btn").onclick = async () => {
-    try { await navigator.clipboard.writeText($("#ci-message").value); toast("Message copied"); }
-    catch { toast("Could not copy", true); }
-  };
-  $("#terminal-btn").onclick = async () => {
-    try {
-      await api("POST", `/api/projects/${state.pid}/terminal`);
-      toast("Terminal opened");
-    } catch (e) { toast(e.message, true); }
-  };
-  $("#vscode-btn").onclick = async () => {
-    try {
-      await api("POST", `/api/projects/${state.pid}/vscode`);
-      toast("VS Code opened");
-    } catch (e) { toast(e.message, true); }
-  };
-  for (const btn of $$(".queue-tab")) btn.onclick = () => selectTab(btn.dataset.col);
-  $(".queue-tabs").onkeydown = onTabKeydown;
-  for (const btn of $$(".auto-flow")) btn.onclick = () => toggleAutoFlow(btn);
-  // The chat drawer's model is a quick override that saves immediately.
-  $("#c-model").onchange = async e => {
-    const model = pickModel(e.target, currentProject().provider || "claude");
-    if (model === null) return;
-    await updateProject({ chat_model: model });
-    renderChatWhere();
-  };
+function setupDrawer() {
   for (const id of ["#d-title", "#d-desc", "#d-provider", "#d-plan-trust", "#d-plan"]) {
     $(id).addEventListener("input", () => { state.dirty = true; renderEditActions(); });
   }
   $("#d-provider").addEventListener("change", () => {
     // Keep only models the new provider lists; a model name for another AI would fail there.
-    const provider = $("#d-provider").value || currentProject().provider || "claude";
+    const provider = $("#d-provider").value || projectProvider(currentProject());
     fillTaskModels(modelFor(provider, $("#d-plan-model").dataset.value || ""),
       modelFor(provider, $("#d-code-model").dataset.value || ""));
   });
   for (const id of ["#d-plan-model", "#d-code-model"]) {
     $(id).onchange = e => {
-      const provider = $("#d-provider").value || currentProject().provider || "claude";
+      const provider = $("#d-provider").value || projectProvider(currentProject());
       if (pickModel(e.target, provider) === null) return;
       state.dirty = true;
       renderEditActions();
@@ -2144,6 +2068,9 @@ function init() {
     const empty = !$("#d-feedback").value.trim();
     for (const b of $$("#d-flow-actions [data-needs-feedback]")) b.disabled = empty;
   });
+}
+
+function setupGlobalKeys() {
   document.addEventListener("click", e => {
     const target = e.target.closest("[data-close]");
     if (!target) return;
@@ -2183,6 +2110,40 @@ function init() {
     if ((e.ctrlKey || e.metaKey) && e.key === "s" && !$("#drawer").hidden) { e.preventDefault(); saveTask(); }
   });
   window.addEventListener("beforeunload", e => { if (state.dirty || state.settingsDirty) e.preventDefault(); });
+}
+
+function init() {
+  setupThemePicker();
+  setupProjectDialog();
+  setupSettingsDialog();
+  setupChat();
+  for (const [f, p] of Object.entries(IMAGE_FIELDS)) enableImagePaste($(f), $(p));
+  setupBatchBar();
+  setupRemoteDialog();
+  setupProjectSettings();
+  setupDrawer();
+  setupGlobalKeys();
+  loadAutomation();
+  $("#new-task").onsubmit = createTask;
+  $("#commits-btn").onclick = showCommits;
+  $("#checkin-btn").onclick = showCheckin;
+  $("#ci-submit-btn").onclick = submitCheckin;
+  $("#ci-copy-btn").onclick = async () => {
+    try { await navigator.clipboard.writeText($("#ci-message").value); toast("Message copied"); }
+    catch { toast("Could not copy", true); }
+  };
+  $("#terminal-btn").onclick = () => postAndToast("terminal", "Terminal opened");
+  $("#vscode-btn").onclick = () => postAndToast("vscode", "VS Code opened");
+  for (const btn of $$(".queue-tab")) btn.onclick = () => selectTab(btn.dataset.col);
+  $(".queue-tabs").onkeydown = onTabKeydown;
+  for (const btn of $$(".auto-flow")) btn.onclick = () => toggleAutoFlow(btn);
+  // The chat drawer's model is a quick override that saves immediately.
+  $("#c-model").onchange = async e => {
+    const model = pickModel(e.target, projectProvider(currentProject()));
+    if (model === null) return;
+    await updateProject({ chat_model: model });
+    renderChatWhere();
+  };
 
   loadProjects().catch(e => toast(e.message, true));
   setInterval(() => { if (!document.hidden) loadTasks(); }, 3000);
