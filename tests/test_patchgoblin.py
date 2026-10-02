@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import shutil
@@ -332,7 +333,7 @@ class ProjectTests(AppTestCase):
     @staticmethod
     def _decode_ps(argv):
         import base64
-        cmd = argv[-1]
+        cmd = argv[-1].removesuffix("; exit $LASTEXITCODE")
         assert cmd.startswith("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "), cmd
         return base64.b64decode(cmd.rsplit(" ", 1)[1]).decode("utf-16-le")
 
@@ -405,6 +406,29 @@ class ProjectTests(AppTestCase):
             res = ps_host.run(["claude"], cwd=r"C:\p", on_output=seen.append)
         self.assertEqual(seen, ['{"type":"x"}\n'])
         self.assertEqual(res.stdout, '{"type":"x"}\n')
+
+    def test_windows_ssh_read_text_encoding_and_retry(self):
+        self.addCleanup(hosts_mod._WIN_SHELL.clear)
+        hosts_mod._WIN_SHELL[("a@cmd", None)] = "cmd"
+        hosts_mod._WIN_SHELL[("a@ps", None)] = "powershell"
+        text = "héllo ✓"
+        b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(0, b64, "")) as comm:
+            self.assertEqual(WindowsSSHHost("a@ps").read_text(r"C:\t.json"), text)
+            self.assertIn("ToBase64String", self._decode_ps(comm.call_args[0][0]))
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(0, text, "")) as comm:
+            self.assertEqual(WindowsSSHHost("a@cmd").read_text(r"C:\t.json"), text)
+            self.assertNotIn("ToBase64String", self._decode_ps(comm.call_args[0][0]))
+        # A timeout is retried once; a second one reports the path and operation.
+        results = [Result(-1, "", "", True), Result(0, b64, "")]
+        with mock.patch("patchgoblin.hosts.communicate", side_effect=results) as comm:
+            self.assertEqual(WindowsSSHHost("a@ps").read_text(r"C:\t.json"), text)
+            self.assertEqual(comm.call_count, 2)
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(-1, "", "", True)) as comm:
+            with self.assertRaises(HostError) as ctx:
+                WindowsSSHHost("a@ps").write_text(r"C:\t.json", "x")
+            self.assertEqual(comm.call_count, 2)
+        self.assertIn(r"write C:\t.json", str(ctx.exception))
 
     def test_detect_ssh_os_and_host_for(self):
         hosts_mod._SSH_OS.clear()
@@ -927,6 +951,72 @@ class WorkflowTests(AppTestCase):
         self.app.config["STORE"].forget(pid)
         task = self.wait_for(pid, tid, {"drafted"}, timeout=5)
         self.assertIn("Planning was interrupted", task["error"])
+
+    def plan_with_save_failures(self, failures):
+        """Plan a task whose full-result save raises ``failures`` times; returns (engine, project, tid)."""
+        pid = self.add_project()["id"]
+        tid = self.post_task(pid, "t")["id"]
+        engine = self.app.config["ENGINE"]
+        project = self.app.config["REGISTRY"].get(pid)
+        real = engine._record_plan
+        left = [failures]
+
+        def flaky(*args, **kw):
+            if left[0] > 0:
+                left[0] -= 1
+                raise OSError("disk went away")
+            return real(*args, **kw)
+        patches = [mock.patch.object(engine, "_ai", return_value=Outcome(True, text="## Steps\n1. go\n\n"
+                                                                         "## Questions for you\nNone.")),
+                   mock.patch.object(engine, "_record_plan", side_effect=flaky),
+                   mock.patch("patchgoblin.engine.time.sleep")]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        engine.start_planning(project, tid)
+        deadline = time.time() + 10
+        while engine.jobs and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertFalse(engine.jobs)
+        return engine, project, tid
+
+    def test_plan_save_failure_is_reported_and_plan_kept(self):
+        engine, project, tid = self.plan_with_save_failures(99)
+        engine.reconcile(project)
+        task = self.app.config["STORE"].read(project, fresh=True)["tasks"][0]
+        self.assertEqual(task["status"], "unplanned")
+        self.assertIn("saving the result failed", task["error"])
+        self.assertIn("disk went away", task["error"])
+        self.assertNotIn("restarted", task["error"])
+        self.assertIn("go", task["output"])
+
+    def test_plan_save_failure_with_no_fallback_does_not_blame_restart(self):
+        engine, project, tid = self.plan_with_save_failures(99)
+        pid = project["id"]
+        with self.app.config["STORE"].edit(project) as doc:  # as if the fallback write had failed
+            doc["tasks"][0].update(status="planning", error="")
+        engine._lost[(pid, tid)] = "Planning finished but saving the result failed: boom"
+        engine.reconcile(project)
+        task = self.app.config["STORE"].read(project, fresh=True)["tasks"][0]
+        self.assertIn("boom", task["error"])
+        self.assertNotIn("restarted", task["error"])
+        self.assertNotIn((pid, tid), engine._lost)
+
+    def test_plan_save_retries_transient_failure(self):
+        engine, project, tid = self.plan_with_save_failures(1)
+        task = self.app.config["STORE"].read(project, fresh=True)["tasks"][0]
+        self.assertIn(task["status"], ("planned", "drafted"))
+        self.assertEqual(task["error"], "")
+
+    def test_real_restart_still_says_restarted(self):
+        pid = self.add_project()["id"]
+        tid = self.post_task(pid, "t")["id"]
+        project = self.app.config["REGISTRY"].get(pid)
+        with self.app.config["STORE"].edit(project) as doc:
+            doc["tasks"][0].update(status="planning", prev_status="unplanned")
+        self.app.config["ENGINE"].reconcile(project)
+        task = self.app.config["STORE"].read(project, fresh=True)["tasks"][0]
+        self.assertIn("restarted", task["error"])
 
 
 class AutomationTests(AppTestCase):

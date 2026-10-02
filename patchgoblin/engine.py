@@ -103,6 +103,8 @@ class Engine:
     def __init__(self, registry, store, settings):
         self.registry, self.store, self.settings = registry, store, settings
         self.jobs: dict[tuple[str, int], Job] = {}
+        # Planning results that could not be saved, so reconcile() reports the real error.
+        self._lost: dict[tuple[str, int], str] = {}
         self.chats: dict[str, Chat] = {}
         self._lock = threading.Lock()
         self._runners: set[str] = set()
@@ -178,7 +180,8 @@ class Engine:
                 if task["id"] in stale and (pid, task["id"]) not in self.jobs \
                         and task["status"] in ("planning", "running"):
                     if task["status"] == "planning":
-                        task["error"] = "Planning was interrupted (PatchGoblin restarted)."
+                        task["error"] = (self._lost.pop((pid, task["id"]), None)
+                                         or "Planning was interrupted (PatchGoblin restarted).")
                         set_status(task, task.get("prev_status") or "unplanned", "Planning interrupted")
                     else:
                         task["error"] = ("Run was interrupted (PatchGoblin restarted). "
@@ -341,40 +344,74 @@ class Engine:
             # Only a task's first plan is auto-queued, not a re-plan with answers or feedback.
             first_plan = task.get("prev_status") == "unplanned" and not answers and not feedback.strip()
             queued = False
-            with self.store.edit_task(project, tid) as current:
-                if current is None:
-                    return
-                current["output"] = clip_tail(job.text())
-                if outcome.ok:
-                    title, plan = split_title(outcome.text) if rewrite else ("", outcome.text)
-                    current["plan"] = plan.strip() or outcome.text
-                    if title and title != current["title"]:
-                        old, current["title"] = current["title"], title
-                        log_event(current, f"Title rewritten by AI (was: {old})")
-                    current["error"] = ""
-                    n = len(plan_questions(current["plan"]))
-                    if ready_status(current["plan"]) == "drafted":
-                        set_status(current, "drafted",
-                                   f"AI plan drafted ({n} open question{'s' if n != 1 else ''})")
-                    elif current.get("prev_status") == "drafted" and not self.auto(pid, "auto_promote"):
-                        set_status(current, "drafted",
-                                   "AI plan ready (no open questions; move to Planned by hand)")
-                    else:
-                        set_status(current, "planned", "AI plan ready")
-                        if first_plan:
-                            queued = self.maybe_auto_queue(pid, current)
-                else:
-                    current["error"] = outcome.error
-                    if current.get("prev_status") in ("review", "done"):
-                        current["review_feedback"] = ""  # the send-back did not happen
-                    set_status(current, current.get("prev_status") or "unplanned",
-                               "AI planning failed" if not job.cancelled else "Planning cancelled")
+            for delay in (1, 3, None):
+                try:
+                    queued = self._record_plan(project, task, outcome, job, rewrite, first_plan)
+                    break
+                except Exception as exc:
+                    if delay is not None:
+                        log.warning("Saving planning result for %s#%s failed (%s); retrying in %ss",
+                                    pid, tid, exc, delay)
+                        time.sleep(delay)  # outside the store lock
+                        continue
+                    log.exception("Could not record planning result for %s#%s", pid, tid)
+                    self._save_lost_plan(project, task, outcome, job, exc)
             if queued:
                 self.kick(pid)
         except Exception:
             log.exception("Could not record planning result for %s#%s", pid, tid)
         finally:
             self.jobs.pop((pid, tid), None)
+
+    def _save_lost_plan(self, project, task, outcome, job, exc) -> None:
+        """The full result could not be saved: remember why, then make one small best-effort write."""
+        pid, tid = project["id"], task["id"]
+        message = f"{type(exc).__name__}: {exc}"
+        self._lost[(pid, tid)] = f"Planning finished but saving the result failed: {message}"
+        try:
+            with self.store.edit_task(project, tid) as current:
+                if current is None:
+                    return
+                current["error"] = self._lost[(pid, tid)]
+                current["output"] = clip_tail(outcome.text if outcome.ok and outcome.text else job.text())
+                set_status(current, task.get("prev_status") or "unplanned", "Planning result could not be saved")
+            self._lost.pop((pid, tid), None)  # recorded on the task itself
+        except Exception:
+            log.exception("Could not record the save failure for %s#%s", pid, tid)
+
+    def _record_plan(self, project, task, outcome, job, rewrite, first_plan) -> bool:
+        """Write the planning result to the task. Returns whether the task was auto-queued."""
+        pid, tid = project["id"], task["id"]
+        queued = False
+        with self.store.edit_task(project, tid) as current:
+            if current is None:
+                return False
+            current["output"] = clip_tail(job.text())
+            if outcome.ok:
+                title, plan = split_title(outcome.text) if rewrite else ("", outcome.text)
+                current["plan"] = plan.strip() or outcome.text
+                if title and title != current["title"]:
+                    old, current["title"] = current["title"], title
+                    log_event(current, f"Title rewritten by AI (was: {old})")
+                current["error"] = ""
+                n = len(plan_questions(current["plan"]))
+                if ready_status(current["plan"]) == "drafted":
+                    set_status(current, "drafted",
+                               f"AI plan drafted ({n} open question{'s' if n != 1 else ''})")
+                elif current.get("prev_status") == "drafted" and not self.auto(pid, "auto_promote"):
+                    set_status(current, "drafted",
+                               "AI plan ready (no open questions; move to Planned by hand)")
+                else:
+                    set_status(current, "planned", "AI plan ready")
+                    if first_plan:
+                        queued = self.maybe_auto_queue(pid, current)
+            else:
+                current["error"] = outcome.error
+                if current.get("prev_status") in ("review", "done"):
+                    current["review_feedback"] = ""  # the send-back did not happen
+                set_status(current, current.get("prev_status") or "unplanned",
+                           "AI planning failed" if not job.cancelled else "Planning cancelled")
+        return queued
 
     # ---- run queue -------------------------------------------------------
     def kick(self, pid: str) -> None:

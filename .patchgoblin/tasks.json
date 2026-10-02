@@ -1,6 +1,6 @@
 {
   "version": 7,
-  "next_id": 49,
+  "next_id": 50,
   "tasks": [
     {
       "id": 1,
@@ -2798,6 +2798,88 @@
         }
       ],
       "prev_status": "unplanned"
+    },
+    {
+      "id": 49,
+      "title": "Make PowerShell SSH hosts record plans reliably and surface real save errors",
+      "description": "",
+      "plan": "The user can't supply the console logs, so the plan below does not depend on them. Step 1 adds the diagnostics that will identify the cause on the next failure. The likely cause is unchanged. `Engine._plan` (`engine.py:325`) finishes the AI call, then its final `store.edit_task` fails on the `tasks.json` read or write over the Windows SSH host. The `except Exception` at `engine.py:374` only logs the error and `finally` pops the job. The task stays `planning` with no job, so `Engine.reconcile` (`engine.py:168-181`), which runs on every `list_tasks` poll (`app.py:690`), relabels it \"Planning was interrupted (PatchGoblin restarted).\" The fix has four parts. First, record the real exception in the task and keep the plan text. Second, retry the save. Third, make `reconcile` stop blaming a restart when the failure was a save error. Fourth, harden `WindowsSSHHost.read_text` and `write_text` for large files and PowerShell default shells. Because the logs are unavailable, persist the error to a place that survives a missed console, so the next occurrence is diagnosable from the UI.\n\n## Steps\n\n1. **Split result recording out of `_plan`** in `engine.py`.\n   - Add `self._lost: dict[tuple[str, int], str] = {}` to `Engine.__init__`.\n   - Move the final `store.edit_task` body into `_record_plan(project, task, outcome, job, rewrite, first_plan) -> bool` (returns whether the task was queued). Keep the logic unchanged.\n   - Wrap the call in a loop of 3 attempts with backoff of 1s then 3s. Retry on `Exception` and use `log.warning` per retry.\n   - Do the sleeps outside the store lock. Each attempt acquires the lock itself through `edit_task`.\n   - If all attempts fail, set `self._lost[(pid, tid)] = f\"{type(exc).__name__}: {exc}\"`. Also call `log.exception`.\n   - Then make one last best-effort `edit_task`, in its own try/except. It sets `status` to the previous status or `\"unplanned\"`, sets `error` to \"Planning finished but saving the result failed: <exc>\", and stores the plan text (`outcome.text`) in `output`, so the user can recover it. This write is much smaller than the full result.\n   - Pop the job in `finally` only after `_lost` is set and the last attempt has run.\n\n2. **Fix the misleading message** in `Engine.reconcile` (`engine.py:168-181`).\n   - If `(pid, task[\"id\"])` is in `self._lost`, use that text as the error and `pop` the entry.\n   - Use the \"restarted\" wording only when there is no `_lost` entry.\n\n3. **Harden `WindowsSSHHost`** in `hosts.py`.\n   - Raise the timeout in `read_text` and `write_text` (around lines 511 and 531) from 60 to 120 seconds, to match `read_bytes` and `write_bytes`.\n   - Add one automatic retry on `HostError` or a timed-out result. Writes are safe to repeat because they use a tmp file and `Move-Item`.\n   - Make the error message include which path and which operation failed, so it shows in the task's error field.\n\n4. **Make the `read_text` stdout round trip safe on PowerShell-default hosts.**\n   - The outer `powershell -c` re-decodes the raw stream with its OEM code page. Mirror `read_bytes`: base64 in the script and decode in Python.\n   - Apply this only when `detect_windows_shell` is not `\"cmd\"`, so `cmd` hosts keep the current path.\n\n5. **Tests** in `tests/test_patchgoblin.py`, near `test_windows_ssh_powershell_default_shell` (line 371) and the engine tests around line 876.\n   - **Persistent failure.** Make `store.edit_task` raise on the full-result write during `_plan`. Assert the task ends in its previous status with an error containing \"saving the result failed\" and the plan text in `output`. Assert `reconcile` does not say \"restarted\" and `jobs` is cleared.\n   - **Transient failure.** Raise once, then succeed. Assert the task reaches `planned` or `drafted`.\n   - **Real restart.** A `planning` task with no job and no `_lost` entry still gets \"restarted\".\n   - **Windows host.** With a fake `communicate`, assert that `read_text` uses base64 on a PowerShell shell and raw output on `cmd`, and that a timeout triggers one retry.\n   - Patch the backoff sleep in tests so they run fast.\n\n## Verification\n- Run `python -m unittest discover tests` (or `pytest tests`). The new tests and the existing Windows SSH, reconcile and engine tests must pass.\n- Manual, on a Windows SSH host whose DefaultShell is `powershell.exe`:\n  - Run a plan with `claude`. The task should reach `planned` or `drafted`.\n  - Make the host unreachable during the final write. The task should show the real save error and the plan text, not \"restarted\".\n- Repeat the manual run on a `cmd`-default host and on a Linux host to check for regressions.\n\n## Assumptions\n- The server did not restart. A real restart would have hit every task.\n- The failing step is the final `tasks.json` read or write over SSH. This is unconfirmed, and step 1 exists to expose the real exception.\n- Retrying the save is safe because `TaskStore.write` writes a tmp file and then moves it.\n- The user can't provide logs, so the plan stays independent of them and puts the diagnostic in the task's error field.\n- No settings or `tasks.json` format changes are needed. The fallback write reuses existing `error` and `output` fields.\n- The earlier line-wrap and `git status -z` theories are dropped. They don't apply to this error.\n\n## Risks\n- If the cause is something else, such as the server crashing after the AI call, this plan only makes the failure visible and recoverable. The new error text will show which it is.\n- Retries must not hold `store._locks` during backoff, or other edits and polling will stall.\n- Set `_lost` before the job is popped. Otherwise a poll between the two steps will still show \"restarted\".\n- Base64 in `read_text` raises transfer size and memory use by about a third on a large `tasks.json`, and applies only to non-`cmd` shells.\n- `_lost` is in memory only. A real restart right after a failed save falls back to the generic message.\n- PowerShell 5.1 and 7 differ in how they treat native stderr under `$ErrorActionPreference='Stop'`. Test both if possible.\n- The last-resort write can also fail if the host is fully unreachable. In that case the task stays `planning` and `reconcile` still reports the `_lost` text, which is why `_lost` is checked first.\n\n## Questions for you\nNone.",
+      "status": "review",
+      "provider": "",
+      "plan_model": "",
+      "code_model": "",
+      "plan_trust": "",
+      "paused": false,
+      "created_at": "2026-10-02T22:57:50+00:00",
+      "updated_at": "2026-10-02T23:10:11+00:00",
+      "queued_at": "2026-10-02T23:04:44+00:00",
+      "started_at": "2026-10-02T23:04:44+00:00",
+      "finished_at": "2026-10-02T23:10:11+00:00",
+      "output": "Planning results that fail to save are now retried, and if they still fail the task shows the real error and keeps the plan text. The full suite ran once and everything passed except my new `read_text` test, which had two bugs in the test itself. After fixing them, the 12 tests matching Windows SSH, save-failure and restart passed (with the `-k` filters I gave, those were the only tests that ran). I did not re-run the whole suite after the fix. I did not do the manual checks on a real PowerShell host, a `cmd` host or a Linux host.\n\n**`engine.py`**\n- The final `edit_task` body from `Engine._plan` is now `_record_plan(...)`, which returns whether the task was queued. The logic is unchanged.\n- `_plan` makes up to 3 attempts, sleeping 1s and then 3s between them, outside the store lock. Each retry logs a warning.\n- If all attempts fail, `_save_lost_plan` records `Planning finished but saving the result failed: <Type>: <exc>` in `self._lost`. It then makes one small write that restores the previous status (or `unplanned`), sets `error`, and puts the plan text in `output`. The job is popped in `finally`, after `_lost` is set.\n- `reconcile` uses the `_lost` text when there is one. It only says \"restarted\" when there is no `_lost` entry.\n- If the small write succeeds, I drop the `_lost` entry straight away, since the error is already on the task.\n\n**`hosts.py` (`WindowsSSHHost`)**\n- `read_text` and `write_text` now time out at 120s and go through `_exec_retry`, which retries once on `HostError` or a timeout.\n- Errors say which operation and path failed, and a timeout is reported as \"timed out\" instead of \"ssh failed\".\n- `read_text` on non-`cmd` shells now reads the file as base64 and decodes it in Python. `cmd` hosts keep the raw-bytes path.\n\n**Tests**\n- Persistent save failure: the task ends in its previous status with \"saving the result failed\" in `error` and the plan text in `output`. `reconcile` does not say \"restarted\", and `jobs` is cleared.\n- `reconcile` uses the `_lost` text and does not say \"restarted\" when the fallback write also failed.\n- One transient save failure: the task still reaches `planned` or `drafted`.\n- A `planning` task with no job and no `_lost` entry still gets \"restarted\".\n- Windows host: base64 on PowerShell, raw output on `cmd`, one retry after a timeout, and the error text names the operation and path.\n- Backoff sleeps are patched in the engine tests, so they run fast.\n- I changed the `_decode_ps` test helper to strip the `; exit $LASTEXITCODE` suffix that PowerShell hosts add.\n- I added `import base64` to the test file.\n\nThe suite takes about 3 minutes (the one full run was 195s).",
+      "error": "",
+      "commit": "",
+      "changes": [],
+      "summary": "",
+      "checkin_pending": false,
+      "checkin": "",
+      "review_feedback": "",
+      "approval_note": "",
+      "approval_commit": "",
+      "history": [
+        {
+          "at": "2026-10-02T22:57:50+00:00",
+          "event": "Created"
+        },
+        {
+          "at": "2026-10-02T22:57:50+00:00",
+          "event": "Auto-planned: AI planning started"
+        },
+        {
+          "at": "2026-10-02T22:59:07+00:00",
+          "event": "Title rewritten by AI (was: there seems to be a problem with windows PowerShell ssh connections when trying to to use the planner. it gets to the end of planning, then fails)"
+        },
+        {
+          "at": "2026-10-02T22:59:07+00:00",
+          "event": "AI plan drafted (1 open question)"
+        },
+        {
+          "at": "2026-10-02T23:01:53+00:00",
+          "event": "AI planning started with answers"
+        },
+        {
+          "at": "2026-10-02T23:03:27+00:00",
+          "event": "Title rewritten by AI (was: Fix planner failing at the end over Windows PowerShell SSH hosts)"
+        },
+        {
+          "at": "2026-10-02T23:03:27+00:00",
+          "event": "AI plan drafted (1 open question)"
+        },
+        {
+          "at": "2026-10-02T23:04:15+00:00",
+          "event": "AI planning started with answers"
+        },
+        {
+          "at": "2026-10-02T23:04:35+00:00",
+          "event": "Title rewritten by AI (was: Fix planning stuck as \"interrupted\" when saving the plan fails on PowerShell SSH hosts)"
+        },
+        {
+          "at": "2026-10-02T23:04:35+00:00",
+          "event": "AI plan ready"
+        },
+        {
+          "at": "2026-10-02T23:04:44+00:00",
+          "event": "Queued for AI"
+        },
+        {
+          "at": "2026-10-02T23:04:44+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-10-02T23:10:11+00:00",
+          "event": "AI run finished; awaiting review"
+        }
+      ],
+      "prev_status": "drafted"
     }
   ]
 }

@@ -452,6 +452,24 @@ class WindowsSSHHost(SSHHost):
             res.stdout = rest
         return res
 
+    def _exec_retry(self, script: str, verb: str, path: str, **kw) -> Result:
+        """``_exec`` once more after a HostError or a timeout (file reads/writes are repeatable)."""
+        try:
+            res = self._exec(script, **kw)
+            if not res.timed_out:
+                return res
+        except HostError:
+            pass
+        try:
+            return self._exec(script, **kw)
+        except HostError as exc:
+            raise HostError(f"Could not {verb} {path} on {self.label}: {exc}") from exc
+
+    def _fail(self, res: Result, verb: str, path: str) -> HostError:
+        if res.timed_out:
+            return HostError(f"Could not {verb} {path} on {self.label}: timed out")
+        return super()._fail(res, verb, path)
+
     def join(self, *parts: str) -> str:
         return ntpath.join(*parts)
 
@@ -510,14 +528,22 @@ class WindowsSSHHost(SSHHost):
 
     def read_text(self, path: str) -> Optional[str]:
         q = _ps_quote(path)
-        script = (f"if (-not (Test-Path -LiteralPath {q} -PathType Leaf)) {{exit 44}}; "
-                  f"$b=[IO.File]::ReadAllBytes({q}); $o=[Console]::OpenStandardOutput(); "
-                  "$o.Write($b,0,$b.Length); $o.Flush()")
-        res = self._exec(script, timeout=60)
+        # A PowerShell default shell re-decodes the raw stream with its own code page, so
+        # there the contents travel as base64 (as in read_bytes); cmd keeps the raw bytes.
+        b64 = detect_windows_shell(self.target, self.port) != "cmd"
+        head = f"if (-not (Test-Path -LiteralPath {q} -PathType Leaf)) {{exit 44}}; "
+        if b64:
+            script = head + f"[Console]::Out.Write([Convert]::ToBase64String([IO.File]::ReadAllBytes({q})))"
+        else:
+            script = (head + f"$b=[IO.File]::ReadAllBytes({q}); $o=[Console]::OpenStandardOutput(); "
+                      "$o.Write($b,0,$b.Length); $o.Flush()")
+        res = self._exec_retry(script, "read", path, timeout=120)
         if res.returncode == 44:
             return None
         if not res.ok:
             raise self._fail(res, "read", path)
+        if b64:
+            return base64.b64decode(res.stdout.strip()).decode("utf-8")
         return res.stdout
 
     def list_dir(self, path: str) -> list[str]:
@@ -535,7 +561,7 @@ class WindowsSSHHost(SSHHost):
                   "$m=New-Object IO.MemoryStream; [Console]::OpenStandardInput().CopyTo($m); "
                   f"[IO.File]::WriteAllBytes({tmp}, $m.ToArray()); "
                   f"Move-Item -Force -LiteralPath {tmp} -Destination {q}")
-        res = self._exec(script, input=text, timeout=60)
+        res = self._exec_retry(script, "write", path, input=text, timeout=120)
         if not res.ok:
             raise self._fail(res, "write", path)
 
