@@ -265,7 +265,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             env = ep["api_key_env"].strip()
             endpoints.append({**ep, "api_key": "", "api_key_saved": bool(ep["api_key"].strip()),
                               "api_key_env_present": bool(env and os.environ.get(env))})
-        return {**values, "endpoints": endpoints, "providers": provider_choices(values),
+        automation = {k: v for k, v in (values.get("automation") or {}).items() if k in AUTO_MODES}
+        return {**values, "automation": automation, "endpoints": endpoints, "providers": provider_choices(values),
                 "models": model_suggestions(values)}
 
     @app.get("/api/settings")
@@ -786,6 +787,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
                 task[key] = data[key].strip() if key == "title" else data[key]
             if changed:
                 log_event(task, "Edited " + ", ".join(changed))
+            if "plan" in changed:
+                engine.maybe_auto_promote(pid, task)  # logs its own status change
             provider = task.get("provider") or project.get("provider") or "claude"
             edited = [task[k] for k in MODEL_KEYS if k in changed]
         remember(provider, edited)

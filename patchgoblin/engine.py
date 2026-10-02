@@ -275,6 +275,15 @@ class Engine:
         set_status(task, "queued", "Auto-queued")
         return True
 
+    def maybe_auto_promote(self, pid: str, task: dict) -> bool:
+        """Move a drafted task with no open questions to Planned if Auto-promote is on.
+        Call inside ``store.edit``."""
+        if (task["status"] != "drafted" or task.get("paused") or plan_questions(task.get("plan") or "")
+                or not self.auto(pid, "auto_promote")):
+            return False
+        set_status(task, "planned", "Auto-promoted: plan has no open questions")
+        return True
+
     def apply_auto_now(self, project: dict, keys) -> None:
         """A mode was just turned on: apply it to the project's existing tasks, in the background."""
         keys = set(keys)
@@ -290,8 +299,10 @@ class Engine:
                     queued = [t for t in doc["tasks"] if self.maybe_auto_queue(pid, t)]
                 if queued:
                     self.kick(pid)
-            if "auto_run" in keys:
-                self.kick(pid)
+            if "auto_promote" in keys:
+                with self.store.edit(project) as doc:
+                    for t in doc["tasks"]:
+                        self.maybe_auto_promote(pid, t)
             if "auto_plan" in keys:
                 # Only unpaused "unplanned" tasks are picked; paused ones are left alone on purpose.
                 ids = [t["id"] for t in self.store.read(project, fresh=True)["tasks"]
@@ -360,6 +371,9 @@ class Engine:
                     if ready_status(current["plan"]) == "drafted":
                         set_status(current, "drafted",
                                    f"AI plan drafted ({n} open question{'s' if n != 1 else ''})")
+                    elif current.get("prev_status") == "drafted" and not self.auto(pid, "auto_promote"):
+                        set_status(current, "drafted",
+                                   "AI plan ready (no open questions; move to Planned by hand)")
                     else:
                         set_status(current, "planned", "AI plan ready")
                         if first_plan:
@@ -409,8 +423,6 @@ class Engine:
 
     def _claim(self, project: dict):
         pid, key, job = project["id"], None, Job("run")
-        if not self.auto(pid, "auto_run"):
-            return None  # Auto-run is off: queued tasks wait until it is turned back on
         try:
             with self.store.edit(project) as doc:
                 queued = sorted((t for t in doc["tasks"] if t["status"] == "queued" and not t.get("paused")),

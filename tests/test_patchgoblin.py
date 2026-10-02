@@ -651,6 +651,7 @@ class WorkflowTests(AppTestCase):
 
     def test_edit_then_mark(self):
         pid = self.add_project()["id"]
+        self.client.patch(f"/api/projects/{pid}", headers=H, json={"auto_promote": False})
         tid = self.post_task(pid, "t")["id"]
         self.patch_plan(pid, tid, ASKING_PLAN)
         self.action(pid, tid, "mark_planned")
@@ -940,9 +941,9 @@ class AutomationTests(AppTestCase):
     def test_settings_round_trip_and_resolution(self):
         from patchgoblin.store import resolve_auto
         self.assertEqual(self.client.get("/api/settings").get_json()["automation"],
-                         {"auto_plan": False, "auto_queue": False, "auto_run": True})
+                         {"auto_plan": False, "auto_queue": False, "auto_promote": True})
         self.assertEqual(self.set_global(auto_queue=True),
-                         {"auto_plan": False, "auto_queue": True, "auto_run": True})
+                         {"auto_plan": False, "auto_queue": True, "auto_promote": True})
         bad = self.client.put("/api/settings", headers=H, json={"automation": {"auto_plan": "yes"}})
         self.assertEqual(bad.status_code, 400)
 
@@ -957,24 +958,78 @@ class AutomationTests(AppTestCase):
         self.assertFalse(resolve_auto({"auto_queue": False}, settings, "auto_queue"))
         self.assertFalse(resolve_auto({}, settings, "auto_plan"))
 
-    def test_auto_run_off_holds_queue_until_turned_on(self):
+    def test_stale_auto_run_override_does_not_hold_queue(self):
         pid = self.add_project()["id"]
-        for value in (True, False, None):
-            self.assertIs(self.set_project(pid, auto_run=value)["auto_run"], value)
-        self.assertEqual(self.client.patch(f"/api/projects/{pid}", headers=H,
-                                           json={"auto_run": "on"}).status_code, 400)
-
-        self.set_project(pid, auto_run=False)
+        project = self.app.config["REGISTRY"].get(pid)
+        project["auto_run"] = False  # leftover from before Auto-run was removed
         tid = self.post_task(pid, "Create output file", "Make agent_output.txt")["id"]
         self.action(pid, tid, "plan")
         self.wait_for(pid, tid, {"planned"})
         self.assertEqual(self.action(pid, tid, "queue").status_code, 200)
-        time.sleep(0.5)
-        self.assertEqual(self.wait_for(pid, tid, {"queued"})["status"], "queued")
-        self.assertFalse(self.app.config["ENGINE"].jobs)
-
-        self.set_project(pid, auto_run=True)  # turning it on starts the waiting queue
         self.assertEqual(self.wait_for(pid, tid, {"review", "failed"})["status"], "review")
+        self.assertNotIn("auto_run", self.client.get("/api/settings").get_json()["automation"])
+
+    def drafted_task(self, pid, title="ASK me things"):
+        tid = self.post_task(pid, title)["id"]
+        self.action(pid, tid, "plan")
+        task = self.wait_for(pid, tid, {"drafted"})
+        return tid, task
+
+    def answer_all(self, pid, tid, task):
+        self.action(pid, tid, "plan", answers=[{"question": q["text"], "answer": "Yes"} for q in task["questions"]])
+
+    def patch_plan_text(self, pid, tid, plan):
+        res = self.client.patch(f"/api/projects/{pid}/tasks/{tid}", headers=H, json={"plan": plan})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        return res.get_json()
+
+    def test_auto_promote_off_keeps_drafted(self):
+        self.hold_runner()
+        pid = self.add_project()["id"]
+        self.set_project(pid, auto_promote=False)
+        tid, task = self.drafted_task(pid)
+        self.answer_all(pid, tid, task)
+        task = self.wait_for(pid, tid, {"drafted", "planned"})
+        time.sleep(0.3)
+        task = self.wait_for(pid, tid, {"drafted"})
+        self.assertEqual(task["status"], "drafted")
+        self.assertIn("move to Planned by hand", " ".join(self.events(task)))
+        self.assertEqual(self.action(pid, tid, "mark_planned").get_json()["status"], "planned")
+
+        tid2, _ = self.drafted_task(pid)
+        self.assertEqual(self.patch_plan_text(pid, tid2, "done asking")["status"], "drafted")
+
+    def test_auto_promote_on_moves_to_planned(self):
+        self.hold_runner()
+        pid = self.add_project()["id"]
+        self.set_project(pid, auto_promote=True)
+        tid, task = self.drafted_task(pid)
+        self.answer_all(pid, tid, task)
+        self.assertEqual(self.wait_for(pid, tid, {"planned"})["status"], "planned")
+
+        tid2, _ = self.drafted_task(pid)
+        task = self.patch_plan_text(pid, tid2, "done asking")
+        self.assertEqual(task["status"], "planned")
+        self.assertIn("Auto-promoted: plan has no open questions", self.events(task))
+        # A plan that still asks stays drafted.
+        tid3, _ = self.drafted_task(pid)
+        self.assertEqual(self.patch_plan_text(pid, tid3, ASKING_PLAN + "\n")["status"], "drafted")
+
+    def test_turning_on_auto_promote_promotes_existing_drafted(self):
+        self.hold_runner()
+        pid = self.add_project()["id"]
+        self.set_project(pid, auto_promote=False)
+        ready, _ = self.drafted_task(pid)
+        paused, _ = self.drafted_task(pid)
+        asking, _ = self.drafted_task(pid)
+        self.patch_plan_text(pid, ready, "done asking")
+        self.patch_plan_text(pid, paused, "done asking")
+        self.action(pid, paused, "pause")
+        self.set_project(pid, auto_promote=True)
+        self.wait_for(pid, ready, {"planned"})
+        time.sleep(0.3)
+        self.assertEqual(self.wait_for(pid, paused, {"drafted"})["status"], "drafted")
+        self.assertEqual(self.wait_for(pid, asking, {"drafted"})["status"], "drafted")
 
     def test_auto_plan_on_create(self):
         pid = self.add_project()["id"]
@@ -1039,6 +1094,7 @@ class AutomationTests(AppTestCase):
         self.client.patch(f"/api/projects/{pid}/tasks/{manual}", headers=H, json={"plan": "do it"})
         self.assertEqual(self.action(pid, manual, "mark_planned").get_json()["status"], "queued")
 
+        self.set_project(pid, auto_promote=False)
         drafted = self.post_task(pid, "Drafted by hand")["id"]
         self.client.patch(f"/api/projects/{pid}/tasks/{drafted}", headers=H, json={"plan": ASKING_PLAN})
         self.assertEqual(self.action(pid, drafted, "mark_planned").get_json()["status"], "drafted")
@@ -1106,13 +1162,17 @@ class AutomationTests(AppTestCase):
 
     def test_paused_queued_task_is_not_claimed_until_resumed(self):
         pid = self.add_project()["id"]
-        self.set_project(pid, auto_run=False)
         tid = self.post_task(pid, "Create output file", "Make agent_output.txt")["id"]
         self.action(pid, tid, "plan")
         self.wait_for(pid, tid, {"planned"})
-        self.action(pid, tid, "queue")
-        self.action(pid, tid, "pause")
-        self.set_project(pid, auto_run=True)
+        patcher = mock.patch.object(self.app.config["ENGINE"], "kick")
+        patcher.start()  # hold the runner while queueing and pausing
+        try:
+            self.action(pid, tid, "queue")
+            self.action(pid, tid, "pause")
+        finally:
+            patcher.stop()
+        self.app.config["ENGINE"].kick(pid)
         time.sleep(0.5)
         task = self.wait_for(pid, tid, {"queued"})
         self.assertTrue(task["paused"])

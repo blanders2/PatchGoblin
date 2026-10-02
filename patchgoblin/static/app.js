@@ -449,7 +449,7 @@ function updateCheckinCount() {
   $("#checkin-btn").textContent = n ? `Check in (${n})` : "Check in";
 }
 
-const AUTO_MODES = ["auto_plan", "auto_queue", "auto_run"];
+const AUTO_MODES = ["auto_plan", "auto_queue", "auto_promote"];
 
 // Shows what "Default" means for each automation select, from the global settings.
 function renderAutoDefaults() {
@@ -750,10 +750,10 @@ function effectiveAuto(p, key) {
 const AUTO_FLOW_HINT = {
   auto_plan: "plans every Unplanned task now",
   auto_queue: "queues every Planned task now",
-  auto_run: "starts the waiting AI queue now",
+  auto_promote: "moves every question-free Drafted task to Planned now",
 };
 
-// Colours (or strikes through) each Auto-plan / Auto-queue / Auto-run indicator between the tabs for the current project.
+// Colours (or strikes through) each Auto-plan / Auto-promote / Auto-queue indicator between the tabs for the current project.
 function renderAutoFlow() {
   const p = currentProject();
   for (const btn of $$(".auto-flow")) {
@@ -1318,8 +1318,9 @@ function renderDrawer(fillForm) {
       A.push(actionButton("Queue anyway", act("queue"), "ghost", queueTip));
       A.push(actionButton("Back to unplanned", act("unplan"), "ghost"));
       A.push(pauseButton());
-      A.push(el("span", { class: "muted small" },
-        "Answer the questions, or delete them from the plan, save, and click Mark planned."));
+      A.push(el("span", { class: "muted small" }, effectiveAuto(currentProject(), "auto_promote")
+        ? "Answer the questions, or delete them from the plan and save; it moves to Planned automatically once no questions remain."
+        : "Answer the questions, or delete them from the plan, save, and click Mark planned."));
       break;
     case "planned":
       A.push(actionButton("Queue to run", act("queue"), asking ? "" : "primary", queueTip));
@@ -1810,7 +1811,7 @@ const SETTING_FIELDS = [
   "opencode.plan_model", "opencode.code_model", "opencode.require_agents", "opencode.plan_must_not_edit",
   "cline.plan", "cline.run", "cline.plan_model", "cline.code_model", "cline.plan_must_not_edit",
   "timeouts.plan", "timeouts.run", "automation.auto_plan", "automation.auto_queue",
-  "automation.auto_run", "git.gitignore",
+  "automation.auto_promote", "git.gitignore",
 ];
 
 /* ---------------- OpenAI-compatible endpoints ---------------- */

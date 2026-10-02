@@ -129,19 +129,21 @@ Set it in Project settings; a task can override it in its drawer (**Project defa
 uses the project's level).
 
 **Automation.** Three modes move tasks along without clicks. Auto-plan and Auto-queue are
-off by default; Auto-run is on by default.
+off by default; Auto-promote is on by default. Queued tasks always run.
 - **Auto-plan** starts AI planning as soon as a task is created.
 - **Auto-queue** queues a task the first time it goes from Unplanned to Planned, through an
   AI plan or **Mark planned**. A drafted plan waits for your answers, and a re-plan after
   answering questions, Mark planned from Drafted, or a task you took out of the queue is
   not auto-queued.
-- **Auto-run** lets the AI start queued tasks. Turn it off and queued tasks wait in the AI
-  queue (a run already in progress finishes); turning it back on starts the waiting queue.
+- **Auto-promote** moves a Drafted task to Planned as soon as its plan has no open
+  questions, after an AI re-plan with your answers or a hand edit that removes the last
+  question. Turn it off and such tasks wait in Drafted until you click **Mark planned**.
+  Turning it on promotes every question-free Drafted task now.
 
 The board shows a small arrow between the tabs for each mode: after Unplanned (Auto-plan),
-after Planned (Auto-queue) and after AI queue (Auto-run). A coloured arrow means the mode is on
+after Drafted (Auto-promote) and after Planned (Auto-queue). A coloured arrow means the mode is on
 for the current project; a red line through it means it is off. Click it to turn the mode on or off for that project; this sets
-a project override, and turning on Auto-plan or Auto-queue applies it to existing tasks
+a project override, and turning on Auto-plan, Auto-promote or Auto-queue applies it to existing tasks
 right away, like a Settings save.
 
 Set the defaults in **Settings → Automation**. Each project can override them in Project
