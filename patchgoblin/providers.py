@@ -341,8 +341,9 @@ def run_opencode(cfg: dict, mode: str, prompt: str, *, host, cwd: str, model: st
     if not agent:
         return Outcome(False, error=f"No opencode {role} agent is set. Set it in Settings → opencode.")
     if cfg.get("require_agents", True) and agent not in opencode.BUILTIN_AGENTS:
-        configs, _ = opencode.read_configs(host, cwd)
-        if agent not in opencode.agent_names(host, cwd, configs):
+        dirs = opencode.config_dirs(host)
+        configs, _ = opencode.read_configs(host, cwd, dirs)
+        if agent not in opencode.agent_names(host, cwd, configs, dirs):
             return Outcome(False, error=f'opencode agent "{agent}" is not defined for this project. Add it to '
                                         f'opencode.json or .opencode/agent/{agent}.md, or change it in '
                                         "Settings → opencode.")
@@ -501,7 +502,7 @@ def describe_tool(name: str, args, cwd: str = "") -> tuple[str, str]:
     if name in verbs:
         return f"{verbs[name]} {_rel_path(arg('file_path', 'notebook_path', 'path'), cwd) or '(file)'}", ""
     if name in ("Bash", "run_command"):
-        return f"Running `{_clip(arg('command'), 200)}`", arg("description")
+        return f"Running `{clip_head(arg('command'), 200)}`", arg("description")
     if name in ("Grep", "Glob", "search"):
         return f"Searching `{arg('pattern')}`", ""
     if name == "list_files":
@@ -513,7 +514,7 @@ def describe_tool(name: str, args, cwd: str = "") -> tuple[str, str]:
         return "Updating plan", "\n".join(lines)
     if name == "Task":
         return "Starting sub-agent", arg("description")
-    return f"{name} {_clip(json.dumps(args), 200)}".strip(), ""
+    return f"{name} {clip_head(json.dumps(args), 200)}".strip(), ""
 
 
 class _StreamJson:
@@ -576,7 +577,7 @@ class _StreamJson:
                     body = block.get("content")
                     if isinstance(body, list):
                         body = " ".join(b.get("text", "") for b in body if isinstance(b, dict))
-                    job.event("error", _clip(str(body or "Tool error"), 500).strip())
+                    job.event("error", clip_head(str(body or "Tool error"), 500).strip())
         elif kind == "result":
             self.result_text = data["result"] if isinstance(data.get("result"), str) else ""
             self.is_error = bool(data.get("is_error"))
@@ -639,7 +640,7 @@ class ProjectFiles:
         return full
 
 
-def _clip(text: str, limit: int = 20000) -> str:
+def clip_head(text: str, limit: int = 20000) -> str:
     return text if len(text) <= limit else text[:limit] + f"\n… [truncated {len(text) - limit} chars]"
 
 
@@ -775,10 +776,10 @@ class OpenAIAgent:
             prefix = (args.get("prefix") or "").strip("/")
             names = [n for n in gitops.list_files(self.host, self.root, self.tracked)
                      if not prefix or n.startswith(prefix)]
-            return _clip("\n".join(names[:3000]) or "(no files)")
+            return clip_head("\n".join(names[:3000]) or "(no files)")
         if name == "read_file":
             text = self.host.read_text(self.files.resolve(args["path"]))
-            return "(file not found)" if text is None else _clip(text, 100000)
+            return "(file not found)" if text is None else clip_head(text, 100000)
         if name == "search":
             if self.tracked:
                 res = git(self.host, self.root, "grep", "--untracked", "-n", "-I", "-E", "-e", args["pattern"])
@@ -786,7 +787,7 @@ class OpenAIAgent:
                 # --no-index stops git from resolving an enclosing repository.
                 res = git(self.host, self.root, "grep", "--no-index", "--exclude-standard",
                          "-n", "-I", "-E", "-e", args["pattern"])
-            return _clip(res.stdout) if res.stdout else "(no matches)"
+            return clip_head(res.stdout) if res.stdout else "(no matches)"
         if name == "write_file" and self.mode == "run":
             self.host.write_text(self.files.resolve(args["path"], for_write=True), args["content"])
             return "ok"
@@ -796,7 +797,7 @@ class OpenAIAgent:
             if self.job.cancelled:
                 raise Cancelled()
             status = "timed out" if res.timed_out else f"exit code {res.returncode}"
-            return _clip(f"[{status}]\n{res.stdout}\n{res.stderr}")
+            return clip_head(f"[{status}]\n{res.stdout}\n{res.stderr}")
         return f"Tool {name} is not available."
 
     def _request(self, messages: list[dict]) -> dict:
@@ -887,7 +888,7 @@ class OpenAIAgent:
                     raise
                 except Exception as exc:  # report tool errors back to the model
                     result = f"Error: {exc}"
-                    self.job.event("error", _clip(f"{fn['name']}: {exc}", 300))
+                    self.job.event("error", clip_head(f"{fn['name']}: {exc}", 300))
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
         return Outcome(False, error="Stopped: reached the maximum number of agent steps.")
 

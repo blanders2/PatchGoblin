@@ -44,13 +44,6 @@ IMAGE_TYPES = {"png": b"\x89PNG", "jpg": b"\xff\xd8\xff", "gif": b"GIF8", "webp"
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 ATTACHMENT_NAME = re.compile(r"^[0-9a-f]{32}\.(png|jpg|gif|webp)$")
 
-LEGACY_CLAUDE_COMMANDS = {
-    "plan": "claude -p --output-format text --allowedTools Read,Glob,Grep "
-            "--disallowedTools Edit,Write,NotebookEdit,Bash",
-    "run": "claude -p --output-format text --permission-mode acceptEdits "
-           "--allowedTools Read,Glob,Grep,Edit,Write,Bash",
-}
-
 DEFAULT_SETTINGS = {
     "git": {"gitignore": DEFAULT_GITIGNORE},  # the .gitignore written into repositories PatchGoblin creates
     "commands": {
@@ -110,7 +103,6 @@ DEFAULT_SETTINGS = {
 # Automation modes: a global default in Settings, overridden per project by True/False
 # (None or missing inherits). Each maps to the status of the tasks it acts on when turned on.
 AUTO_MODES = ("auto_plan", "auto_queue", "auto_promote")
-AUTO_TARGETS = {"auto_plan": "unplanned", "auto_queue": "planned", "auto_promote": "drafted"}
 # Statuses where a task's "paused" flag can be set; Auto-plan, Auto-queue, Auto-promote and the run
 # queue skip flagged tasks, which otherwise keep their status.
 PAUSABLE = ("unplanned", "drafted", "planned", "queued", "failed")
@@ -147,10 +139,6 @@ def _endpoint(ep: dict) -> dict:
         out["headers"] = {}
     out["headers"] = {k: v for k, v in out["headers"].items() if isinstance(k, str) and isinstance(v, str)}
     return out
-
-
-def endpoint_ids(settings: dict) -> list[str]:
-    return [ep["id"] for ep in settings.get("endpoints", [])]
 
 
 def find_endpoint(settings: dict, pid: str) -> dict | None:
@@ -232,31 +220,6 @@ class Registry:
 
     def __init__(self, data_dir: str):
         self.file = JsonFile(os.path.join(data_dir, "projects.json"), {"projects": []})
-        with self.file.lock:
-            self._migrate()
-
-    def _migrate(self) -> None:
-        """Split the old single project ``model`` into planning and coding models, and default
-        ``git_tracking`` to True for projects registered before it existed (they already have
-        a repository and task commits, so their behaviour doesn't change). Both run once."""
-        data = self.file.load()
-        changed = False
-        for p in data.get("projects", []):
-            if isinstance(p, dict) and "model" in p and "plan_model" not in p:
-                model = p.pop("model") or ""
-                p["plan_model"] = p["code_model"] = model
-                p.setdefault("chat_model", "")
-                changed = True
-            if isinstance(p, dict) and "git_tracking" not in p:
-                p["git_tracking"] = True
-                changed = True
-        if not changed:
-            return
-        backup = self.file.path + ".bak"
-        if not os.path.exists(backup):
-            with open(self.file.path, "rb") as src, open(backup, "wb") as dst:
-                dst.write(src.read())
-        self.file.save(data)
 
     def list(self) -> list[dict]:
         return self.file.load()["projects"]
@@ -359,14 +322,6 @@ class Settings:
         """
         data = self.file.load()
         changed = False
-        # Saved copies of the old text-mode Claude defaults move to the stream-json defaults
-        # (which feed the live activity view); custom commands are left alone.
-        claude = (data.get("commands") or {}).get("claude")
-        if isinstance(claude, dict):
-            for key, old in LEGACY_CLAUDE_COMMANDS.items():
-                if claude.get(key) == old:
-                    del claude[key]
-                    changed = True
         endpoints = data.get("endpoints")
         renames: dict = {}
         if isinstance(endpoints, list):
@@ -381,11 +336,6 @@ class Settings:
 
     def get(self) -> dict:
         saved = self.file.load()
-        legacy = saved.get("openai")
-        if "endpoints" not in saved and isinstance(legacy, dict):
-            # Before named endpoints there was a single "openai" block; keep its id.
-            saved = {**saved, "endpoints": [{**DEFAULT_SETTINGS["endpoints"][0], **legacy, "id": "openai"}]}
-        saved.pop("openai", None)
         out = _merge(DEFAULT_SETTINGS, saved)
         endpoints = out["endpoints"] if isinstance(out["endpoints"], list) else []
         out["endpoints"] = [_endpoint(ep) for ep in endpoints if isinstance(ep, dict) and ep.get("id")]
@@ -427,7 +377,6 @@ class Settings:
         """Replace the whole endpoint list (``_merge`` would replace lists anyway)."""
         with self.file.lock:
             data = self.file.load()
-            data.pop("openai", None)
             data["endpoints"] = endpoints
             self.file.save(data)
         return self.get()

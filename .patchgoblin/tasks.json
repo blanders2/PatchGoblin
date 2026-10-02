@@ -2419,19 +2419,19 @@
       "title": "Cleanup T2: remove dead code and stale migrations",
       "description": "Backend bloat removal:\n- Dead code to delete: store.endpoint_ids (~store.py:146; only a test *name* mentions it), AUTO_TARGETS (~store.py:107), engine.EVENT_KINDS (~engine.py:26), the never-passed `checkpoint=` parameter of Engine.sync (~engine.py:569), and the never-passed `ssh_bin=` parameter of SSHHost (~hosts.py:252).\n- opencode.py's `dirs=` parameter (~71, 84, 136) is never passed, so run_opencode (~providers.py:344-345) calls host.home() twice (two SSH round trips). Thread the computed dirs through so home() is called once.\n- Remove these migrations and their tests (the local data/ has nothing left for them to migrate):\n  - LEGACY_CLAUDE_COMMANDS (store.py ~45-50, used ~350-355; test class ClaudeMigrationTests)\n  - the legacy single \"openai\" settings block in Settings.get (~store.py:370-374, ~391; test ~1991)\n  - the `model` -> `plan_model` migration in Registry._migrate (~231-235), in update_project (`\"model\" in data`, ~app.py:507) and in engine.py (~150); tests ~2097, ~2126-2151\n  - the git_tracking default in Registry._migrate (~236-238)\n  - the doc version < 2 \"drafted\" pass in Engine.reconcile (~engine.py:180-190) and test_old_planned_tasks_with_questions_become_drafted\n- KEEP migrate_paused (this repo's tasks.json may still be an older version) and all provider_renames / rename_reserved_endpoints / RESERVED_SINCE handling.\n- There are two _clip functions with opposite behaviour: engine.py ~99 keeps the tail, providers.py ~642 keeps the head. Rename them to say so (e.g. clip_tail / clip_head).\n\nRules: this is part of a cleanup series (T1-T6). Behaviour must not change except for the listed bug fixes. Line numbers below are approximate (from a review at commit 1d1de27); find the real code before editing. Run `python -m unittest discover tests` before finishing; it must stay green. Don't touch unrelated code.",
       "plan": "",
-      "status": "queued",
+      "status": "review",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-01T21:39:22+00:00",
-      "updated_at": "2026-10-02T01:09:49+00:00",
+      "updated_at": "2026-10-02T01:19:11+00:00",
       "queued_at": "2026-10-02T01:09:49+00:00",
-      "started_at": null,
-      "finished_at": null,
-      "output": "[2026-10-02T01:09:31+00:00] plan with claude in g:\\My Drive\\Projects\\PatchGoblin\n$ claude -p --output-format stream-json --verbose --allowedTools Read,Glob,Grep --disallowedTools Edit,Write,NotebookEdit,Bash\n",
-      "error": "Planning cancelled.",
+      "started_at": "2026-10-02T01:13:54+00:00",
+      "finished_at": "2026-10-02T01:19:11+00:00",
+      "output": "The dead code, stale migrations and the `_clip` rename are done. `python -m unittest discover tests` passes: 221 tests, 9 skipped.\n\n**What I removed**\n- **Dead code:**\n  - `endpoint_ids` and `AUTO_TARGETS` in `store.py`.\n  - `EVENT_KINDS` in `engine.py`.\n  - The `checkpoint=` parameter of `Engine.sync`. `gitops.sync` still has its own `checkpoint` parameter, which I left alone because you didn't list it.\n  - The `ssh_bin=` parameter and attribute of `SSHHost`. The three call sites now use a literal `\"ssh\"`.\n- **Migrations:**\n  - `LEGACY_CLAUDE_COMMANDS` and its pass in `Settings._migrate`.\n  - The legacy single `\"openai\"` block in `Settings.get`. I also dropped the two `pop(\"openai\")` calls (in `get` and in `save_endpoints`), which only served that block.\n  - The whole of `Registry._migrate`, which covered both the `model` \u2192 `plan_model` split and the `git_tracking` default. Its call in `__init__` is gone too.\n  - The `\"model\"` fallbacks in `update_project` (`app.py`) and in `Engine.provider_for`.\n  - The version < 2 \"drafted\" pass in `Engine.reconcile`, with its docstring updated.\n- **Tests removed:**\n  - `ClaudeMigrationTests`.\n  - `test_legacy_openai_block_migrates`.\n  - `test_registry_migration`.\n  - `test_old_planned_tasks_with_questions_become_drafted`.\n  - The legacy `model` assertions in `test_provider_for_roles` and `test_project_routes`.\n  - I kept `test_projects_and_tasks_accept_endpoint_ids`. It's a real test, and only its name mentions `endpoint_ids`.\n  - Deleting `test_legacy_openai_block_migrates` also dropped its unrelated check that `run_ai` reports \"not configured\" for an unknown endpoint id. Say so if you want that back as its own test.\n\n**What I changed**\n- **`opencode` call:** `run_opencode` now calls `opencode.config_dirs(host)` once and passes the result to both `read_configs` and `agent_names`, so `host.home()` is called once instead of twice. The `dirs=` parameters stay optional because `app.py` still calls `read_configs` without them.\n- **`_clip` rename:** `engine._clip` is now `clip_tail` and `providers._clip` is now `clip_head`.\n\nI kept `migrate_paused`, `provider_renames`, `rename_reserved_endpoints` and `RESERVED_SINCE` as asked.",
+      "error": "",
       "commit": "",
       "changes": [],
       "summary": "",
@@ -2472,6 +2472,14 @@
         {
           "at": "2026-10-02T01:09:49+00:00",
           "event": "Auto-queued"
+        },
+        {
+          "at": "2026-10-02T01:13:54+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-10-02T01:19:11+00:00",
+          "event": "AI run finished; awaiting review"
         }
       ],
       "prev_status": "unplanned"
@@ -2620,13 +2628,13 @@
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-01T21:39:59+00:00",
-      "updated_at": "2026-10-02T01:13:46+00:00",
+      "updated_at": "2026-10-02T01:13:54+00:00",
       "queued_at": "2026-10-02T01:02:15+00:00",
       "started_at": "2026-10-02T01:08:01+00:00",
       "finished_at": "2026-10-02T01:13:46+00:00",
       "output": "Auto-run is gone and Auto-promote now sits after Drafted. The Automation and Workflow test classes pass (46 tests). The full run before my last two test fixes had only those two failures, which I fixed. I did not re-run the whole suite afterwards. I used `unittest` because pytest isn't installed in the venv. I didn't try the app in a browser, so none of the manual checks in the plan have been done.\n\n**Backend** (`store.py`, `engine.py`, `app.py`)\n- `auto_promote` replaces `auto_run` in the defaults (on), `AUTO_MODES` and `AUTO_TARGETS`.\n- Queued tasks always run now, because `_claim` no longer checks a mode.\n- `maybe_auto_promote` moves a drafted, unpaused task with no open questions to Planned.\n- `_apply_auto` runs it when the mode is turned on.\n- A re-plan from Drafted that comes back with no questions only moves to Planned when Auto-promote is on. Otherwise it stays in Drafted with \"move to Planned by hand\" in the history.\n- The task PATCH calls `maybe_auto_promote` when the plan changed.\n- `settings_view` only returns `AUTO_MODES` keys, so a leftover `automation.auto_run` isn't shown. A stale `auto_run` on a project is ignored.\n\n**Frontend and docs** (`index.html`, `app.js`, `README.md`)\n- The arrow moves from the AI-queue tab to after Drafted, and the project select and global checkbox are swapped to Auto-promote.\n- The Drafted card hint depends on whether Auto-promote is on.\n- The README describes three modes and says queued tasks always run.\n- No `auto_run` is left in `patchgoblin/` or the README.\n\n**Tests**\n- The defaults test now expects `auto_promote`.\n- `test_auto_run_off_holds_queue_until_turned_on` is replaced by four tests:\n  - a stale `auto_run: False` doesn't hold the queue;\n  - with Auto-promote off, a drafted task stays drafted after a question-free re-plan or a PATCH that removes the questions;\n  - with it on, both cases move the task to Planned;\n  - turning it on promotes existing question-free drafted tasks and skips paused ones.\n- The paused-queued test now holds the runner by mocking `kick` instead of toggling `auto_run`.\n- `test_edit_then_mark` and `test_auto_queue_first_plan_only` assumed a hand edit leaves a task in Drafted. I set Auto-promote off in them, since it is on by default now.",
       "error": "",
-      "commit": "",
+      "commit": "f5b993bab5d958e97d4de0f6a8c6f3d0d74faa93",
       "changes": [],
       "summary": "",
       "checkin_pending": false,
@@ -2662,6 +2670,10 @@
         {
           "at": "2026-10-02T01:13:46+00:00",
           "event": "AI run finished; awaiting review"
+        },
+        {
+          "at": "2026-10-02T01:13:54+00:00",
+          "event": "Committed f5b993bab5"
         }
       ],
       "prev_status": "unplanned"

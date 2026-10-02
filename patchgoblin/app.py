@@ -541,8 +541,6 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             if not valid_provider(settings.get(), data["provider"]):
                 raise ValueError("Unknown provider.")
             fields["provider"] = data["provider"]
-        if "model" in data and "plan_model" not in data:  # before planning/coding models
-            fields["plan_model"] = model_name(data["model"])
         for key in PROJECT_MODEL_KEYS:
             if key in data:
                 fields[key] = model_name(data[key])

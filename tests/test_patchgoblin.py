@@ -703,39 +703,6 @@ class WorkflowTests(AppTestCase):
             statuses = [self.wait_for(pid, tid, {"drafted", "planned"})["status"] for tid in ids]
         self.assertEqual(statuses, ["drafted", "planned", "drafted"])
 
-    def test_old_planned_tasks_with_questions_become_drafted(self):
-        pid = self.add_project()["id"]
-        a, b = (self.post_task(pid, t)["id"] for t in ("a", "b"))
-        engine, store = self.app.config["ENGINE"], self.app.config["STORE"]
-        path = os.path.join(self.proj_dir, ".patchgoblin", "tasks.json")
-
-        def seed(version, plans):
-            with open(path, encoding="utf-8") as fh:
-                doc = json.load(fh)
-            doc["version"] = version
-            for task, plan in zip(doc["tasks"], plans):
-                task["status"], task["plan"] = "planned", plan
-            with open(path, "w", encoding="utf-8") as fh:
-                json.dump(doc, fh)
-            store.forget(pid)
-            return os.stat(path).st_mtime_ns
-
-        project = self.app.config["REGISTRY"].get(pid)
-        stamp = seed(1, ["plain plan", "plain plan"])
-        engine.reconcile(project)
-        self.assertEqual(os.stat(path).st_mtime_ns, stamp)  # nothing to migrate: not rewritten
-
-        seed(1, [ASKING_PLAN, "plain plan"])
-        engine.reconcile(project)
-        doc = store.read(project, fresh=True)
-        self.assertEqual([t["status"] for t in doc["tasks"]], ["drafted", "planned"])
-        self.assertEqual(doc["tasks"][0]["history"][-1]["event"], "Plan has open questions")
-        self.assertEqual(doc["version"], 7)
-
-        stamp = seed(2,[ASKING_PLAN, ASKING_PLAN])
-        engine.reconcile(project)  # already migrated: planned tasks keep their questions
-        self.assertEqual(os.stat(path).st_mtime_ns, stamp)
-
     def test_queue_and_dequeue(self):
         pid = self.add_project()["id"]
         engine = self.app.config["ENGINE"]
@@ -2042,29 +2009,6 @@ class EndpointSettingsTests(AppTestCase):
     def endpoint(self, **extra):
         return {"name": "OpenRouter", "base_url": "https://openrouter.ai/api/v1", "model": "x/y", **extra}
 
-    def test_legacy_openai_block_migrates(self):
-        from patchgoblin.providers import run_ai
-        from patchgoblin.store import Settings
-        data_dir = os.path.join(self.tmp.name, "legacy")
-        os.makedirs(data_dir)
-        with open(os.path.join(data_dir, "settings.json"), "w") as fh:
-            json.dump({"openai": {"base_url": "http://old/v1", "model": "old-model"}}, fh)
-        s = Settings(data_dir).get()
-        self.assertEqual(len(s["endpoints"]), 1)
-        ep = s["endpoints"][0]
-        self.assertEqual((ep["id"], ep["base_url"], ep["model"], ep["api_key_env"]),
-                         ("openai", "http://old/v1", "old-model", "OPENAI_API_KEY"))
-        self.assertNotIn("openai", s)
-        job = mock.Mock(cancelled=False)
-        with mock.patch("patchgoblin.providers.OpenAIAgent") as agent:
-            agent.return_value.run.return_value = Outcome(True, "ok")
-            out = run_ai("openai", "plan", "p", host=None, project={"path": "."}, settings=s, model="", job=job)
-        self.assertTrue(out.ok)
-        self.assertEqual(agent.call_args.args[2]["id"], "openai")
-        out = run_ai("deleted-id", "plan", "p", host=None, project={"path": "."}, settings=s, model="", job=job)
-        self.assertFalse(out.ok)
-        self.assertIn("not configured", out.error)
-
     def test_save_endpoints_and_validation(self):
         res = self.put(endpoints=[self.endpoint(api_key="sk-secret"),
                                   self.endpoint(name="Local", base_url="http://localhost:11434/v1")])
@@ -2153,8 +2097,6 @@ class ModelTests(AppTestCase):
         task = {"code_model": "x"}
         self.assertEqual(self.resolve(p, task, "run"), ("claude", "x"))
         self.assertEqual(self.resolve(p, task, "plan"), ("claude", "opus"))
-        # Legacy (unmigrated) project dicts still resolve.
-        self.assertEqual(self.resolve({"provider": "claude", "model": "old"}, role="run"), ("claude", "old"))
 
     def test_provider_for_other_provider_and_globals(self):
         p = {"provider": "claude", "plan_model": "opus", "code_model": "sonnet"}
@@ -2177,30 +2119,6 @@ class ModelTests(AppTestCase):
         self.assertEqual(self.resolve(p, role="run"), ("or", "m-code"))
         self.assertEqual(self.resolve(p, role="chat"), ("or", "m-plan"))
 
-    def test_registry_migration(self):
-        from patchgoblin.store import Registry
-        data_dir = os.path.join(self.tmp.name, "legacy")
-        os.makedirs(data_dir)
-        path = os.path.join(data_dir, "projects.json")
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump({"projects": [{"id": "a", "provider": "claude", "model": "opus", "extra": 1},
-                                    {"id": "b", "provider": "codex", "plan_model": "p", "code_model": "c"}]}, fh)
-        Registry(data_dir)
-        a, b = Registry(data_dir).list()
-        self.assertEqual({k: a.get(k) for k in ("plan_model", "code_model", "chat_model", "extra")},
-                         {"plan_model": "opus", "code_model": "opus", "chat_model": "", "extra": 1})
-        self.assertNotIn("model", a)
-        self.assertTrue(a["git_tracking"])
-        self.assertTrue(b["git_tracking"])
-        self.assertEqual({k: v for k, v in b.items() if k != "git_tracking"},
-                         {"id": "b", "provider": "codex", "plan_model": "p", "code_model": "c"})
-        with open(path + ".bak", encoding="utf-8") as fh:
-            self.assertEqual(json.load(fh)["projects"][0]["model"], "opus")
-        before = os.path.getmtime(path)
-        time.sleep(0.05)
-        Registry(data_dir)
-        self.assertEqual(os.path.getmtime(path), before)
-
     def test_project_routes(self):
         p = self.add_project(plan_model=" opus ", code_model="sonnet ", chat_model="")
         self.assertEqual((p["plan_model"], p["code_model"], p["chat_model"]), ("opus", "sonnet", ""))
@@ -2208,8 +2126,6 @@ class ModelTests(AppTestCase):
         url = f"/api/projects/{p['id']}"
         p = self.client.patch(url, headers=H, json={"chat_model": " haiku", "code_model": ""}).get_json()
         self.assertEqual((p["plan_model"], p["code_model"], p["chat_model"]), ("opus", "", "haiku"))
-        p = self.client.patch(url, headers=H, json={"model": "legacy"}).get_json()
-        self.assertEqual(p["plan_model"], "legacy")
         self.assertEqual(self.client.patch(url, headers=H, json={"plan_model": 3}).status_code, 400)
 
     def test_task_models_edit_and_batch(self):
@@ -2972,25 +2888,6 @@ class ActivityTests(AppTestCase):
             self.assertEqual(kinds[1], ("tool", "Reading ../x"))
             self.assertEqual(kinds[2][0], "error")
             self.assertEqual(kinds[3], ("say", "Done"))
-
-
-class ClaudeMigrationTests(unittest.TestCase):
-    def settings_with(self, claude):
-        from patchgoblin.store import Settings
-        d = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, d, True)
-        with open(os.path.join(d, "settings.json"), "w") as fh:
-            json.dump({"commands": {"claude": claude}}, fh)
-        return Settings(d).get()["commands"]["claude"]
-
-    def test_legacy_defaults_upgraded_and_custom_kept(self):
-        from patchgoblin.store import LEGACY_CLAUDE_COMMANDS
-        got = self.settings_with(dict(LEGACY_CLAUDE_COMMANDS))
-        self.assertIn("stream-json --verbose", got["plan"])
-        self.assertIn("stream-json --verbose", got["run"])
-        got = self.settings_with({"plan": "my claude -p", "run": LEGACY_CLAUDE_COMMANDS["run"]})
-        self.assertEqual(got["plan"], "my claude -p")
-        self.assertIn("stream-json", got["run"])
 
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32

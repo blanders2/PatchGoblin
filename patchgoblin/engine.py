@@ -23,7 +23,6 @@ log = logging.getLogger("patchgoblin")
 MAX_OUTPUT = 60000
 MAX_LIVE = 200000
 MAX_EVENTS = 500
-EVENT_KINDS = ("say", "tool", "error", "note")
 _EVENT_MARK = {"say": "", "tool": "→ ", "error": "! ", "note": "· "}
 
 
@@ -96,7 +95,7 @@ class Chat:
         del self.messages[:-MAX_CHAT_MESSAGES]
 
 
-def _clip(text: str) -> str:
+def clip_tail(text: str) -> str:
     return text if len(text) <= MAX_OUTPUT else "… [earlier output truncated]\n" + text[-MAX_OUTPUT:]
 
 
@@ -147,7 +146,7 @@ class Engine:
         model = task.get(key) or ""
         if not model and provider == (project.get("provider") or "claude"):
             model = ((project.get("chat_model") if role == "chat" else "")
-                     or project.get(key) or project.get("model") or "")
+                     or project.get(key) or "")
         if not model:
             model = global_model(self.settings.get(), provider, key)
         return provider, model
@@ -167,27 +166,15 @@ class Engine:
 
     # ---- startup / consistency ------------------------------------------
     def reconcile(self, project: dict) -> None:
-        """Tasks left 'planning'/'running' by a previous server process are interrupted.
-
-        Also moves 'planned' tasks whose plan has open questions to 'drafted', once, in a
-        version-1 tasks.json saved before that status existed (including one pulled in by
-        git sync). Later, a planned task may keep hand-added questions until "Move to drafted".
-        """
+        """Tasks left 'planning'/'running' by a previous server process are interrupted."""
         pid = project["id"]
         doc = self.store.read(project)
         stale = [t["id"] for t in doc["tasks"]
                  if t["status"] in ("planning", "running") and (pid, t["id"]) not in self.jobs]
-        drafts = [t["id"] for t in doc["tasks"]
-                  if (doc.get("version") or 1) < 2
-                  and t["status"] == "planned" and plan_questions(t.get("plan", ""))]
-        if not stale and not drafts:
+        if not stale:
             return
         with self.store.edit(project) as doc:
             for task in doc["tasks"]:
-                if task["id"] in drafts and task["status"] == "planned" \
-                        and plan_questions(task.get("plan", "")):
-                    set_status(task, "drafted", "Plan has open questions")
-                    continue
                 if task["id"] in stale and (pid, task["id"]) not in self.jobs \
                         and task["status"] in ("planning", "running"):
                     if task["status"] == "planning":
@@ -359,7 +346,7 @@ class Engine:
                 current = find_task(doc, tid)
                 if current is None:
                     return
-                current["output"] = _clip(job.text())
+                current["output"] = clip_tail(job.text())
                 if outcome.ok:
                     title, plan = split_title(outcome.text) if rewrite else ("", outcome.text)
                     current["plan"] = plan.strip() or outcome.text
@@ -472,7 +459,7 @@ class Engine:
                 current = find_task(doc, tid)
                 if current is None:
                     return
-                current["output"] = _clip(outcome.text or job.text()) if outcome.ok else _clip(job.text())
+                current["output"] = clip_tail(outcome.text or job.text()) if outcome.ok else clip_tail(job.text())
                 current["finished_at"] = now()
                 if outcome.ok:
                     current["error"] = ""
@@ -578,7 +565,7 @@ class Engine:
                     log_event(current, event)
 
     # ---- remote sync -----------------------------------------------------
-    def sync(self, project: dict, mode: str, push: bool = True, checkpoint: bool = True) -> dict:
+    def sync(self, project: dict, mode: str, push: bool = True) -> dict:
         """Manual sync with origin. The caller checks that no AI job is active."""
         if not gitops.tracked(project):
             raise ValueError("Git tracking is off for this project.")
@@ -588,7 +575,7 @@ class Engine:
             raise ValueError("A sync or task run is already in progress for this project.")
         try:
             return gitops.sync(host_for(project), project["path"], mode=mode, push=push,
-                               checkpoint=checkpoint, guard=self.store.lock(pid))
+                               guard=self.store.lock(pid))
         finally:
             self.store.forget(pid)  # a pull may have replaced tasks.json
             lock.release()

@@ -249,17 +249,16 @@ class SSHHost:
     kind = "ssh"
     os = "posix"
 
-    def __init__(self, target: str, port: Optional[int] = None, ssh_bin: str = "ssh"):
+    def __init__(self, target: str, port: Optional[int] = None):
         target = (target or "").strip()
         if not target or target.startswith("-") or not _TARGET_RE.match(target):
             raise HostError("SSH target must look like user@host or an ssh-config alias.")
         self.target = target
         self.port = int(port) if port else None
-        self.ssh_bin = ssh_bin
         self.label = target if not self.port else f"{target}:{self.port}"
 
     def _argv(self, remote_command: str) -> list[str]:
-        argv = [self.ssh_bin, "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+        argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
                 "-o", "ServerAliveInterval=30"]
         if self.port:
             argv += ["-p", str(self.port)]
@@ -373,7 +372,7 @@ class SSHHost:
 
     def shell_argv(self, path: str) -> list[str]:
         """ssh command for an interactive login shell in ``path`` (for a terminal window)."""
-        argv = [self.ssh_bin, "-t"]
+        argv = ["ssh", "-t"]
         if self.port:
             argv += ["-p", str(self.port)]
         return argv + [self.target, f'cd {shlex.quote(path)} && exec "${{SHELL:-/bin/sh}}" -l']
@@ -548,7 +547,7 @@ class WindowsSSHHost(SSHHost):
         return self._exec(script, timeout=timeout, on_output=on_output, on_start=on_start)
 
     def shell_argv(self, path: str) -> list[str]:
-        argv = [self.ssh_bin, "-t"]
+        argv = ["ssh", "-t"]
         if self.port:
             argv += ["-p", str(self.port)]
         script = f"Set-Location -LiteralPath {_ps_quote(path)}"
