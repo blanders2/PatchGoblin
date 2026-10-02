@@ -2426,13 +2426,13 @@
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-01T21:39:22+00:00",
-      "updated_at": "2026-10-02T01:19:11+00:00",
+      "updated_at": "2026-10-02T01:19:18+00:00",
       "queued_at": "2026-10-02T01:09:49+00:00",
       "started_at": "2026-10-02T01:13:54+00:00",
       "finished_at": "2026-10-02T01:19:11+00:00",
       "output": "The dead code, stale migrations and the `_clip` rename are done. `python -m unittest discover tests` passes: 221 tests, 9 skipped.\n\n**What I removed**\n- **Dead code:**\n  - `endpoint_ids` and `AUTO_TARGETS` in `store.py`.\n  - `EVENT_KINDS` in `engine.py`.\n  - The `checkpoint=` parameter of `Engine.sync`. `gitops.sync` still has its own `checkpoint` parameter, which I left alone because you didn't list it.\n  - The `ssh_bin=` parameter and attribute of `SSHHost`. The three call sites now use a literal `\"ssh\"`.\n- **Migrations:**\n  - `LEGACY_CLAUDE_COMMANDS` and its pass in `Settings._migrate`.\n  - The legacy single `\"openai\"` block in `Settings.get`. I also dropped the two `pop(\"openai\")` calls (in `get` and in `save_endpoints`), which only served that block.\n  - The whole of `Registry._migrate`, which covered both the `model` \u2192 `plan_model` split and the `git_tracking` default. Its call in `__init__` is gone too.\n  - The `\"model\"` fallbacks in `update_project` (`app.py`) and in `Engine.provider_for`.\n  - The version < 2 \"drafted\" pass in `Engine.reconcile`, with its docstring updated.\n- **Tests removed:**\n  - `ClaudeMigrationTests`.\n  - `test_legacy_openai_block_migrates`.\n  - `test_registry_migration`.\n  - `test_old_planned_tasks_with_questions_become_drafted`.\n  - The legacy `model` assertions in `test_provider_for_roles` and `test_project_routes`.\n  - I kept `test_projects_and_tasks_accept_endpoint_ids`. It's a real test, and only its name mentions `endpoint_ids`.\n  - Deleting `test_legacy_openai_block_migrates` also dropped its unrelated check that `run_ai` reports \"not configured\" for an unknown endpoint id. Say so if you want that back as its own test.\n\n**What I changed**\n- **`opencode` call:** `run_opencode` now calls `opencode.config_dirs(host)` once and passes the result to both `read_configs` and `agent_names`, so `host.home()` is called once instead of twice. The `dirs=` parameters stay optional because `app.py` still calls `read_configs` without them.\n- **`_clip` rename:** `engine._clip` is now `clip_tail` and `providers._clip` is now `clip_head`.\n\nI kept `migrate_paused`, `provider_renames`, `rename_reserved_endpoints` and `RESERVED_SINCE` as asked.",
       "error": "",
-      "commit": "",
+      "commit": "7b06e065e9bd79261925b9a2a0d0e1632267522a",
       "changes": [],
       "summary": "",
       "checkin_pending": false,
@@ -2480,6 +2480,10 @@
         {
           "at": "2026-10-02T01:19:11+00:00",
           "event": "AI run finished; awaiting review"
+        },
+        {
+          "at": "2026-10-02T01:19:18+00:00",
+          "event": "Committed 7b06e065e9"
         }
       ],
       "prev_status": "unplanned"
@@ -2489,18 +2493,18 @@
       "title": "Cleanup T3: shared backend helpers to remove duplicated boilerplate",
       "description": "Collapse repeated code without changing behaviour:\n- store: add an `edit_task(project, tid)` context manager that yields the task or None. Use it where `with store.edit(...) as doc: current = find_task(doc, tid); if current is None ...` repeats (engine.py ~479, 489, 496, 519, 600, 631; app.py ~723, 832, 843).\n- app.py guards:\n  - `require_idle(project, msg)` for the 4 copies of `engine.busy(pid) or any(t[\"status\"] in LOCKED ...)` (~451, 469, 608, 643)\n  - `git_project(pid)` mirroring the existing svn_project (~585) for the \"Git tracking is off\" checks (~620, 627, 639; engine.py ~571 can use gitops.tracked)\n  - one helper for the 5 \"Unknown provider\" checks\n  - one helper for the copy-pasted git_tracking/svn_tracking \"false only\" blocks in update_project (~485-496)\n- hosts.py:\n  - `_fail(res, verb, path)` for the ~13 copies of `f\"Could not ... on {self.label}: {res.stderr.strip() or 'ssh failed'}\"`\n  - one tmp-file and retry writer behind LocalHost.write_text/write_bytes (~192-228), and the same for read_text/read_bytes\n  - one helper for the `-p port` argv prefix (~261, 376, 551)\n  - one shared local-directory guard for open_terminal and open_vscode\n  - the duplicated check() in both SSH classes if it's cleanly shareable\n- VCS:\n  - one shared `hash-object --stdin-paths` helper (gitops.py ~94-101 and svnops.py ~86-95)\n  - a `vcs_for(project)` that returns gitops, svnops or None, replacing the ternaries in app.py ~373, engine.py ~438-440, providers.py ~296-297\n- app.py: one `cached(key, loader, refresh)` helper shared by endpoint_models (~304-320) and opencode_models (~325-349), plus any similar cline models route; one `job_view(job)` for chat_view (~659) and live (~942).\n- Consistency:\n  - clean_endpoints should pass model/code_model through model_name() (~172-173)\n  - update_project should reject non-bool rewrite_titles/auto_sync like clean_automation does instead of coercing with bool()\n  - base-URL and header validation are duplicated between app.py (~144, 153) and providers.py (~670, 686-690); keep one copy and call it from both places.\n\nRules: this is part of a cleanup series (T1-T6). Behaviour must not change except for the listed bug fixes. Line numbers below are approximate (from a review at commit 1d1de27); find the real code before editing. Run `python -m unittest discover tests` before finishing; it must stay green. Don't touch unrelated code.",
       "plan": "",
-      "status": "unplanned",
+      "status": "review",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
-      "paused": true,
+      "paused": false,
       "created_at": "2026-10-01T21:39:22+00:00",
-      "updated_at": "2026-10-01T21:39:22+00:00",
-      "queued_at": null,
-      "started_at": null,
-      "finished_at": null,
-      "output": "",
+      "updated_at": "2026-10-02T01:30:35+00:00",
+      "queued_at": "2026-10-02T01:21:01+00:00",
+      "started_at": "2026-10-02T01:21:01+00:00",
+      "finished_at": "2026-10-02T01:30:35+00:00",
+      "output": "The shared helpers from the cleanup list are in, and `python -m unittest discover tests` passes: 221 tests, 9 skipped. I did not add new tests for the helpers or the three consistency fixes. I did not touch `.patchgoblin/`. I did not run the app itself.\n\n**Store**\n- `edit_task(project, tid)` in `store.py` yields the task or None. It replaces the repeated `edit` plus `find_task` blocks in `engine.py` (8 spots) and `app.py` (4 spots).\n- `vcs_for(project)` returns `gitops`, `svnops` or None. It replaces the ternaries in `app.py`, `engine.py` and `providers.py`. `gitops` and `svnops` each gained a `NAME` constant, which `engine.py` uses for its `\"git\"`/`\"svn\"` string.\n\n**app.py**\n- New helpers: `require_idle`, `git_project`, `require_provider`, `job_view` and `cached(key, loader, refresh)`.\n- `cached` now backs the endpoint, opencode and cline model routes. Saving endpoints clears only the endpoint entries in the shared cache, as before.\n- The `git_tracking`/`svn_tracking` \"false only\" blocks in `update_project` are now one loop.\n- `engine.py`'s own tracking check was already `gitops.tracked`, so I left it.\n\n**hosts.py**\n- `_fail`, `_port_args` and a `noop_script` class attribute for the shared `check()` on the SSH classes.\n- `LocalHost` has one `_read` and one `_write` behind the text and byte versions.\n- `_local_dir_guard` is shared by `open_terminal` and `open_vscode`.\n\n**VCS and validation**\n- `gitops.hash_files` replaces the two `hash-object --stdin-paths` copies; `svnops` calls it with `filters=False`.\n- `valid_base_url` and `valid_header` in `providers.py` are called from both `providers.py` and `app.py`.\n\n**Bug fixes**\n- `clean_endpoints` now runs `model` and `code_model` through `model_name()`.\n- `update_project` now rejects non-bool `rewrite_titles` and `auto_sync` instead of coercing them.\n\nIn `providers.py`, if both git and SVN tracking were somehow on, only git now counts. `engine.py` already treated that case the same way, and I assume the registry never allows it.",
       "error": "",
       "commit": "",
       "changes": [],
@@ -2514,6 +2518,26 @@
         {
           "at": "2026-10-01T21:39:22+00:00",
           "event": "Created (paused)"
+        },
+        {
+          "at": "2026-10-02T01:20:58+00:00",
+          "event": "Resumed"
+        },
+        {
+          "at": "2026-10-02T01:21:01+00:00",
+          "event": "Marked planned"
+        },
+        {
+          "at": "2026-10-02T01:21:01+00:00",
+          "event": "Auto-queued"
+        },
+        {
+          "at": "2026-10-02T01:21:01+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-10-02T01:30:35+00:00",
+          "event": "AI run finished; awaiting review"
         }
       ]
     },
@@ -2522,15 +2546,15 @@
       "title": "Cleanup T4: shrink create_app and split providers.py into modules",
       "description": "Structural refactor, no behaviour change:\n- app.py create_app is ~860 lines (36 routes plus ~20 nested helpers). Move the helpers that use no closure state to module level, or to a new patchgoblin/validators.py, and define them before use: plan_answers, plan_limit, sync_mode, plan_trust, require_secrets_ack, remote_view, TRANSITIONS, MAX_BATCH, and transition() (pass in what it needs from engine). Today some are defined after the routes that use them (e.g. update_project uses plan_limit/sync_mode/plan_trust before their definitions; put_settings uses models_cache before it's defined); fix that ordering.\n- Split patchgoblin/providers.py (~920 lines, three concerns):\n  - patchgoblin/prompts.py: prompts and plan parsing (~lines 32-274). Build the three RUN_INSTRUCTIONS* strings (~100-121), which share 4 of 5 lines, from one base.\n  - patchgoblin/providers.py: the CLI runners (run_ai and friends). Remove the duplicated kwargs between the opencode and cline branches of run_ai (~304-309).\n  - patchgoblin/openai_agent.py: the OpenAI-compatible HTTP tool loop (~618-end).\n- Update imports in app.py, engine.py and the tests, and update mock.patch targets in the tests that point at moved names. Don't leave compatibility shims unless a patch target genuinely needs one.\n- Afterwards, start the app (create_app in a test is enough) to confirm imports work.\n\nRules: this is part of a cleanup series (T1-T6). Behaviour must not change except for the listed bug fixes. Line numbers below are approximate (from a review at commit 1d1de27); find the real code before editing. Run `python -m unittest discover tests` before finishing; it must stay green. Don't touch unrelated code.",
       "plan": "",
-      "status": "unplanned",
+      "status": "queued",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
-      "paused": true,
+      "paused": false,
       "created_at": "2026-10-01T21:39:22+00:00",
-      "updated_at": "2026-10-01T21:39:22+00:00",
-      "queued_at": null,
+      "updated_at": "2026-10-02T01:21:47+00:00",
+      "queued_at": "2026-10-02T01:21:47+00:00",
       "started_at": null,
       "finished_at": null,
       "output": "",
@@ -2547,6 +2571,18 @@
         {
           "at": "2026-10-01T21:39:22+00:00",
           "event": "Created (paused)"
+        },
+        {
+          "at": "2026-10-02T01:21:42+00:00",
+          "event": "Resumed"
+        },
+        {
+          "at": "2026-10-02T01:21:47+00:00",
+          "event": "Marked planned"
+        },
+        {
+          "at": "2026-10-02T01:21:47+00:00",
+          "event": "Auto-queued"
         }
       ]
     },

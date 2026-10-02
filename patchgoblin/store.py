@@ -17,6 +17,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
+from . import gitops, svnops
 from .gitops import DEFAULT_GITIGNORE
 from .hosts import host_for
 
@@ -468,12 +469,23 @@ class TaskStore:
             yield doc
             self.write(project, doc)
 
+    @contextmanager
+    def edit_task(self, project: dict, tid: int):
+        """Yield task ``tid`` (or None if it is gone); the document is saved on a normal exit."""
+        with self.edit(project) as doc:
+            yield find_task(doc, tid)
+
     def lock(self, pid: str) -> threading.RLock:
         """The lock serializing tasks.json edits (held by git sync while it changes the tree)."""
         return self._locks[pid]
 
     def forget(self, pid: str) -> None:
         self._cache.pop(pid, None)
+
+
+def vcs_for(project: dict):
+    """The tracking module for a project (gitops or svnops), or None when tracking is off."""
+    return gitops if gitops.tracked(project) else svnops if svnops.tracked(project) else None
 
 
 def find_task(doc: dict, tid: int) -> dict | None:

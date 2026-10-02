@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from . import gitops, opencode, svnops
 from .gitops import dirty_fingerprint, git
 from .hosts import HostError
-from .store import find_endpoint
+from .store import find_endpoint, vcs_for
 
 PLAN_INSTRUCTIONS = """\
 You are planning a software task for the project in the current working directory.
@@ -293,8 +293,9 @@ def run_ai(provider: str, mode: str, prompt: str, *, host, project: dict, settin
     active in the project; opencode's plan check uses it to avoid blaming a run's edits on a plan.
     """
     timeout = float(settings["timeouts"][mode])
-    is_tracked = gitops.tracked(project)  # git only: SVN projects use the untracked code paths
-    svn_wc = svnops.tracked(project)
+    ops = vcs_for(project)
+    is_tracked = ops is gitops  # git only: SVN projects use the untracked code paths
+    svn_wc = ops is svnops
     endpoint = find_endpoint(settings, provider)
     if endpoint is not None:
         return OpenAIAgent(host, project["path"], endpoint, model, mode, job, tracked=is_tracked).run(prompt, timeout)
@@ -664,11 +665,21 @@ def endpoint_key(ep: dict) -> str:
     return os.environ.get(env, "").strip() if env else ""
 
 
+def valid_base_url(url: str) -> bool:
+    return bool(re.match(r"^https?://[^/\s]+", url, re.IGNORECASE))
+
+
+def valid_header(name, value) -> bool:
+    """A usable custom header: string name and value, non-blank name, no line breaks."""
+    return (isinstance(name, str) and isinstance(value, str) and bool(name.strip())
+            and not any(c in name + value for c in "\r\n"))
+
+
 def endpoint_base(ep: dict) -> str:
     base = (ep.get("base_url") or "").strip().rstrip("/")
     if base.endswith("/chat/completions"):  # a pasted full endpoint URL
         base = base[:-len("/chat/completions")].rstrip("/")
-    if not re.match(r"^https?://[^/\s]+", base, re.IGNORECASE):
+    if not valid_base_url(base):
         raise RuntimeError(f"{endpoint_name(ep)}: the base URL must start with http:// or https:// "
                            f"(got {base or 'nothing'}).")
     return base
@@ -685,9 +696,7 @@ def endpoint_name(ep: dict) -> str:
 def endpoint_headers(ep: dict) -> dict:
     headers = {}
     for name, value in (ep.get("headers") or {}).items():
-        if not isinstance(name, str) or not isinstance(value, str) or not name.strip():
-            continue
-        if any(c in name + value for c in "\r\n"):
+        if not valid_header(name, value):
             continue
         if name.strip().lower() in ("content-type", "user-agent") or (
                 name.strip().lower() == "authorization" and endpoint_key(ep)):

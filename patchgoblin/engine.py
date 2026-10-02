@@ -16,7 +16,7 @@ from . import gitops, svnops
 from .hosts import HostError, host_for, kill_tree
 from .providers import (Cancelled, Outcome, chat_prompt, plan_prompt, plan_questions, ready_status, run_ai,
                         resolve_trust, run_prompt, split_title)
-from .store import find_task, global_model, log_event, now, resolve_auto, set_status
+from .store import find_task, global_model, log_event, now, resolve_auto, set_status, vcs_for
 
 log = logging.getLogger("patchgoblin")
 
@@ -205,8 +205,7 @@ class Engine:
         try:
             # The job is registered under the store lock so reconcile() never
             # mistakes this task for one orphaned by a previous process.
-            with self.store.edit(project) as doc:
-                task = find_task(doc, tid)
+            with self.store.edit_task(project, tid) as task:
                 if task is None:
                     raise KeyError(tid)
                 if task.get("paused"):
@@ -342,8 +341,7 @@ class Engine:
             # Only a task's first plan is auto-queued, not a re-plan with answers or feedback.
             first_plan = task.get("prev_status") == "unplanned" and not answers and not feedback.strip()
             queued = False
-            with self.store.edit(project) as doc:
-                current = find_task(doc, tid)
+            with self.store.edit_task(project, tid) as current:
                 if current is None:
                     return
                 current["output"] = clip_tail(job.text())
@@ -436,7 +434,8 @@ class Engine:
         host, path = host_for(project), project["path"]
         track = gitops.tracked(project)
         svn = svnops.tracked(project)
-        vcs = "git" if track else "svn" if svn else ""
+        ops = vcs_for(project)
+        vcs = ops.NAME if ops else ""
         commit, outcome, svn_before, svn_error = "", None, None, ""
         try:
             try:
@@ -455,8 +454,7 @@ class Engine:
             except HostError as exc:
                 outcome = Outcome(False, error=str(exc))
 
-            with self.store.edit(project) as doc:
-                current = find_task(doc, tid)
+            with self.store.edit_task(project, tid) as current:
                 if current is None:
                     return
                 current["output"] = clip_tail(outcome.text or job.text()) if outcome.ok else clip_tail(job.text())
@@ -475,8 +473,7 @@ class Engine:
                     note = " (addressing review feedback)" if task.get("review_feedback") else ""
                     commit = gitops.commit_all(host, path,
                                                f"PatchGoblin: task #{tid} {task['title']}{note}\n\n{summary}\n")
-                    with self.store.edit(project) as doc:
-                        current = find_task(doc, tid)
+                    with self.store.edit_task(project, tid) as current:
                         if current is not None:
                             current["commit"] = commit
                             log_event(current, f"Committed {commit[:10]}" if commit else "No file changes to commit")
@@ -485,15 +482,13 @@ class Engine:
                 elif svn:
                     self._record_svn_changes(project, task, outcome, svn_before, svn_error, job)
                 else:
-                    with self.store.edit(project) as doc:
-                        current = find_task(doc, tid)
+                    with self.store.edit_task(project, tid) as current:
                         if current is not None:
                             log_event(current, "Git tracking off; nothing committed")
         except Exception as exc:
             log.exception("Run of %s#%s failed", pid, tid)
             try:
-                with self.store.edit(project) as doc:
-                    current = find_task(doc, tid)
+                with self.store.edit_task(project, tid) as current:
                     if current is not None:
                         current["error"] = (current.get("error") or "") + f"\n{type(exc).__name__}: {exc}"
                         if current["status"] == "running":
@@ -515,8 +510,7 @@ class Engine:
             except HostError as exc:
                 event = f"Could not record file changes for check-in: {exc}"
                 job.write(event + "\n")
-        with self.store.edit(project) as doc:
-            current = find_task(doc, tid)
+        with self.store.edit_task(project, tid) as current:
             if current is None:
                 return
             current["summary"] = (outcome.text or "").strip()[:1500]
@@ -596,8 +590,7 @@ class Engine:
                 else "No commits yet; approval note kept on the task only"
         except HostError as exc:
             sha, event = "", f"Approval note not committed: {exc}"
-        with self.store.edit(project) as doc:
-            current = find_task(doc, tid)
+        with self.store.edit_task(project, tid) as current:
             if current is not None:
                 if sha:
                     current["approval_commit"] = sha
@@ -627,8 +620,7 @@ class Engine:
             event = f"Auto-sync failed: {exc}"
         finally:
             self.store.forget(pid)
-        with self.store.edit(project) as doc:
-            current = find_task(doc, tid)
+        with self.store.edit_task(project, tid) as current:
             if current is not None:
                 log_event(current, event)
 

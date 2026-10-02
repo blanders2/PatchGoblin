@@ -16,10 +16,11 @@ from flask import Flask, Response, abort, jsonify, render_template, request
 from . import cline, gitops, opencode, svnops
 from .engine import Engine
 from .hosts import HostError, host_for, open_terminal, open_vscode, probe
-from .providers import IMAGE_MIME, PLAN_TRUST_LEVELS, endpoint_key, list_models, plan_questions, ready_status
+from .providers import (IMAGE_MIME, PLAN_TRUST_LEVELS, endpoint_key, list_models, plan_questions, ready_status,
+                        valid_base_url, valid_header)
 from .store import (ATTACHMENT_NAME, AUTO_MODES, CLI_PROVIDERS, MODELS, PAUSABLE, STATUSES, Registry, Settings,
                     TaskStore, attachment_path, cli_model_suggestions, empty_doc, find_endpoint, find_task, log_event, new_task, now,
-                    provider_choices, resolve_auto, save_attachment, set_status, tasks_path, valid_provider)
+                    provider_choices, resolve_auto, save_attachment, set_status, tasks_path, valid_provider, vcs_for)
 
 EDITABLE = ("title", "description", "plan", "provider", "plan_model", "code_model", "plan_trust")
 MODEL_KEYS = ("plan_model", "code_model")
@@ -149,7 +150,7 @@ def clean_endpoints(values, saved: list[dict]) -> list[dict]:
             raise ValueError(f"Endpoint id {eid!r} is reserved or used twice.")
         seen.add(eid)
         base_url = str(raw.get("base_url") or "").strip()
-        if not re.match(r"^https?://[^/\s]+", base_url, re.IGNORECASE):
+        if not valid_base_url(base_url):
             raise ValueError(f"{name}: the base URL must start with http:// or https://.")
         try:
             max_steps = int(40 if raw.get("max_steps") in (None, "") else raw["max_steps"])
@@ -158,9 +159,7 @@ def clean_endpoints(values, saved: list[dict]) -> list[dict]:
         if not 1 <= max_steps <= 200:
             raise ValueError(f"{name}: max steps must be between 1 and 200.")
         headers = raw.get("headers") or {}
-        if not isinstance(headers, dict) or not all(
-                isinstance(k, str) and isinstance(v, str) and k.strip()
-                and not any(c in k + v for c in "\r\n") for k, v in headers.items()):
+        if not isinstance(headers, dict) or not all(valid_header(k, v) for k, v in headers.items()):
             raise ValueError(f"{name}: headers must be single-line 'Name: value' strings.")
         models = model_list(raw.get("models") or [], f"{name}: model suggestions")
         key = raw.get("api_key") or ""
@@ -173,8 +172,8 @@ def clean_endpoints(values, saved: list[dict]) -> list[dict]:
             "id": eid, "name": name, "base_url": base_url, "api_key": key,
             "api_key_env": str(raw.get("api_key_env") or "").strip(),
             "headers": {k.strip(): v.strip() for k, v in headers.items()},
-            "model": str(raw.get("model") or "").strip(),
-            "code_model": str(raw.get("code_model") or "").strip(),
+            "model": model_name(raw.get("model")),
+            "code_model": model_name(raw.get("code_model")),
             "models": models,
             "allow_commands": bool(raw.get("allow_commands")),
             "max_steps": max_steps,
@@ -233,6 +232,20 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         if project is None:
             abort(404)
         return project
+
+    def require_idle(project: dict, message: str) -> None:
+        if engine.busy(project["id"]) or any(t["status"] in LOCKED for t in store.read(project, fresh=True)["tasks"]):
+            raise ValueError(message)
+
+    def git_project(pid: str) -> dict:
+        project = project_or_404(pid)
+        if not gitops.tracked(project):
+            raise ValueError("Git tracking is off for this project.")
+        return project
+
+    def require_provider(value, detail: str = "") -> None:
+        if not valid_provider(settings.get(), value):
+            raise ValueError(f"Unknown provider{detail}.")
 
     def task_view(pid: str, task: dict) -> dict:
         job = engine.job(pid, task["id"])
@@ -305,45 +318,51 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         updated = settings.update(allowed)
         if endpoints is not None:
             updated = settings.save_endpoints(endpoints)
-            models_cache.clear()
+            for key in [k for k in models_cache if k[0] == "endpoint"]:
+                del models_cache[key]
         apply_turned_on(before)
         return jsonify(settings_view(updated))
 
-    # ---- OpenAI-compatible endpoints ---------------------------------------
-    models_cache: dict[tuple, tuple[float, list[str]]] = {}
+    # ---- model lists (cached) ----------------------------------------------------
+    models_cache: dict[tuple, tuple[float, object]] = {}
     models_lock = threading.Lock()
 
+    def cached(key: tuple, loader, refresh: bool):
+        """``(value, error)`` for ``key``: a fresh cache hit, else ``loader()`` -> ``(value, error)``.
+        Only error-free results are cached."""
+        with models_lock:
+            hit = models_cache.get(key)
+        if hit and not refresh and time.monotonic() - hit[0] < MODELS_CACHE_SECONDS:
+            return hit[1], ""
+        value, error = loader()
+        if not error:
+            with models_lock:
+                models_cache[key] = (time.monotonic(), value)
+        return value, error
+
+    # ---- OpenAI-compatible endpoints ---------------------------------------
     @app.get("/api/endpoints/<eid>/models")
     def endpoint_models(eid):
         ep = find_endpoint(settings.get(), eid) or abort(404)
         suggestions = model_suggestions(settings.get())[eid]
-        cache_key = (eid, ep["base_url"], bool(endpoint_key(ep)))
-        with models_lock:
-            cached = models_cache.get(cache_key)
-        if cached and not request.args.get("refresh") and time.monotonic() - cached[0] < MODELS_CACHE_SECONDS:
-            live, error = cached[1], ""
-        else:
+
+        def load():
             try:
-                live, error = list_models(ep), ""
-                with models_lock:
-                    models_cache[cache_key] = (time.monotonic(), live)
+                return list_models(ep), ""
             except RuntimeError as exc:
-                live, error = [], str(exc)
+                return [], str(exc)
+        live, error = cached(("endpoint", eid, ep["base_url"], bool(endpoint_key(ep))), load,
+                             bool(request.args.get("refresh")))
         return jsonify(models=list(dict.fromkeys(suggestions + live)), error=error)
 
     # ---- opencode -------------------------------------------------------------
-    opencode_cache: dict[str, tuple[float, dict]] = {}
-
     @app.get("/api/projects/<pid>/opencode/models")
     def opencode_models(pid):
         """Models from the project's opencode config, else from ``opencode models``, plus the
         Settings defaults. ``source`` says which ("config" or "cli")."""
         project = project_or_404(pid)
-        with models_lock:
-            cached = opencode_cache.get(pid)
-        if cached and not request.args.get("refresh") and time.monotonic() - cached[0] < MODELS_CACHE_SECONDS:
-            found = cached[1]
-        else:
+
+        def load():
             host, errors = host_for(project), []
             models, source = [], "config"
             try:
@@ -354,32 +373,24 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             except (HostError, RuntimeError) as exc:
                 errors.append(str(exc))
             found = {"models": models, "source": source, "error": " ".join(errors)}
-            if not errors:
-                with models_lock:
-                    opencode_cache[pid] = (time.monotonic(), found)
+            return found, found["error"]
+        found, _ = cached(("opencode", pid), load, bool(request.args.get("refresh")))
         defaults = model_suggestions(settings.get())["opencode"]
         return jsonify({**found, "models": list(dict.fromkeys(defaults + found["models"]))})
 
     # ---- Cline ----------------------------------------------------------------
-    cline_cache: dict[str, tuple[float, tuple[str, list[str]]]] = {}
-
     @app.get("/api/projects/<pid>/cline/models")
     def cline_models(pid):
         """Cline's bundled model catalog for its active provider, plus the saved suggestions.
         Any failure falls back to the suggestions and is reported in ``error``."""
         project = project_or_404(pid)
-        with models_lock:
-            cached = cline_cache.get(pid)
-        provider, error = "", ""
-        if cached and not request.args.get("refresh") and time.monotonic() - cached[0] < MODELS_CACHE_SECONDS:
-            provider, live = cached[1]
-        else:
+
+        def load():
             try:
-                provider, live = cline.catalog_models(host_for(project), project["path"])
-                with models_lock:
-                    cline_cache[pid] = (time.monotonic(), (provider, live))
+                return cline.catalog_models(host_for(project), project["path"]), ""
             except (HostError, RuntimeError) as exc:
-                live, error = [], str(exc)
+                return ("", []), str(exc)
+        (provider, live), error = cached(("cline", pid), load, bool(request.args.get("refresh")))
         defaults = model_suggestions(settings.get())["cline"]
         return jsonify(models=list(dict.fromkeys(defaults + live)), provider=provider, error=error)
 
@@ -405,7 +416,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             result = probe(project)
             if not result.get("ok"):
                 return result
-            ops = gitops if gitops.tracked(project) else svnops if svnops.tracked(project) else None
+            ops = vcs_for(project)
             if ops:
                 try:
                     result = {**result, "vcs": ops.vcs_summary(host_for(project), project["path"])}
@@ -419,8 +430,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
 
     def project_fields(data: dict) -> dict:
         provider = data.get("provider") or "claude"
-        if not valid_provider(settings.get(), provider):
-            raise ValueError(f"Unknown provider {provider}.")
+        require_provider(provider, f" {provider}")
         location = data.get("location") or "local"
         fields = {
             "name": (data.get("name") or "").strip(),
@@ -485,8 +495,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         (or adopt an existing repo root) and its initial commit, then set the flag."""
         data = body()
         project = project_or_404(pid)
-        if engine.busy(pid) or any(t["status"] in LOCKED for t in store.read(project, fresh=True)["tasks"]):
-            raise ValueError("Wait for this project's AI jobs to finish first.")
+        require_idle(project, "Wait for this project's AI jobs to finish first.")
         if gitops.tracked(project):
             return jsonify(project)
         if svnops.tracked(project):
@@ -503,8 +512,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     def enable_svn(pid):
         """Turn on SVN check-in tracking for a project that is an existing working copy root."""
         project = project_or_404(pid)
-        if engine.busy(pid) or any(t["status"] in LOCKED for t in store.read(project, fresh=True)["tasks"]):
-            raise ValueError("Wait for this project's AI jobs to finish first.")
+        require_idle(project, "Wait for this project's AI jobs to finish first.")
         if svnops.tracked(project):
             return jsonify(project)
         if gitops.tracked(project):
@@ -519,18 +527,13 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         project = project_or_404(pid)
         data = body()
         fields = {}
-        if "git_tracking" in data:
-            if data["git_tracking"] is True:
-                raise ValueError("Use POST /api/projects/<id>/git/enable to turn on git tracking.")
-            if data["git_tracking"] is not False:
-                raise ValueError("git_tracking must be true or false.")
-            fields["git_tracking"] = False
-        if "svn_tracking" in data:
-            if data["svn_tracking"] is True:
-                raise ValueError("Use POST /api/projects/<id>/svn/enable to turn on SVN tracking.")
-            if data["svn_tracking"] is not False:
-                raise ValueError("svn_tracking must be true or false.")
-            fields["svn_tracking"] = False
+        for key, enable, label in (("git_tracking", "git", "git"), ("svn_tracking", "svn", "SVN")):
+            if key in data:  # tracking can only be turned off here
+                if data[key] is True:
+                    raise ValueError(f"Use POST /api/projects/<id>/{enable}/enable to turn on {label} tracking.")
+                if data[key] is not False:
+                    raise ValueError(f"{key} must be true or false.")
+                fields[key] = False
         if not gitops.tracked(project) and any(k in data for k in ("remote_url", "auto_sync", "sync_mode")):
             raise ValueError("Git tracking is off for this project; turn it on first.")
         if "name" in data:
@@ -538,18 +541,18 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
                 raise ValueError("Project name can't be blank.")
             fields["name"] = data["name"].strip()
         if "provider" in data:
-            if not valid_provider(settings.get(), data["provider"]):
-                raise ValueError("Unknown provider.")
+            require_provider(data["provider"])
             fields["provider"] = data["provider"]
         for key in PROJECT_MODEL_KEYS:
             if key in data:
                 fields[key] = model_name(data[key])
         if "plan_limit" in data:
             fields["plan_limit"] = plan_limit(data["plan_limit"])
-        if "rewrite_titles" in data:
-            fields["rewrite_titles"] = bool(data["rewrite_titles"])
-        if "auto_sync" in data:
-            fields["auto_sync"] = bool(data["auto_sync"])
+        for key in ("rewrite_titles", "auto_sync"):
+            if key in data:
+                if not isinstance(data[key], bool):
+                    raise ValueError(f"{key} must be true or false.")
+                fields[key] = data[key]
         if "sync_mode" in data:
             fields["sync_mode"] = sync_mode(data["sync_mode"])
         if "plan_trust" in data:
@@ -642,8 +645,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         message = body().get("message")
         if not isinstance(message, str) or not message.strip():
             raise ValueError("Enter a check-in message.")
-        if engine.busy(pid) or any(t["status"] in LOCKED for t in store.read(project, fresh=True)["tasks"]):
-            raise ValueError("Wait for this project's AI jobs to finish before checking in.")
+        require_idle(project, "Wait for this project's AI jobs to finish before checking in.")
         rev = engine.checkin(project, message.strip() + "\n")
         return jsonify(revision=rev)
 
@@ -653,16 +655,12 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
 
     @app.get("/api/projects/<pid>/remote")
     def get_remote(pid):
-        project = project_or_404(pid)
-        if not gitops.tracked(project):
-            raise ValueError("Git tracking is off for this project.")
+        project = git_project(pid)
         return jsonify(remote_view(project, gitops.remote_status(host_for(project), project["path"])))
 
     @app.put("/api/projects/<pid>/remote")
     def put_remote(pid):
-        project = project_or_404(pid)
-        if not gitops.tracked(project):
-            raise ValueError("Git tracking is off for this project.")
+        project = git_project(pid)
         url = body().get("url") or ""
         if not isinstance(url, str):
             raise ValueError("url must be a string.")
@@ -672,13 +670,10 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
 
     @app.post("/api/projects/<pid>/remote/sync")
     def sync_remote(pid):
-        project = project_or_404(pid)
-        if not gitops.tracked(project):
-            raise ValueError("Git tracking is off for this project.")
+        project = git_project(pid)
         data = body()
         mode = sync_mode(data.get("mode") or project.get("sync_mode") or "ff-only")
-        if engine.busy(pid) or any(t["status"] in LOCKED for t in store.read(project, fresh=True)["tasks"]):
-            raise ValueError("Wait for this project's AI jobs to finish before syncing.")
+        require_idle(project, "Wait for this project's AI jobs to finish before syncing.")
         result = engine.sync(project, mode, push=data.get("push", True) is not False)
         return jsonify(remote_view(project, result))
 
@@ -693,12 +688,14 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         return jsonify(ok=True)
 
     # ---- chat ---------------------------------------------------------------
+    def job_view(job) -> dict:
+        return {"active": job is not None, "output": job.text() if job else "",
+                "events": job.events() if job else [], "current": job.current if job else "",
+                "elapsed": round(job.elapsed()) if job else 0}
+
     def chat_view(pid: str) -> dict:
         chat = engine.chat(pid)
-        job = chat.job
-        return {"messages": list(chat.messages), "active": job is not None,
-                "output": job.text() if job else "", "elapsed": round(job.elapsed()) if job else 0,
-                "events": job.events() if job else [], "current": job.current if job else ""}
+        return {"messages": list(chat.messages), **job_view(chat.job)}
 
     @app.get("/api/projects/<pid>/chat")
     def get_chat(pid):
@@ -745,8 +742,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         if not title:
             raise ValueError("A task needs a title.")
         provider = data.get("provider") or ""
-        if provider and not valid_provider(settings.get(), provider):
-            raise ValueError("Unknown provider.")
+        if provider:
+            require_provider(provider)
         models = {k: model_name(data.get(k)) for k in MODEL_KEYS}
         trust = plan_trust(data.get("plan_trust") or "", allow_blank=True)
         paused = data.get("paused") is True
@@ -758,8 +755,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             try:
                 engine.start_planning(project, task["id"], auto=True)
             except (ValueError, KeyError) as exc:  # creating the task must still succeed
-                with store.edit(project) as doc:
-                    current = find_task(doc, task["id"])
+                with store.edit_task(project, task["id"]) as current:
                     if current is not None:
                         log_event(current, f"Auto-plan could not start: {exc}")
             task = find_task(store.read(project, fresh=True), task["id"]) or task
@@ -777,8 +773,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             if "plan_trust" in data:
                 data["plan_trust"] = plan_trust(data["plan_trust"], allow_blank=True)
             changed = [k for k in EDITABLE if k in data and data[k] != task.get(k, "")]
-            if "provider" in changed and data["provider"] and not valid_provider(settings.get(), data["provider"]):
-                raise ValueError("Unknown provider.")
+            if "provider" in changed and data["provider"]:
+                require_provider(data["provider"])
             if "title" in changed and not str(data["title"]).strip():
                 raise ValueError("A task needs a title.")
             for key in changed:
@@ -872,8 +868,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             if not isinstance(note, str):
                 raise ValueError("note must be a string.")
             note = note.replace("\0", "").strip()[:4000]
-            with store.edit(project) as doc:
-                task = find_task(doc, tid)
+            with store.edit_task(project, tid) as task:
                 if task is None:
                     raise KeyError(tid)
                 queued = transition(pid, task, "approve")
@@ -883,8 +878,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
                 engine.record_approval(project, tid, title, note)
             return queued
         elif action in TRANSITIONS:
-            with store.edit(project) as doc:
-                task = find_task(doc, tid)
+            with store.edit_task(project, tid) as task:
                 if task is None:
                     raise KeyError(tid)
                 return transition(pid, task, action)
@@ -925,8 +919,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         if len(ids) > MAX_BATCH:
             raise ValueError(f"At most {MAX_BATCH} tasks per batch.")
         provider = data.get("provider") or ""
-        if action == "set_provider" and provider and not valid_provider(settings.get(), provider):
-            raise ValueError("Unknown provider.")
+        if action == "set_provider" and provider:
+            require_provider(provider)
         # set_models only touches the keys sent; "" resets a task to the project's model.
         models = {k: model_name(data[k]) for k in MODEL_KEYS if k in data}
         if action == "set_models" and not models:
@@ -989,10 +983,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     @app.get("/api/projects/<pid>/tasks/<int:tid>/live")
     def live(pid, tid):
         job = engine.job(pid, tid)
-        return jsonify(active=job is not None, kind=job.kind if job else None,
-                       output=job.text() if job else "",
-                       events=job.events() if job else [], current=job.current if job else "",
-                       elapsed=round(job.elapsed()) if job else 0)
+        return jsonify(**job_view(job), kind=job.kind if job else None)
 
     @app.get("/api/projects/<pid>/tasks/<int:tid>/changes")
     def task_changes(pid, tid):

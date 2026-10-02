@@ -47,6 +47,20 @@ def _check(res, what: str):
     return res
 
 
+NAME = "git"
+
+
+def hash_files(host, path: str, names: list[str], filters: bool = True) -> dict[str, str]:
+    """``{name: blob hash}`` from ``git hash-object --stdin-paths``; ``{}`` if any hash fails
+    (e.g. a directory), so callers fall back to comparing status only."""
+    if not names:
+        return {}
+    argv = ["git", "hash-object"] + ([] if filters else ["--no-filters"]) + ["--stdin-paths"]
+    res = host.run(argv, cwd=path, input="\n".join(names) + "\n", timeout=300)
+    hashes = res.stdout.split() if res.ok else []
+    return dict(zip(names, hashes)) if len(hashes) == len(names) else {}
+
+
 def tracked(project: dict) -> bool:
     """Whether git tracking is turned on for this project."""
     return project.get("git_tracking") is True
@@ -91,13 +105,7 @@ def dirty_fingerprint(host, path: str) -> dict[str, str]:
         if not name.startswith(".patchgoblin/"):
             status[name] = xy
     present = [name for name, xy in status.items() if "D" not in xy]
-    blobs: dict[str, str] = {}
-    if present:
-        res = host.run(["git", "hash-object", "--stdin-paths"], cwd=path, input="\n".join(present) + "\n",
-                       timeout=300)
-        hashes = res.stdout.split() if res.ok else []
-        if len(hashes) == len(present):  # otherwise (e.g. a submodule path) compare status only
-            blobs = dict(zip(present, hashes))
+    blobs = hash_files(host, path, present)  # empty for e.g. a submodule path: compare status only
     return {name: f"{xy} {blobs.get(name, '')}" for name, xy in status.items()}
 
 

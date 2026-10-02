@@ -9,6 +9,7 @@ import ntpath
 import re
 import xml.etree.ElementTree as ET
 
+from .gitops import hash_files
 from .hosts import HostError
 
 ITEMS = ("modified", "added", "deleted", "unversioned", "missing", "replaced", "conflicted")
@@ -26,6 +27,9 @@ def _check(res, what: str):
         raise HostError(f"svn {what} failed: {(res.stderr or res.stdout).strip()} "
                         "(PatchGoblin runs svn non-interactively, so credentials must already be cached)")
     return res
+
+
+NAME = "svn"
 
 
 def tracked(project: dict) -> bool:
@@ -85,13 +89,7 @@ def dirty_fingerprint(host, path: str) -> dict[str, str]:
     status = status_entries(host, path)
     present = [name for name, item in status.items()
                if item not in ("deleted", "missing") and not host.is_dir(host.join(path, name))]
-    blobs: dict[str, str] = {}
-    if present:
-        res = host.run(["git", "hash-object", "--no-filters", "--stdin-paths"], cwd=path,
-                       input="\n".join(present) + "\n", timeout=300)
-        hashes = res.stdout.split() if res.ok else []
-        if len(hashes) == len(present):  # otherwise (e.g. a directory) compare status only
-            blobs = dict(zip(present, hashes))
+    blobs = hash_files(host, path, present, filters=False)
     return {name: f"{item} {blobs.get(name, '')}" for name, item in status.items()}
 
 

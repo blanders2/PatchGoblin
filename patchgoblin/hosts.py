@@ -171,29 +171,29 @@ class LocalHost:
         dirs.sort(key=lambda d: d["name"].lower())
         return {"path": path, "parent": parent, "sep": os.sep, "dirs": dirs}
 
-    def read_text(self, path: str) -> Optional[str]:
+    @staticmethod
+    def _read(path: str, mode: str, **kw):
         try:
-            with open(path, "r", encoding="utf-8") as fh:
+            with open(path, mode, **kw) as fh:
                 return fh.read()
         except FileNotFoundError:
             return None
         except OSError as exc:
             raise HostError(f"Could not read {path}: {exc}") from exc
+
+    def read_text(self, path: str) -> Optional[str]:
+        return self._read(path, "r", encoding="utf-8")
 
     def read_bytes(self, path: str) -> Optional[bytes]:
-        try:
-            with open(path, "rb") as fh:
-                return fh.read()
-        except FileNotFoundError:
-            return None
-        except OSError as exc:
-            raise HostError(f"Could not read {path}: {exc}") from exc
+        return self._read(path, "rb")
 
-    def write_bytes(self, path: str, data: bytes) -> None:
+    @staticmethod
+    def _write(path: str, data, mode: str, **kw) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = f"{path}.{os.getpid()}.tmp"
-        with open(tmp, "wb") as fh:
+        with open(tmp, mode, **kw) as fh:
             fh.write(data)
+        # Sync clients and virus scanners briefly hold files open on Windows.
         for attempt in range(10):
             try:
                 os.replace(tmp, path)
@@ -202,6 +202,9 @@ class LocalHost:
                 if attempt == 9:
                     raise
                 time.sleep(0.1 * (attempt + 1))
+
+    def write_bytes(self, path: str, data: bytes) -> None:
+        self._write(path, data, "wb")
 
     def list_dir(self, path: str) -> list[str]:
         """Names of the entries in ``path``; [] if it is not a directory."""
@@ -213,19 +216,7 @@ class LocalHost:
             raise HostError(f"Could not list {path}: {exc}") from exc
 
     def write_text(self, path: str, text: str) -> None:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = f"{path}.{os.getpid()}.tmp"
-        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(text)
-        # Sync clients and virus scanners briefly hold files open on Windows.
-        for attempt in range(10):
-            try:
-                os.replace(tmp, path)
-                return
-            except PermissionError:
-                if attempt == 9:
-                    raise
-                time.sleep(0.1 * (attempt + 1))
+        self._write(path, text, "w", encoding="utf-8", newline="\n")
 
     def run(self, argv: list[str], cwd: str, input: Optional[str] = None,
             timeout: Optional[float] = None, on_output: OutputFn = None,
@@ -248,6 +239,7 @@ class SSHHost:
 
     kind = "ssh"
     os = "posix"
+    noop_script = "true"
 
     def __init__(self, target: str, port: Optional[int] = None):
         target = (target or "").strip()
@@ -260,12 +252,16 @@ class SSHHost:
     def _argv(self, remote_command: str) -> list[str]:
         argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
                 "-o", "ServerAliveInterval=30"]
-        if self.port:
-            argv += ["-p", str(self.port)]
-        return argv + [self.target, remote_command]
+        return argv + self._port_args() + [self.target, remote_command]
 
     def _exec(self, script: str, **kw) -> Result:
         return communicate(self._argv(script), **kw)
+
+    def _fail(self, res: Result, verb: str, path: str) -> HostError:
+        return HostError(f"Could not {verb} {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+
+    def _port_args(self) -> list[str]:
+        return ["-p", str(self.port)] if self.port else []
 
     @staticmethod
     def _login(script: str) -> str:
@@ -282,7 +278,7 @@ class SSHHost:
         return posixpath.normpath(path)
 
     def check(self) -> None:
-        res = self._exec("true", timeout=30)
+        res = self._exec(self.noop_script, timeout=30)
         if not res.ok:
             raise HostError(f"SSH connection to {self.label} failed: {res.stderr.strip() or res.returncode}")
 
@@ -308,7 +304,7 @@ class SSHHost:
         if res.returncode == 45:
             raise HostError(f"Not a directory (or no access): {path}")
         if not res.ok:
-            raise HostError(f"Could not list {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+            raise self._fail(res, "list", path)
         lines = res.stdout.splitlines()
         cwd = lines[0] if lines else path
         names = sorted((ln[2:] for ln in lines[1:] if ln.startswith("./")), key=str.lower)
@@ -321,14 +317,14 @@ class SSHHost:
         if res.returncode == 44:
             return None
         if not res.ok:
-            raise HostError(f"Could not read {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+            raise self._fail(res, "read", path)
         return res.stdout
 
     def list_dir(self, path: str) -> list[str]:
         q = shlex.quote(path)
         res = self._exec(f"if [ -d {q} ]; then ls -1A {q}; fi", timeout=60)
         if not res.ok:
-            raise HostError(f"Could not list {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+            raise self._fail(res, "list", path)
         return sorted(line for line in res.stdout.splitlines() if line)
 
     def write_text(self, path: str, text: str) -> None:
@@ -336,7 +332,7 @@ class SSHHost:
         d = shlex.quote(posixpath.dirname(path))
         res = self._exec(f"mkdir -p {d} && cat > {tmp} && mv -f {tmp} {q}", input=text, timeout=60)
         if not res.ok:
-            raise HostError(f"Could not write {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+            raise self._fail(res, "write", path)
 
     def read_bytes(self, path: str) -> Optional[bytes]:
         q = shlex.quote(path)
@@ -344,7 +340,7 @@ class SSHHost:
         if res.returncode == 44:
             return None
         if not res.ok:
-            raise HostError(f"Could not read {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+            raise self._fail(res, "read", path)
         return base64.b64decode(res.stdout)
 
     def write_bytes(self, path: str, data: bytes) -> None:
@@ -353,7 +349,7 @@ class SSHHost:
         res = self._exec(f"mkdir -p {d} && base64 -d > {tmp} && mv -f {tmp} {q}",
                          input=base64.b64encode(data).decode("ascii"), timeout=120)
         if not res.ok:
-            raise HostError(f"Could not write {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+            raise self._fail(res, "write", path)
 
     def run(self, argv: list[str], cwd: str, input: Optional[str] = None,
             timeout: Optional[float] = None, on_output: OutputFn = None,
@@ -372,10 +368,7 @@ class SSHHost:
 
     def shell_argv(self, path: str) -> list[str]:
         """ssh command for an interactive login shell in ``path`` (for a terminal window)."""
-        argv = ["ssh", "-t"]
-        if self.port:
-            argv += ["-p", str(self.port)]
-        return argv + [self.target, f'cd {shlex.quote(path)} && exec "${{SHELL:-/bin/sh}}" -l']
+        return ["ssh", "-t", *self._port_args(), self.target, f'cd {shlex.quote(path)} && exec "${{SHELL:-/bin/sh}}" -l']
 
     def dir_status(self, path: str, timeout: Optional[float] = None) -> Result:
         """Result whose exit code is 0 when ``path`` is a directory on the host."""
@@ -409,6 +402,7 @@ class WindowsSSHHost(SSHHost):
 
     os = "windows"
     lists_drives = True
+    noop_script = "exit 0"
 
     def _exec(self, script: str, **kw) -> Result:
         command = _ps_command(_PS_PREAMBLE + script)
@@ -425,11 +419,6 @@ class WindowsSSHHost(SSHHost):
         if not _WIN_ABS_RE.match(path):
             raise HostError("Use an absolute Windows path on the remote host, e.g. C:\\Users\\me\\project.")
         return ntpath.normpath(path)
-
-    def check(self) -> None:
-        res = self._exec("exit 0", timeout=30)
-        if not res.ok:
-            raise HostError(f"SSH connection to {self.label} failed: {res.stderr.strip() or res.returncode}")
 
     def dir_status(self, path: str, timeout: Optional[float] = None) -> Result:
         return self._exec(f"if (Test-Path -LiteralPath {_ps_quote(path)} -PathType Container) "
@@ -454,7 +443,7 @@ class WindowsSSHHost(SSHHost):
         if not path:
             res = self._exec("Get-PSDrive -PSProvider FileSystem | ForEach-Object { $_.Root }", timeout=60)
             if not res.ok:
-                raise HostError(f"Could not list drives on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+                raise self._fail(res, "list", "drives")
             drives = [ln.strip() for ln in res.stdout.splitlines() if ln.strip()]
             return {"path": "", "parent": None, "sep": "\\",
                     "dirs": [{"name": d, "path": d} for d in drives]}
@@ -468,7 +457,7 @@ class WindowsSSHHost(SSHHost):
         if res.returncode == 45:
             raise HostError(f"Not a directory (or no access): {path}")
         if not res.ok:
-            raise HostError(f"Could not list {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+            raise self._fail(res, "list", path)
         lines = [ln.rstrip("\r") for ln in res.stdout.splitlines()]
         cwd = lines[0] if lines and lines[0] else path
         names = sorted((n for n in lines[1:] if n), key=str.lower)
@@ -487,7 +476,7 @@ class WindowsSSHHost(SSHHost):
         if res.returncode == 44:
             return None
         if not res.ok:
-            raise HostError(f"Could not read {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+            raise self._fail(res, "read", path)
         return res.stdout
 
     def list_dir(self, path: str) -> list[str]:
@@ -495,7 +484,7 @@ class WindowsSSHHost(SSHHost):
         res = self._exec(f"if (Test-Path -LiteralPath {q} -PathType Container) "
                          f"{{Get-ChildItem -LiteralPath {q} -Force -Name}}", timeout=60)
         if not res.ok:
-            raise HostError(f"Could not list {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+            raise self._fail(res, "list", path)
         return sorted(line.rstrip("\r") for line in res.stdout.splitlines() if line.strip())
 
     def write_text(self, path: str, text: str) -> None:
@@ -507,7 +496,7 @@ class WindowsSSHHost(SSHHost):
                   f"Move-Item -Force -LiteralPath {tmp} -Destination {q}")
         res = self._exec(script, input=text, timeout=60)
         if not res.ok:
-            raise HostError(f"Could not write {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+            raise self._fail(res, "write", path)
 
     def read_bytes(self, path: str) -> Optional[bytes]:
         q = _ps_quote(path)
@@ -517,7 +506,7 @@ class WindowsSSHHost(SSHHost):
         if res.returncode == 44:
             return None
         if not res.ok:
-            raise HostError(f"Could not read {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+            raise self._fail(res, "read", path)
         return base64.b64decode(res.stdout.strip())
 
     def write_bytes(self, path: str, data: bytes) -> None:
@@ -529,7 +518,7 @@ class WindowsSSHHost(SSHHost):
                   f"Move-Item -Force -LiteralPath {tmp} -Destination {q}")
         res = self._exec(script, input=base64.b64encode(data).decode("ascii"), timeout=120)
         if not res.ok:
-            raise HostError(f"Could not write {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
+            raise self._fail(res, "write", path)
 
     def run(self, argv: list[str], cwd: str, input: Optional[str] = None,
             timeout: Optional[float] = None, on_output: OutputFn = None,
@@ -547,12 +536,9 @@ class WindowsSSHHost(SSHHost):
         return self._exec(script, timeout=timeout, on_output=on_output, on_start=on_start)
 
     def shell_argv(self, path: str) -> list[str]:
-        argv = ["ssh", "-t"]
-        if self.port:
-            argv += ["-p", str(self.port)]
         script = f"Set-Location -LiteralPath {_ps_quote(path)}"
         encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-        return argv + [self.target, f"powershell.exe -NoLogo -NoExit -EncodedCommand {encoded}"]
+        return ["ssh", "-t", *self._port_args(), self.target, f"powershell.exe -NoLogo -NoExit -EncodedCommand {encoded}"]
 
 
 _SSH_OS: dict[tuple, str] = {}
@@ -624,12 +610,19 @@ def terminal_command(host, path: str, platform: str = sys.platform,
     raise HostError("No terminal emulator found (tried " + ", ".join(n for n, _ in _LINUX_TERMINALS) + ").")
 
 
-def open_terminal(project: dict) -> None:
-    """Open a terminal window on this computer in the project's directory."""
+def _local_dir_guard(project: dict) -> tuple:
+    """``(host, path)`` for a project about to be opened in a local window; a local project's
+    directory must exist."""
     host = host_for(project)
     path = project["path"]
     if host.kind == "local" and not host.is_dir(path):
         raise HostError(f"Directory does not exist: {path}")
+    return host, path
+
+
+def open_terminal(project: dict) -> None:
+    """Open a terminal window on this computer in the project's directory."""
+    host, path = _local_dir_guard(project)
     argv, cwd = terminal_command(host, path)
     try:
         _spawn(argv, cwd, "CREATE_NEW_CONSOLE")
@@ -675,10 +668,7 @@ def vscode_command(host, path: str, platform: str = sys.platform,
 
 def open_vscode(project: dict) -> None:
     """Open the project's directory in VS Code on this computer."""
-    host = host_for(project)
-    path = project["path"]
-    if host.kind == "local" and not host.is_dir(path):
-        raise HostError(f"Directory does not exist: {path}")
+    host, path = _local_dir_guard(project)
     argv = vscode_command(host, path)
     try:
         _spawn(argv, None, "CREATE_NO_WINDOW")
