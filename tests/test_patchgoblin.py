@@ -338,6 +338,8 @@ class ProjectTests(AppTestCase):
 
     def test_windows_ssh_host(self):
         host = WindowsSSHHost("me@win", 2222)
+        hosts_mod._WIN_SHELL[("me@win", 2222)] = "cmd"
+        self.addCleanup(hosts_mod._WIN_SHELL.clear)
         with mock.patch("patchgoblin.hosts.communicate", return_value=Result(0, "", "")) as comm:
             host.run(["claude", "-p", "it's"], cwd=r"C:\my app", env={"A": "1"})
             script = self._decode_ps(comm.call_args[0][0])
@@ -366,6 +368,44 @@ class ProjectTests(AppTestCase):
         self.assertEqual(argv[:2], ["ssh", "-t"])
         self.assertIn("powershell.exe -NoLogo -NoExit -EncodedCommand ", argv[-1])
 
+    def test_windows_ssh_powershell_default_shell(self):
+        self.addCleanup(hosts_mod._WIN_SHELL.clear)
+        hosts_mod._WIN_SHELL.clear()
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(0, "Windows_NT\r\n", "")):
+            self.assertEqual(hosts_mod.detect_windows_shell("a@cmd"), "cmd")
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(0, "%OS%\r\n", "")):
+            self.assertEqual(hosts_mod.detect_windows_shell("a@ps"), "powershell")
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(255, "", "refused")):
+            with self.assertRaises(HostError):
+                hosts_mod.detect_windows_shell("a@down")
+        self.assertNotIn(("a@down", None), hosts_mod._WIN_SHELL)
+
+        mark = hosts_mod._PS_MARK
+        cmd_host, ps_host = WindowsSSHHost("a@cmd"), WindowsSSHHost("a@ps")
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(0, "", "")) as comm:
+            cmd_host.check()
+            self.assertFalse(comm.call_args[0][0][-1].endswith("$LASTEXITCODE"))
+            ps_host.check()
+            # PowerShell collapses the nested powershell's exit code to 0/1 unless it is passed on.
+            self.assertTrue(comm.call_args[0][0][-1].endswith("; exit $LASTEXITCODE"))
+        # Output a PowerShell profile prints before the script starts is dropped.
+        noisy = Result(0, f"Welcome!\r\nLoading profile...\r\n{mark}\r\nC:\\Users\\me", "")
+        with mock.patch("patchgoblin.hosts.communicate", return_value=noisy):
+            self.assertEqual(ps_host.home(), r"C:\Users\me")
+        listing = Result(0, f"profile\n{mark}\nC:\\a\nb\n", "")
+        with mock.patch("patchgoblin.hosts.communicate", return_value=listing):
+            self.assertEqual(ps_host.list_dirs(r"C:\a")["path"], r"C:\a")
+
+        def streamed(argv, **kw):
+            for line in ("profile line\r\n", f"{mark}\r\n", '{"type":"x"}\n'):
+                kw["on_output"](line)
+            return Result(0, f"profile line\r\n{mark}\r\n" + '{"type":"x"}\n', "")
+        seen = []
+        with mock.patch("patchgoblin.hosts.communicate", side_effect=streamed):
+            res = ps_host.run(["claude"], cwd=r"C:\p", on_output=seen.append)
+        self.assertEqual(seen, ['{"type":"x"}\n'])
+        self.assertEqual(res.stdout, '{"type":"x"}\n')
+
     def test_detect_ssh_os_and_host_for(self):
         hosts_mod._SSH_OS.clear()
         with mock.patch("patchgoblin.hosts.communicate", return_value=Result(0, "Linux\n", "")):
@@ -377,6 +417,10 @@ class ProjectTests(AppTestCase):
             with self.assertRaises(HostError):
                 detect_ssh_os("a@down")
         self.assertNotIn(("a@down", None), hosts_mod._SSH_OS)
+        # Git for Windows' uname on PATH must not make a Windows host look POSIX.
+        with mock.patch("patchgoblin.hosts.communicate",
+                        side_effect=[Result(0, "MINGW64_NT-10.0-26200\n", ""), Result(0, "Win32NT\r\n", "")]):
+            self.assertEqual(detect_ssh_os("a@gitwin"), "windows")
         with mock.patch("patchgoblin.hosts.communicate") as comm:
             h = host_for({"location": "ssh", "ssh_target": "a@x", "ssh_os": "windows"})
             self.assertIsInstance(h, WindowsSSHHost)

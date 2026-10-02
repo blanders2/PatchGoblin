@@ -379,15 +379,48 @@ def _ps_quote(s: str) -> str:
     return "'" + str(s).replace("'", "''") + "'"
 
 
+# Printed before a script's own output: a PowerShell default shell loads the user's profile
+# first, and anything the profile prints must not be mistaken for the script's output.
+_PS_MARK = "##PATCHGOBLIN##"
 _PS_PREAMBLE = ("$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; "
-                "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); ")
+                "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); "
+                f'[Console]::Out.Write("{_PS_MARK}`n"); ')
 _PS_PREFIX = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
+# A PowerShell default shell runs our line as `powershell -c <line>`, which turns the nested
+# powershell's exit code into 0/1; this passes it on. cmd must not get it (it would reach
+# powershell.exe as more base64).
+_PS_EXIT_SUFFIX = "; exit $LASTEXITCODE"
 _CMD_LIMIT = 8000  # cmd.exe caps command lines at 8191 characters
 
 
 def _ps_command(script: str) -> str:
-    """One remote command line that runs ``script`` identically under cmd and PowerShell."""
+    """One remote command line that runs ``script`` under either default shell (see _PS_EXIT_SUFFIX)."""
     return _PS_PREFIX + base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+
+
+def _after_mark(text: str) -> Optional[str]:
+    """The text after the preamble's marker line, or None if the marker isn't in ``text``."""
+    at = text.find(_PS_MARK)
+    if at < 0:
+        return None
+    rest = text[at + len(_PS_MARK):]
+    return rest[2:] if rest.startswith("\r\n") else rest[1:] if rest.startswith("\n") else rest
+
+
+def _skip_to_mark(on_output: OutputFn) -> OutputFn:
+    """Wrap a streaming callback so nothing printed before the marker (profile output) reaches it."""
+    seen = False
+
+    def forward(text: str) -> None:
+        nonlocal seen
+        if not seen:
+            rest = _after_mark(text)
+            if rest is None:
+                return
+            seen, text = True, rest
+        if text:
+            on_output(text)
+    return forward
 
 
 _WIN_ABS_RE = re.compile(r"^[A-Za-z]:\\")
@@ -406,10 +439,18 @@ class WindowsSSHHost(SSHHost):
 
     def _exec(self, script: str, **kw) -> Result:
         command = _ps_command(_PS_PREAMBLE + script)
+        if detect_windows_shell(self.target, self.port) != "cmd":
+            command += _PS_EXIT_SUFFIX
         if len(command) > _CMD_LIMIT:
             raise HostError("Command is too long for a Windows SSH host "
                             "(pass the prompt on stdin instead of as an argument).")
-        return communicate(self._argv(command), **kw)
+        if kw.get("on_output"):
+            kw["on_output"] = _skip_to_mark(kw["on_output"])
+        res = communicate(self._argv(command), **kw)
+        rest = _after_mark(res.stdout)
+        if rest is not None:
+            res.stdout = rest
+        return res
 
     def join(self, *parts: str) -> str:
         return ntpath.join(*parts)
@@ -557,7 +598,8 @@ def detect_ssh_os(target: str, port: Optional[int] = None) -> str:
         raise HostError(f"SSH connection to {probe_host.label} failed: "
                         f"{'timed out' if res.timed_out else res.stderr.strip() or res.returncode}")
     found = None
-    if res.ok:
+    # Git for Windows / MSYS put a uname on PATH that reports e.g. MINGW64_NT-10.0.
+    if res.ok and not re.match(r"\s*(MINGW|MSYS|CYGWIN)", res.stdout, re.IGNORECASE):
         found = "posix"
     else:
         res = communicate(probe_host._argv(_ps_command("[Environment]::OSVersion.Platform")), timeout=30)
@@ -567,6 +609,28 @@ def detect_ssh_os(target: str, port: Optional[int] = None) -> str:
         raise HostError(f"Could not detect the remote OS on {probe_host.label}.")
     with _SSH_OS_LOCK:
         _SSH_OS[key] = found
+    return found
+
+
+_WIN_SHELL: dict[tuple, str] = {}
+
+
+def detect_windows_shell(target: str, port: Optional[int] = None) -> str:
+    """``"cmd"`` or ``"powershell"``: the Windows OpenSSH server's DefaultShell (anything that
+    isn't cmd is treated like PowerShell). Successes are cached, failures are not."""
+    key = (target, port or None)
+    with _SSH_OS_LOCK:
+        if key in _WIN_SHELL:
+            return _WIN_SHELL[key]
+    probe_host = SSHHost(target, port)
+    # cmd expands %OS% to Windows_NT; PowerShell prints it literally.
+    res = communicate(probe_host._argv("echo %OS%"), timeout=30)
+    if res.timed_out or res.returncode == 255:
+        raise HostError(f"SSH connection to {probe_host.label} failed: "
+                        f"{'timed out' if res.timed_out else res.stderr.strip() or res.returncode}")
+    found = "cmd" if "Windows_NT" in res.stdout else "powershell"
+    with _SSH_OS_LOCK:
+        _WIN_SHELL[key] = found
     return found
 
 
