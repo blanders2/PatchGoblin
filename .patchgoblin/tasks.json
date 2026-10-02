@@ -1817,13 +1817,13 @@
       "title": "Give failed runs their own Failed tab, shown only while it has tasks",
       "description": "",
       "plan": "The backend already has a separate `failed` status (`store.py:21`; `engine.py` sets it on run failure or interruption). Failed runs only end up under Finished because the frontend maps `failed: \"finished\"` in `COLUMN_OF` (`static/app.js:12`). So this is a frontend change. Add a \"Failed\" queue tab and column, map `failed` to it, and hide the tab whenever no task is in the `failed` status. If the user is on the Failed tab and it empties (for example, after re-queueing the last failed task), switch them to Finished. This switch must wait until the current project's tasks have actually loaded, so the initial empty task list doesn't push a remembered `pg.tab = \"failed\"` away.\n\n1. **`patchgoblin/templates/index.html`** (lines 86 and 111): add `(\"failed\", \"Failed\")` to the tab list and `\"failed\"` to the column list. Put it right after `finished` and before `paused`. Render the failed tab with `hidden` at first so it doesn't flash before tasks load.\n2. **`patchgoblin/static/app.js`**:\n   - `COLUMN_OF` (line 12): change `failed: \"finished\"` to `failed: \"failed\"`. `validTab` will then accept `\"failed\"` automatically.\n   - `state`: add `tasksLoaded: false`. Set it to `false` where `state.tasks = []` on project switch (~line 296), and to `true` in `loadTasks` after `state.tasks = data.tasks` (~line 569). Also set it to `true` in `doBatch` after it assigns `state.tasks`.\n   - `sortTasks`: sort the `failed` column newest first, the same way as `finished`: `by(\"finished_at\", -1)`.\n   - `renderBoard`: before the column loop, compute `const hasFailed = state.tasks.some(t => t.status === \"failed\")`. If `state.tab === \"failed\" && !hasFailed && state.tasksLoaded`, set `state.tab = \"finished\"`, save it with `localStorageSet(\"pg.tab\", \u2026)`, and call `clearSelection(false)`. Inside the loop, set `tab.hidden = col === \"failed\" && !hasFailed`. Leave the tab visible while `!state.tasksLoaded` and `state.tab === \"failed\"`, so a remembered tab survives the load.\n   - `onTabKeydown` (line 629): build the `tabs` list from visible tabs only: `$$(\".queue-tab\").filter(b => !b.hidden)`.\n3. **`patchgoblin/static/app.css`**: add `.queue-tab[hidden] { display: none; }` next to the `.queue-tab` rules. `.queue-tab` sets `display: flex`, which overrides the `hidden` attribute, so without this rule the tab would never hide. Optionally, colour the failed tab's count bubble red with `.queue-tab[data-col=\"failed\"] .count`, using the existing failed badge colours if there are variables for them.\n4. **`README.md`**: in the states section, add that failed tasks appear in their own **Failed** tab, which only shows while there is a failed task. Lines 91\u201392 talk about Finished; check that they don't suggest failed tasks live there.\n5. **`tests/test_patchgoblin.py`**: in `test_index_has_queue_tabs` (line 313), add `\"failed\"` to the list of tabs and columns. The tab markup now has a `hidden` attribute, so make sure the attribute order still matches the asserted substring `role=\"tab\" id=\"tab-failed\" data-col=\"failed\"` (put `hidden` after the asserted part).\n\n**Verification**\n- `python -m pytest tests/test_patchgoblin.py` passes.\n- Manual check in the app:\n  - With no failed tasks, there is no Failed tab, and arrow keys move between the visible tabs only.\n  - Make a run fail (for example, cancel a running task). The Failed tab appears with a count, and the task is there, not in Finished.\n  - Re-queue or mark the task planned. The tab disappears, and if it was the active tab, the board switches to Finished.\n  - Reload the page while on the Failed tab with failed tasks present. It stays on Failed.\n  - Switch to a project with no failed tasks while on Failed. It falls back to Finished.\n  - Batch actions (Queue, Plan, Pause) on the Failed tab still work.\n\n## Assumptions\n- No backend or data changes: `failed` is already its own status, so existing failed tasks move to the new tab with no migration.\n- The Failed tab goes between Finished and Paused.\n- When the Failed tab empties while active, the board falls back to Finished, the neighbouring tab.\n- The tab is hidden only when there are no failed tasks; tasks with `error` set but another status (the \"last attempt failed\" chip) stay where they are.\n- Sorting matches Finished: most recently finished first.\n\n## Risks\n- The `display: flex` versus `[hidden]` CSS conflict: if the rule from step 3 is missing, the tab never hides.\n- The fallback running too early: `renderBoard` runs on project switch with `state.tasks = []` before tasks load. Without the `tasksLoaded` guard, a remembered Failed tab would always be lost.\n- Batch selection is scoped to the current tab. When the board falls back from Failed, clear the selection so ticked IDs don't carry over.\n- If any code still assumes failed tasks are in `finished` (for example, \"send back\" or review flows that check `state.tab`), it needs checking. Grepping for `\"finished\"` in `app.js` currently finds only `COLUMN_OF` and `sortTasks`.\n\n## Questions for you\nNone.",
-      "status": "review",
+      "status": "done",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "created_at": "2026-10-01T20:31:21+00:00",
-      "updated_at": "2026-10-01T20:59:50+00:00",
+      "updated_at": "2026-10-02T08:41:54+00:00",
       "queued_at": "2026-10-01T20:56:10+00:00",
       "started_at": "2026-10-01T20:56:10+00:00",
       "finished_at": "2026-10-01T20:59:44+00:00",
@@ -1863,9 +1863,14 @@
         {
           "at": "2026-10-01T20:59:50+00:00",
           "event": "Committed 63fb59e447"
+        },
+        {
+          "at": "2026-10-02T08:41:54+00:00",
+          "event": "Approved by engineer"
         }
       ],
-      "prev_status": "unplanned"
+      "prev_status": "unplanned",
+      "approval_note": ""
     },
     {
       "id": 33,
@@ -2357,14 +2362,14 @@
       "title": "Fix drawer-discard, tab-dot, stale-poll and small frontend bugs (Cleanup T1)",
       "description": "Fix these bugs in patchgoblin/static/app.js, app.css and templates/index.html:\n1. selectProject (~app.js:327) and removeProject (~558) ignore closeDrawer() returning false. If the user cancels the \"discard changes?\" prompt, the project still switches and renderDrawer then drops the kept edits. Stop the switch or remove when closeDrawer() returns false.\n2. CSS class clash: the queue-tab pulse dot (index.html ~90) uses class `activity`, the same as the activity feed <ol> (app.css ~492), so it inherits padding: 8px and renders ~16px instead of 7px. Rename the dot's class to `tab-activity` and update its CSS/JS references.\n3. loadTasks (~655, polled every 3 s at ~2163) has no in-flight guard, so a slow (SSH) response can overwrite a newer doAction/doBatch result. Add a guard like loadReachability's (~246-256): skip overlapping polls, and ignore a response older than the latest state change.\n4. Small ones:\n   - renderCard (~822) compares t.provider !== p.provider without the `|| \"claude\"` fallback used elsewhere.\n   - pollLive.userTab (~1613) is never reset when a different task opens, so the Activity/Raw tab stops auto-selecting.\n   - loadChat (~1550) toasts on every failed 1.5 s poll; stay quiet like loadReachability (show it once, or in the chat pane).\n   - Add .live-dot's animation to the prefers-reduced-motion rules (app.css ~485).\n\nRules: this is part of a cleanup series (T1-T6). Behaviour must not change except for the listed bug fixes. Line numbers below are approximate (from a review at commit 1d1de27); find the real code before editing. Run `python -m unittest discover tests` before finishing; it must stay green. Don't touch unrelated code.",
       "plan": "**Summary:** All changes go in `patchgoblin/static/app.js`, `app.css` and `templates/index.html`, and each one is small. Project switch and project removal will stop when `closeDrawer()` returns false. The queue-tab dot gets its own class so it no longer picks up the activity list's styles. `loadTasks` gets two protections. First, an in-flight guard modelled on `loadReachability`: a request made meanwhile runs once after the current one finishes. Unlike `loadReachability`, it returns a promise, so `await loadTasks()` in `selectProject` still waits for fresh data. Second, a `tasksVersion` counter that every local task change increments. A poll response that started before the latest change is thrown away and fetched again. The four small fixes are each one or two lines. Nothing else changes.\n\n## Steps\n\n1. **`selectProject` (app.js ~329):** change `if (pid !== state.pid) closeDrawer();` to `if (pid !== state.pid && !closeDrawer()) return;`. Keep the settings check before it and `clearSelection` after it, so the order is unchanged.\n2. **`removeProject` (app.js ~555):** after the `confirm(...)` and before `api(\"DELETE\", \u2026)`, add `if (!closeDrawer()) return;`. Remove the later `closeDrawer();` call inside the `try`. The project is then never deleted on the server while the user keeps the drawer edits.\n3. **Tab dot class:**\n   - `templates/index.html` ~90: change `<span class=\"activity\" hidden>` to `<span class=\"tab-activity\" hidden>`.\n   - `app.css` ~239, ~243: change `.queue-tab .activity` to `.queue-tab .tab-activity`.\n   - `app.css` ~323 (the reduced-motion rule): make the same rename there.\n   - `app.js` `renderBoard` ~718: change `$(\".activity\", tab)` to `$(\".tab-activity\", tab)`.\n   - Leave `#d-activity` and `#c-activity` (`<ol class=\"activity\">`) and the `.activity` rules at ~492 alone.\n4. **`loadTasks` guard (app.js ~660):**\n   - Add module state `let tasksJob = null, tasksAgain = false, tasksVersion = 0;` and a helper `const markTasksChanged = () => { tasksVersion++; };`.\n   - Move the current body into `fetchTasksOnce()`. It reads `const version = tasksVersion` before the request. After the response, it already returns early when `pid !== state.pid`; it should also return when `version !== tasksVersion`, after setting `tasksAgain = true` so a fresh fetch follows.\n   - `loadTasks()`: if `tasksJob` is set, set `tasksAgain = true` and return `tasksJob`. Otherwise set `tasksJob` to an async loop that runs `do { tasksAgain = false; await fetchTasksOnce(); } while (tasksAgain)` and clears `tasksJob` in a `finally`, then return `tasksJob`.\n   - Call `markTasksChanged()` wherever local code applies a task change from the server:\n     - `doAction` (after `Object.assign`)\n     - `doBatch` (after `state.tasks = data.tasks`)\n     - `saveTask`\n     - `approveFromCard`\n     - `createTask` (after `push`)\n     - `deleteTask` (after `filter`)\n   - Leave the `setInterval` at ~2169 and the other `loadTasks()` callers as they are.\n5. **`renderCard` (~827):** change the check to `t.provider && t.provider !== (p.provider || \"claude\")`.\n6. **`pollLive` (~1514):** inside the `if (pollLive.tabFor !== t.id)` branch, add `pollLive.userTab = false;` so each newly opened task starts with auto-selection.\n7. **`loadChat` (~1555):**\n   - Change the catch to `catch (e) { if (!chat.errorShown) toast(e.message, true); chat.errorShown = true; }`.\n   - Set `chat.errorShown = false` after a successful fetch.\n   - Add `errorShown: false` to the `chat` object (~1532).\n   - `chatRequest` keeps toasting, because those are user actions.\n8. **Reduced motion (app.css ~485\u2013487):** after the `@keyframes live-pulse` line, add `@media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }`. This follows the one-line style at ~179.\n\n## Verification\n- Run `python -m unittest discover tests`; it must stay green. No test refers to the `.activity` class.\n- `grep -n '\"activity\"\\|\\.activity' patchgoblin/static/app.js patchgoblin/static/app.css` should show only the feed-list uses (`#d-activity`, `#c-activity`, the `.activity` rules from ~492).\n- Manual checks:\n  - Edit a task in the drawer, click another project, choose Cancel. The project and the edits stay.\n  - Do the same from Settings \u2192 Remove. The project is not removed.\n  - The tab dot measures 7\u00d77 px in devtools.\n  - Throttle the network, click Approve while a poll is in flight. The card does not jump back.\n  - Open task A, click Raw, then open running task B. B's tab is chosen automatically again.\n  - Stop the server with chat open. Only one toast appears.\n  - Turn on reduced motion. The live dot stops pulsing.\n\n## Assumptions\n- In `removeProject`, the drawer is closed after the remove confirmation and before the DELETE request. If the delete fails, the drawer stays closed, which is acceptable.\n- In `selectProject`, the settings check stays ahead of the drawer check. If the user leaves settings and then cancels the drawer prompt, settings stays closed and the project does not switch.\n- A stale `loadTasks` response is dropped and fetched again straight away instead of waiting for the next 3 s tick. This keeps `pollLive`'s \"job finished \u2192 `loadTasks()`\" refresh reliable.\n- The version counter is incremented when a change's response is applied, not when its request is sent. That is enough to discard polls that overlap the change.\n- The chat error toast is shown once per run of failures and allowed again after a successful load. There is no new chat-pane error element, to keep the change small.\n\n## Risks\n- `selectProject` and `loadProjects` `await loadTasks()`. The guarded version must return a promise that settles only after any queued re-fetch. Otherwise a project switch could finish with an empty board until the next poll.\n- When a poll for the old project is in flight during a switch, the existing `pid !== state.pid` check discards it. The queued re-run must then use the current `state.pid`, which it does because `fetchTasksOnce` reads it fresh each time.\n- If a local change is missed when adding `markTasksChanged()`, the stale-response bug stays for that path. Grep for `state.tasks =`, `state.tasks.push` and `Object.assign(t` to find them all.\n- `closeDrawer()` calls `renderBoard()` and can return early. Make sure the new early returns don't skip any code that must run.\n\n## Questions for you\nNone.",
-      "status": "review",
+      "status": "done",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-01T21:39:22+00:00",
-      "updated_at": "2026-10-02T01:08:01+00:00",
+      "updated_at": "2026-10-02T08:41:51+00:00",
       "queued_at": "2026-10-02T01:02:15+00:00",
       "started_at": "2026-10-02T01:02:15+00:00",
       "finished_at": "2026-10-02T01:07:55+00:00",
@@ -2410,6 +2415,10 @@
         {
           "at": "2026-10-02T01:08:01+00:00",
           "event": "Committed d47ecac6aa"
+        },
+        {
+          "at": "2026-10-02T08:41:51+00:00",
+          "event": "Approved by engineer"
         }
       ],
       "prev_status": "unplanned"
@@ -2419,14 +2428,14 @@
       "title": "Cleanup T2: remove dead code and stale migrations",
       "description": "Backend bloat removal:\n- Dead code to delete: store.endpoint_ids (~store.py:146; only a test *name* mentions it), AUTO_TARGETS (~store.py:107), engine.EVENT_KINDS (~engine.py:26), the never-passed `checkpoint=` parameter of Engine.sync (~engine.py:569), and the never-passed `ssh_bin=` parameter of SSHHost (~hosts.py:252).\n- opencode.py's `dirs=` parameter (~71, 84, 136) is never passed, so run_opencode (~providers.py:344-345) calls host.home() twice (two SSH round trips). Thread the computed dirs through so home() is called once.\n- Remove these migrations and their tests (the local data/ has nothing left for them to migrate):\n  - LEGACY_CLAUDE_COMMANDS (store.py ~45-50, used ~350-355; test class ClaudeMigrationTests)\n  - the legacy single \"openai\" settings block in Settings.get (~store.py:370-374, ~391; test ~1991)\n  - the `model` -> `plan_model` migration in Registry._migrate (~231-235), in update_project (`\"model\" in data`, ~app.py:507) and in engine.py (~150); tests ~2097, ~2126-2151\n  - the git_tracking default in Registry._migrate (~236-238)\n  - the doc version < 2 \"drafted\" pass in Engine.reconcile (~engine.py:180-190) and test_old_planned_tasks_with_questions_become_drafted\n- KEEP migrate_paused (this repo's tasks.json may still be an older version) and all provider_renames / rename_reserved_endpoints / RESERVED_SINCE handling.\n- There are two _clip functions with opposite behaviour: engine.py ~99 keeps the tail, providers.py ~642 keeps the head. Rename them to say so (e.g. clip_tail / clip_head).\n\nRules: this is part of a cleanup series (T1-T6). Behaviour must not change except for the listed bug fixes. Line numbers below are approximate (from a review at commit 1d1de27); find the real code before editing. Run `python -m unittest discover tests` before finishing; it must stay green. Don't touch unrelated code.",
       "plan": "",
-      "status": "review",
+      "status": "done",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-01T21:39:22+00:00",
-      "updated_at": "2026-10-02T01:19:18+00:00",
+      "updated_at": "2026-10-02T08:41:36+00:00",
       "queued_at": "2026-10-02T01:09:49+00:00",
       "started_at": "2026-10-02T01:13:54+00:00",
       "finished_at": "2026-10-02T01:19:11+00:00",
@@ -2484,6 +2493,10 @@
         {
           "at": "2026-10-02T01:19:18+00:00",
           "event": "Committed 7b06e065e9"
+        },
+        {
+          "at": "2026-10-02T08:41:36+00:00",
+          "event": "Approved by engineer"
         }
       ],
       "prev_status": "unplanned"
@@ -2493,14 +2506,14 @@
       "title": "Cleanup T3: shared backend helpers to remove duplicated boilerplate",
       "description": "Collapse repeated code without changing behaviour:\n- store: add an `edit_task(project, tid)` context manager that yields the task or None. Use it where `with store.edit(...) as doc: current = find_task(doc, tid); if current is None ...` repeats (engine.py ~479, 489, 496, 519, 600, 631; app.py ~723, 832, 843).\n- app.py guards:\n  - `require_idle(project, msg)` for the 4 copies of `engine.busy(pid) or any(t[\"status\"] in LOCKED ...)` (~451, 469, 608, 643)\n  - `git_project(pid)` mirroring the existing svn_project (~585) for the \"Git tracking is off\" checks (~620, 627, 639; engine.py ~571 can use gitops.tracked)\n  - one helper for the 5 \"Unknown provider\" checks\n  - one helper for the copy-pasted git_tracking/svn_tracking \"false only\" blocks in update_project (~485-496)\n- hosts.py:\n  - `_fail(res, verb, path)` for the ~13 copies of `f\"Could not ... on {self.label}: {res.stderr.strip() or 'ssh failed'}\"`\n  - one tmp-file and retry writer behind LocalHost.write_text/write_bytes (~192-228), and the same for read_text/read_bytes\n  - one helper for the `-p port` argv prefix (~261, 376, 551)\n  - one shared local-directory guard for open_terminal and open_vscode\n  - the duplicated check() in both SSH classes if it's cleanly shareable\n- VCS:\n  - one shared `hash-object --stdin-paths` helper (gitops.py ~94-101 and svnops.py ~86-95)\n  - a `vcs_for(project)` that returns gitops, svnops or None, replacing the ternaries in app.py ~373, engine.py ~438-440, providers.py ~296-297\n- app.py: one `cached(key, loader, refresh)` helper shared by endpoint_models (~304-320) and opencode_models (~325-349), plus any similar cline models route; one `job_view(job)` for chat_view (~659) and live (~942).\n- Consistency:\n  - clean_endpoints should pass model/code_model through model_name() (~172-173)\n  - update_project should reject non-bool rewrite_titles/auto_sync like clean_automation does instead of coercing with bool()\n  - base-URL and header validation are duplicated between app.py (~144, 153) and providers.py (~670, 686-690); keep one copy and call it from both places.\n\nRules: this is part of a cleanup series (T1-T6). Behaviour must not change except for the listed bug fixes. Line numbers below are approximate (from a review at commit 1d1de27); find the real code before editing. Run `python -m unittest discover tests` before finishing; it must stay green. Don't touch unrelated code.",
       "plan": "",
-      "status": "review",
+      "status": "done",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-01T21:39:22+00:00",
-      "updated_at": "2026-10-02T01:30:42+00:00",
+      "updated_at": "2026-10-02T08:41:36+00:00",
       "queued_at": "2026-10-02T01:21:01+00:00",
       "started_at": "2026-10-02T01:21:01+00:00",
       "finished_at": "2026-10-02T01:30:35+00:00",
@@ -2542,6 +2555,10 @@
         {
           "at": "2026-10-02T01:30:42+00:00",
           "event": "Committed 207a151f19"
+        },
+        {
+          "at": "2026-10-02T08:41:36+00:00",
+          "event": "Approved by engineer"
         }
       ]
     },
@@ -2550,14 +2567,14 @@
       "title": "Cleanup T4: shrink create_app and split providers.py into modules",
       "description": "Structural refactor, no behaviour change:\n- app.py create_app is ~860 lines (36 routes plus ~20 nested helpers). Move the helpers that use no closure state to module level, or to a new patchgoblin/validators.py, and define them before use: plan_answers, plan_limit, sync_mode, plan_trust, require_secrets_ack, remote_view, TRANSITIONS, MAX_BATCH, and transition() (pass in what it needs from engine). Today some are defined after the routes that use them (e.g. update_project uses plan_limit/sync_mode/plan_trust before their definitions; put_settings uses models_cache before it's defined); fix that ordering.\n- Split patchgoblin/providers.py (~920 lines, three concerns):\n  - patchgoblin/prompts.py: prompts and plan parsing (~lines 32-274). Build the three RUN_INSTRUCTIONS* strings (~100-121), which share 4 of 5 lines, from one base.\n  - patchgoblin/providers.py: the CLI runners (run_ai and friends). Remove the duplicated kwargs between the opencode and cline branches of run_ai (~304-309).\n  - patchgoblin/openai_agent.py: the OpenAI-compatible HTTP tool loop (~618-end).\n- Update imports in app.py, engine.py and the tests, and update mock.patch targets in the tests that point at moved names. Don't leave compatibility shims unless a patch target genuinely needs one.\n- Afterwards, start the app (create_app in a test is enough) to confirm imports work.\n\nRules: this is part of a cleanup series (T1-T6). Behaviour must not change except for the listed bug fixes. Line numbers below are approximate (from a review at commit 1d1de27); find the real code before editing. Run `python -m unittest discover tests` before finishing; it must stay green. Don't touch unrelated code.",
       "plan": "",
-      "status": "review",
+      "status": "done",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-01T21:39:22+00:00",
-      "updated_at": "2026-10-02T01:37:22+00:00",
+      "updated_at": "2026-10-02T08:41:37+00:00",
       "queued_at": "2026-10-02T01:21:47+00:00",
       "started_at": "2026-10-02T01:30:42+00:00",
       "finished_at": "2026-10-02T01:37:14+00:00",
@@ -2599,6 +2616,10 @@
         {
           "at": "2026-10-02T01:37:22+00:00",
           "event": "Committed 4e681415b0"
+        },
+        {
+          "at": "2026-10-02T08:41:37+00:00",
+          "event": "Approved by engineer"
         }
       ]
     },
@@ -2607,20 +2628,20 @@
       "title": "Cleanup T5: frontend dedupe and CSS/HTML tidy",
       "description": "Reduce duplication in patchgoblin/static/app.js, templates/index.html and static/app.css without changing behaviour:\n- app.js helpers:\n  - withBusy(btn, errNode, fn) for the repeated disable -> clear error -> try/catch showError -> re-enable sequence (around setupProjectSettings, settings submit, remote dialog, etc.)\n  - merge the near-identical git-enable and svn-enable handlers\n  - projectProvider(p) for the ~9 copies of `p.provider || \"claude\"`\n  - small helpers for normalisation that's repeated twice (on/off/\"\" values, sync_mode, trust, the ssh \"where\" string, \"Loading...\" + loadSettingsRemote)\n  - derive SETTING_FIELDS from the settings form's element names (all names containing \".\") instead of a hand-kept list\n- Use existing functions instead of copies:\n  - the batch model select's onchange should use pickModel\n  - use plural() everywhere instead of inline `n === 1 ? \"\" : \"s\"`\n  - one postAndToast(path, msg) for the Terminal and VS Code buttons\n  - one isScrolledToBottom(el) helper (3 copies with different thresholds)\n- Long functions:\n  - pull the status -> buttons switch out of renderDrawer into drawerActions(t), table-driven if it stays readable\n  - split init into setupDrawer() and setupGlobalKeys()\n- Move mutable globals (reachInFlight/reachAgain, remoteUrl, chat, function-property state like pollLive.timer/tabFor/userTab, renderChanges.key, toast.timer) into `state` or one small object per area. Move constants declared after first use (AUTO_MODES, KEEP_MODEL) above their users.\n- Dead JS: the unreachable `label` fallback in doBatch, BATCH_VERB.send_back if unused, chat.messages if never read, NOT_BUSY if it's just the complement of BUSY.\n- CSS:\n  - remove .badge.paused if nothing generates it\n  - remove [hidden] overrides on elements whose display isn't set by author CSS\n  - remove the undefined var(--border, ...) fallback and the redundant fallbacks in the live activity block\n  - merge the three near-identical pulse keyframes\n  - move the .remote-* rules before the media queries\n- HTML:\n  - a Jinja macro for the duplicated secrets warning (~194 and ~404)\n  - a single source for the automation tooltips (~172-186 vs ~569-574), which have drifted\n  - render the CLI fieldsets from a loop with per-CLI extras if that stays readable\n  - fix the missing spaces at app.js `t =>PLANNABLE` and app.css `{background`\n\nRules: this is part of a cleanup series (T1-T6). Behaviour must not change except for the listed bug fixes. Line numbers below are approximate (from a review at commit 1d1de27); find the real code before editing. Run `python -m unittest discover tests` before finishing; it must stay green. Don't touch unrelated code.",
       "plan": "",
-      "status": "review",
+      "status": "done",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-01T21:39:22+00:00",
-      "updated_at": "2026-10-02T01:44:33+00:00",
+      "updated_at": "2026-10-02T08:41:39+00:00",
       "queued_at": "2026-10-02T01:36:10+00:00",
       "started_at": "2026-10-02T01:37:22+00:00",
       "finished_at": "2026-10-02T01:44:33+00:00",
       "output": "That's the background test run reporting that it finished, which matches the result I already gave. All 221 tests passed (9 skipped), `node --check` accepted `app.js`, and the work is complete.",
       "error": "",
-      "commit": "",
+      "commit": "b2f353996fa36b6388f2c253049b21be7b3dd2c3",
       "changes": [],
       "summary": "",
       "checkin_pending": false,
@@ -2652,6 +2673,14 @@
         {
           "at": "2026-10-02T01:44:33+00:00",
           "event": "AI run finished; awaiting review"
+        },
+        {
+          "at": "2026-10-02T01:44:39+00:00",
+          "event": "Committed b2f353996f"
+        },
+        {
+          "at": "2026-10-02T08:41:39+00:00",
+          "event": "Approved by engineer"
         }
       ]
     },
@@ -2660,19 +2689,19 @@
       "title": "Cleanup T6: dedupe and split the test suite, refresh README",
       "description": "Tests (tests/test_patchgoblin.py, ~3000 lines):\n- The three secrets-ack tests (test_git_tracking_requires_secrets_ack, test_enable_git_requires_secrets_ack, test_untracked_add_needs_no_secrets_ack, ~49-65) are defined on the base class AppTestCase, so all 12 subclasses inherit them and they run 13 times each, each with a real git init. Move them into ProjectTests.\n- Remove the duplicate helpers: events (~532, ~931), slow_ai (~752, ~1000), batch (~748, ~1165), and git_log (~27) vs git (~1232).\n- Add base helpers on AppTestCase: engine/store/registry/settings properties (replacing ~49 app.config[...] lookups), get_task(pid, tid), put_settings(...), fake_cmd(mode, *flags) for the [sys.executable, FAKE, ...] lists.\n- Replace fixed time.sleep calls with wait_for(...) where a condition exists.\n- Split into a tests/ package along class boundaries: helpers.py (AppTestCase, H, FAKE, git helpers), test_projects.py, test_workflow.py (WorkflowTests + AutomationTests), test_remote.py, test_svn.py, test_hosts.py, test_providers.py, test_opencode.py, test_store.py, test_chat_activity_images.py. `python -m unittest discover tests` must still find everything; check the test count is unchanged except for the removed duplicate runs.\n\nREADME.md:\n- Document the reviewer approval note (task #39) and the sidebar push-status icons (task #35) where Approve and the sidebar are described.\n- Fix the contradiction between \"tasks/attachments are committed\" (~55-58) and \"new repos ignore .patchgoblin/ by default\" (~36-37).\n- Move the long \"How it works\" section (~25-206) into docs/usage.md, leaving a short overview and a link. Remove the repeated automation and pause explanations.\n\nRules: this is part of a cleanup series (T1-T6). Behaviour must not change except for the listed bug fixes. Line numbers below are approximate (from a review at commit 1d1de27); find the real code before editing. Run `python -m unittest discover tests` before finishing; it must stay green. Don't touch unrelated code.",
       "plan": "",
-      "status": "queued",
+      "status": "failed",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-01T21:39:22+00:00",
-      "updated_at": "2026-10-02T01:36:20+00:00",
+      "updated_at": "2026-10-02T08:37:25+00:00",
       "queued_at": "2026-10-02T01:36:20+00:00",
-      "started_at": null,
-      "finished_at": null,
-      "output": "",
-      "error": "",
+      "started_at": "2026-10-02T01:44:39+00:00",
+      "finished_at": "2026-10-02T08:37:25+00:00",
+      "output": "[2026-10-02T01:44:40+00:00] run with claude / sonnet in g:\\My Drive\\Projects\\PatchGoblin\n$ claude -p --output-format stream-json --verbose --permission-mode acceptEdits --allowedTools Read,Glob,Grep,Edit,Write,Bash --model sonnet\n\u00b7 Started: model claude-sonnet-5-5, in g:\\My Drive\\Projects\\PatchGoblin\n\u2192 Running `cd \"g:/My Drive/Projects/PatchGoblin\"; ls; ls tests docs; wc -l tests/*.py README.md; grep -n \"^class \\|^def \\|^import\\|^from\\|^[A-Z_]* = \" tests/test_patchgoblin.py; python -m unittest discover tests\n\u2026 [truncated 15 chars]`\n\u2192 Running `cd \"g:/My Drive/Projects/PatchGoblin\"; ls; ls tests docs; wc -l tests/*.py README.md; grep -n \"^class \\|^def \\|^import\\|^from\\|^[A-Z_]* = \" tests/test_patchgoblin.py`\n\u2192 Reading tests/test_patchgoblin.py\n\u2192 Running `cd \"g:/My Drive/Projects/PatchGoblin\"; sleep 100; cat \"C:/Users/BRENT/AppData/Local/Temp/claude/g--My-Drive-Projects-PatchGoblin/5f01e2a5-548e-459e-b949-c81bf64cd2c8/tasks/b7mrbbn8o.output\" | tail -5;\n\u2026 [truncated 105 chars]`\n\u2192 Running `cd \"g:/My Drive/Projects/PatchGoblin\"; (python -m unittest discover tests -v > /tmp/base.txt 2>&1 &) ; grep -n \"def events\\|def slow_ai\\|def batch\\|def git\\b\\|def git_log\\|git_log(\\|time\\.sleep\" tests\n\u2026 [truncated 20 chars]`\n",
+      "error": "Cancelled by user. Review the working tree before re-queueing.",
       "commit": "",
       "changes": [],
       "summary": "",
@@ -2697,6 +2726,14 @@
         {
           "at": "2026-10-02T01:36:20+00:00",
           "event": "Auto-queued"
+        },
+        {
+          "at": "2026-10-02T01:44:39+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-10-02T08:37:25+00:00",
+          "event": "AI run failed"
         }
       ]
     },
