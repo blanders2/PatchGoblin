@@ -16,11 +16,13 @@ from flask import Flask, Response, abort, jsonify, render_template, request
 from . import cline, gitops, opencode, svnops
 from .engine import Engine
 from .hosts import HostError, host_for, open_terminal, open_vscode, probe
-from .providers import (IMAGE_MIME, PLAN_TRUST_LEVELS, endpoint_key, list_models, plan_questions, ready_status,
-                        valid_base_url, valid_header)
-from .store import (ATTACHMENT_NAME, AUTO_MODES, CLI_PROVIDERS, MODELS, PAUSABLE, STATUSES, Registry, Settings,
+from .openai_agent import endpoint_key, list_models, valid_base_url, valid_header
+from .prompts import IMAGE_MIME, plan_questions
+from .store import (ATTACHMENT_NAME, AUTO_MODES, CLI_PROVIDERS, MODELS, STATUSES, Registry, Settings,
                     TaskStore, attachment_path, cli_model_suggestions, empty_doc, find_endpoint, find_task, log_event, new_task, now,
-                    provider_choices, resolve_auto, save_attachment, set_status, tasks_path, valid_provider, vcs_for)
+                    provider_choices, resolve_auto, save_attachment, tasks_path, valid_provider, vcs_for)
+from .validators import (MAX_BATCH, TRANSITIONS, plan_answers, plan_limit, plan_trust, remote_view,
+                         require_secrets_ack, sync_mode, transition)
 
 EDITABLE = ("title", "description", "plan", "provider", "plan_model", "code_model", "plan_trust")
 MODEL_KEYS = ("plan_model", "code_model")
@@ -252,17 +254,6 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         return {**task, "active": job is not None, "activity": job.current if job else "",
                 "questions": plan_questions(task.get("plan", ""))}
 
-    def plan_answers(value) -> list[dict] | None:
-        if value is None:
-            return None
-        if not isinstance(value, list) or not all(
-                isinstance(a, dict) and isinstance(a.get("question", ""), str)
-                and isinstance(a.get("answer", ""), str) for a in value):
-            raise ValueError("answers must be a list of {question, answer} strings.")
-        answers = [{"question": a.get("question", ""), "answer": a.get("answer", "")}
-                   for a in value if a.get("answer", "").strip()]
-        return answers or None
-
     # ---- pages --------------------------------------------------------------
     @app.get("/")
     def index():
@@ -303,6 +294,23 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
                 except Exception as exc:
                     app.logger.warning("Automation for %s failed: %s", project.get("name"), exc)
 
+    # ---- model lists (cached) ----------------------------------------------------
+    models_cache: dict[tuple, tuple[float, object]] = {}
+    models_lock = threading.Lock()
+
+    def cached(key: tuple, loader, refresh: bool):
+        """``(value, error)`` for ``key``: a fresh cache hit, else ``loader()`` -> ``(value, error)``.
+        Only error-free results are cached."""
+        with models_lock:
+            hit = models_cache.get(key)
+        if hit and not refresh and time.monotonic() - hit[0] < MODELS_CACHE_SECONDS:
+            return hit[1], ""
+        value, error = loader()
+        if not error:
+            with models_lock:
+                models_cache[key] = (time.monotonic(), value)
+        return value, error
+
     @app.put("/api/settings")
     def put_settings():
         data = body()
@@ -322,23 +330,6 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
                 del models_cache[key]
         apply_turned_on(before)
         return jsonify(settings_view(updated))
-
-    # ---- model lists (cached) ----------------------------------------------------
-    models_cache: dict[tuple, tuple[float, object]] = {}
-    models_lock = threading.Lock()
-
-    def cached(key: tuple, loader, refresh: bool):
-        """``(value, error)`` for ``key``: a fresh cache hit, else ``loader()`` -> ``(value, error)``.
-        Only error-free results are cached."""
-        with models_lock:
-            hit = models_cache.get(key)
-        if hit and not refresh and time.monotonic() - hit[0] < MODELS_CACHE_SECONDS:
-            return hit[1], ""
-        value, error = loader()
-        if not error:
-            with models_lock:
-                models_cache[key] = (time.monotonic(), value)
-        return value, error
 
     # ---- OpenAI-compatible endpoints ---------------------------------------
     @app.get("/api/endpoints/<eid>/models")
@@ -441,11 +432,6 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             **{k: model_name(data.get(k)) for k in PROJECT_MODEL_KEYS},
         }
         return fields
-
-    def require_secrets_ack(data: dict) -> None:
-        if data.get("secrets_ack") is not True:
-            raise ValueError("Confirm that this directory contains no secrets (API keys, .env files, "
-                             "credentials) before PatchGoblin creates a git repository and commits it.")
 
     @app.post("/api/browse")
     def browse():
@@ -578,31 +564,6 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         apply_turned_on(before)
         return jsonify(updated)
 
-    def plan_limit(value) -> int:
-        """Max simultaneous planning jobs for a project; 0 means unlimited."""
-        if value is None or value == "":
-            return 0
-        if isinstance(value, bool) or not isinstance(value, (int, str)):
-            raise ValueError("Plan limit must be a whole number ≥ 0.")
-        try:
-            limit = int(value)
-        except ValueError:
-            raise ValueError("Plan limit must be a whole number ≥ 0.") from None
-        if limit < 0:
-            raise ValueError("Plan limit must be a whole number ≥ 0.")
-        return limit
-
-    def sync_mode(value) -> str:
-        if value not in gitops.SYNC_MODES:
-            raise ValueError("Sync mode must be one of: " + ", ".join(gitops.SYNC_MODES) + ".")
-        return value
-
-    def plan_trust(value, allow_blank: bool = False) -> str:
-        """A planning trust level; "" (a task's "use the project's level") only if allowed."""
-        if (value == "" and allow_blank) or value in PLAN_TRUST_LEVELS:
-            return value
-        raise ValueError("Plan trust must be one of: " + ", ".join(PLAN_TRUST_LEVELS) + ".")
-
     @app.delete("/api/projects/<pid>")
     def remove_project(pid):
         project_or_404(pid)
@@ -648,10 +609,6 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         require_idle(project, "Wait for this project's AI jobs to finish before checking in.")
         rev = engine.checkin(project, message.strip() + "\n")
         return jsonify(revision=rev)
-
-    def remote_view(project: dict, status: dict) -> dict:
-        return {**status, "auto_sync": project.get("auto_sync") is True,
-                "sync_mode": project.get("sync_mode") or "ff-only"}
 
     @app.get("/api/projects/<pid>/remote")
     def get_remote(pid):
@@ -798,57 +755,6 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             doc["tasks"].remove(task)
         return jsonify(ok=True)
 
-    # Simple state changes: action -> (allowed from, new status, history message).
-    # A "planned" target lands in "drafted" instead while the plan has open questions.
-    TRANSITIONS = {
-        "mark_planned": (("unplanned", "failed", "drafted"), "planned", "Marked planned"),
-        "mark_drafted": (("planned",), "drafted", "Moved to drafted"),
-        "unplan": (("planned", "drafted"), "unplanned", "Moved back to unplanned"),
-        "queue": (("planned", "drafted", "failed"), "queued", "Queued for AI"),
-        "dequeue": (("queued",), "planned", "Removed from queue"),
-        "approve": (("review",), "done", "Approved by engineer"),
-        "reopen": (("done", "review"), "planned", "Reopened"),
-        # Pause and resume only set or clear the task's "paused" flag (no status change); they
-        # are handled in transition() and listed here for their allowed statuses.
-        "pause": (PAUSABLE, None, "Paused"),
-        "resume": (STATUSES, None, "Resumed"),
-    }
-
-    def transition(pid: str, task: dict, action: str, queued_at: str | None = None) -> bool:
-        """Apply a simple state change; True if the task was queued (by hand or Auto-queue)."""
-        allowed, status, message = TRANSITIONS[action]
-        source = task["status"]
-        if action == "resume":
-            if not task.get("paused"):
-                raise ValueError(f"Cannot resume a task that is {source}.")
-            task["paused"] = False
-            log_event(task, message)
-            return source == "queued"
-        if task.get("paused"):
-            raise ValueError("Task is paused; resume it first.")
-        if source not in allowed:
-            raise ValueError(f"Cannot {action.replace('_', ' ')} a task that is {task['status']}.")
-        if action == "pause":
-            task["paused"] = True
-            log_event(task, message)
-            return False
-        if status == "planned":
-            status = ready_status(task.get("plan", ""))
-            if status == "drafted":
-                if task["status"] == "drafted":
-                    raise ValueError("Plan still has open questions; "
-                                     "answer them or remove them from the plan first.")
-                message += " (plan has open questions)"
-        elif action == "mark_drafted" and not plan_questions(task.get("plan", "")):
-            raise ValueError("Plan has no open questions; nothing to draft.")
-        if action == "queue":
-            task["queued_at"] = queued_at or now()
-        set_status(task, status, message)
-        if action == "queue":
-            return True
-        # Like an AI plan, only a first plan is auto-queued (not one from drafted or failed).
-        return action == "mark_planned" and source == "unplanned" and engine.maybe_auto_queue(pid, task)
-
     def apply_action(project: dict, tid: int, action: str, data: dict) -> bool:
         """One task's action; raises KeyError for a missing task, ValueError if not allowed.
         Returns True if the task was queued, so the caller kicks the runner."""
@@ -871,7 +777,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             with store.edit_task(project, tid) as task:
                 if task is None:
                     raise KeyError(tid)
-                queued = transition(pid, task, "approve")
+                queued = transition(engine, pid, task, "approve")
                 task["approval_note"] = note
                 title = task["title"]
             if note and gitops.tracked(project):
@@ -881,7 +787,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             with store.edit_task(project, tid) as task:
                 if task is None:
                     raise KeyError(tid)
-                return transition(pid, task, action)
+                return transition(engine, pid, task, action)
         else:
             raise ValueError(f"Unknown action {action!r}.")
         return False
@@ -901,8 +807,6 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         return jsonify(task_view(pid, find_task(doc, tid) or abort(404)))
 
     BATCH_ACTIONS = set(TRANSITIONS) | {"plan", "cancel", "delete", "set_provider", "set_models"}
-    MAX_BATCH = 200
-
     @app.post("/api/projects/<pid>/tasks/batch")
     def batch_action(pid):
         """Apply one action to many tasks. Each task succeeds or fails on its own."""
@@ -952,7 +856,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
                     if task is None:
                         raise KeyError(tid)
                     if action in TRANSITIONS:
-                        if transition(pid, task, action, stamp):
+                        if transition(engine, pid, task, action, stamp):
                             queued.append(tid)
                     elif task["status"] in LOCKED:
                         raise ValueError(f"Task is {task['status']}; cancel it first.")

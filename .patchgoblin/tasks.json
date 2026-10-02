@@ -2500,13 +2500,13 @@
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-01T21:39:22+00:00",
-      "updated_at": "2026-10-02T01:30:35+00:00",
+      "updated_at": "2026-10-02T01:30:42+00:00",
       "queued_at": "2026-10-02T01:21:01+00:00",
       "started_at": "2026-10-02T01:21:01+00:00",
       "finished_at": "2026-10-02T01:30:35+00:00",
       "output": "The shared helpers from the cleanup list are in, and `python -m unittest discover tests` passes: 221 tests, 9 skipped. I did not add new tests for the helpers or the three consistency fixes. I did not touch `.patchgoblin/`. I did not run the app itself.\n\n**Store**\n- `edit_task(project, tid)` in `store.py` yields the task or None. It replaces the repeated `edit` plus `find_task` blocks in `engine.py` (8 spots) and `app.py` (4 spots).\n- `vcs_for(project)` returns `gitops`, `svnops` or None. It replaces the ternaries in `app.py`, `engine.py` and `providers.py`. `gitops` and `svnops` each gained a `NAME` constant, which `engine.py` uses for its `\"git\"`/`\"svn\"` string.\n\n**app.py**\n- New helpers: `require_idle`, `git_project`, `require_provider`, `job_view` and `cached(key, loader, refresh)`.\n- `cached` now backs the endpoint, opencode and cline model routes. Saving endpoints clears only the endpoint entries in the shared cache, as before.\n- The `git_tracking`/`svn_tracking` \"false only\" blocks in `update_project` are now one loop.\n- `engine.py`'s own tracking check was already `gitops.tracked`, so I left it.\n\n**hosts.py**\n- `_fail`, `_port_args` and a `noop_script` class attribute for the shared `check()` on the SSH classes.\n- `LocalHost` has one `_read` and one `_write` behind the text and byte versions.\n- `_local_dir_guard` is shared by `open_terminal` and `open_vscode`.\n\n**VCS and validation**\n- `gitops.hash_files` replaces the two `hash-object --stdin-paths` copies; `svnops` calls it with `filters=False`.\n- `valid_base_url` and `valid_header` in `providers.py` are called from both `providers.py` and `app.py`.\n\n**Bug fixes**\n- `clean_endpoints` now runs `model` and `code_model` through `model_name()`.\n- `update_project` now rejects non-bool `rewrite_titles` and `auto_sync` instead of coercing them.\n\nIn `providers.py`, if both git and SVN tracking were somehow on, only git now counts. `engine.py` already treated that case the same way, and I assume the registry never allows it.",
       "error": "",
-      "commit": "",
+      "commit": "207a151f1925bca12d809d9b4d37fa616827c5db",
       "changes": [],
       "summary": "",
       "checkin_pending": false,
@@ -2538,6 +2538,10 @@
         {
           "at": "2026-10-02T01:30:35+00:00",
           "event": "AI run finished; awaiting review"
+        },
+        {
+          "at": "2026-10-02T01:30:42+00:00",
+          "event": "Committed 207a151f19"
         }
       ]
     },
@@ -2546,18 +2550,18 @@
       "title": "Cleanup T4: shrink create_app and split providers.py into modules",
       "description": "Structural refactor, no behaviour change:\n- app.py create_app is ~860 lines (36 routes plus ~20 nested helpers). Move the helpers that use no closure state to module level, or to a new patchgoblin/validators.py, and define them before use: plan_answers, plan_limit, sync_mode, plan_trust, require_secrets_ack, remote_view, TRANSITIONS, MAX_BATCH, and transition() (pass in what it needs from engine). Today some are defined after the routes that use them (e.g. update_project uses plan_limit/sync_mode/plan_trust before their definitions; put_settings uses models_cache before it's defined); fix that ordering.\n- Split patchgoblin/providers.py (~920 lines, three concerns):\n  - patchgoblin/prompts.py: prompts and plan parsing (~lines 32-274). Build the three RUN_INSTRUCTIONS* strings (~100-121), which share 4 of 5 lines, from one base.\n  - patchgoblin/providers.py: the CLI runners (run_ai and friends). Remove the duplicated kwargs between the opencode and cline branches of run_ai (~304-309).\n  - patchgoblin/openai_agent.py: the OpenAI-compatible HTTP tool loop (~618-end).\n- Update imports in app.py, engine.py and the tests, and update mock.patch targets in the tests that point at moved names. Don't leave compatibility shims unless a patch target genuinely needs one.\n- Afterwards, start the app (create_app in a test is enough) to confirm imports work.\n\nRules: this is part of a cleanup series (T1-T6). Behaviour must not change except for the listed bug fixes. Line numbers below are approximate (from a review at commit 1d1de27); find the real code before editing. Run `python -m unittest discover tests` before finishing; it must stay green. Don't touch unrelated code.",
       "plan": "",
-      "status": "queued",
+      "status": "review",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-01T21:39:22+00:00",
-      "updated_at": "2026-10-02T01:21:47+00:00",
+      "updated_at": "2026-10-02T01:37:14+00:00",
       "queued_at": "2026-10-02T01:21:47+00:00",
-      "started_at": null,
-      "finished_at": null,
-      "output": "",
+      "started_at": "2026-10-02T01:30:42+00:00",
+      "finished_at": "2026-10-02T01:37:14+00:00",
+      "output": "The refactor is in place, and `python -m unittest discover tests` passes: 221 tests, 9 skipped. `create_app` also builds cleanly, so the new imports work.\n\n**providers split**\n- `patchgoblin/prompts.py` (new) holds the prompts, trust levels, title and plan-question parsing, image refs and `run_prompt`. The three `RUN_INSTRUCTIONS*` strings are now built from one shared intro and outro, with only the git/svn line differing.\n- `patchgoblin/openai_agent.py` (new) holds `ProjectFiles`, the endpoint helpers, `list_models` and `OpenAIAgent`.\n- `patchgoblin/providers.py` is down to the CLI runners, `Cancelled`, `Outcome`, `describe_tool` and `clip_head`.\n- The opencode and cline branches of `run_ai` now share one call. That was the duplicated kwargs.\n- `openai_agent.py` imports `Cancelled`, `Outcome`, `clip_head` and `describe_tool` from `providers`. To avoid a circular import, `run_ai` imports `OpenAIAgent` inside the function. There are no compatibility shims.\n\n**`app.py`**\n- The new `patchgoblin/validators.py` holds `plan_answers`, `plan_limit`, `sync_mode`, `plan_trust`, `require_secrets_ack`, `remote_view`, `TRANSITIONS`, `MAX_BATCH` and `transition`.\n- `transition` now takes `engine` as its first argument, since it calls `engine.maybe_auto_queue`.\n- The models cache and its lock are now defined before `put_settings`. The validators are module-level imports, so they are defined before any route uses them.\n- I also trimmed `app.py` imports that nothing uses any more.\n\nThe imports in `engine.py` and the tests now point at the new modules. No `mock.patch` target needed changing; the only patches on these names were `engine.plan_prompt` and `engine._ai`, which still live in `engine`.\n\nI only moved the helpers named in the task, so `create_app` is shorter but still holds the other nested helpers and the routes.",
       "error": "",
       "commit": "",
       "changes": [],
@@ -2583,6 +2587,14 @@
         {
           "at": "2026-10-02T01:21:47+00:00",
           "event": "Auto-queued"
+        },
+        {
+          "at": "2026-10-02T01:30:42+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-10-02T01:37:14+00:00",
+          "event": "AI run finished; awaiting review"
         }
       ]
     },
@@ -2591,15 +2603,15 @@
       "title": "Cleanup T5: frontend dedupe and CSS/HTML tidy",
       "description": "Reduce duplication in patchgoblin/static/app.js, templates/index.html and static/app.css without changing behaviour:\n- app.js helpers:\n  - withBusy(btn, errNode, fn) for the repeated disable -> clear error -> try/catch showError -> re-enable sequence (around setupProjectSettings, settings submit, remote dialog, etc.)\n  - merge the near-identical git-enable and svn-enable handlers\n  - projectProvider(p) for the ~9 copies of `p.provider || \"claude\"`\n  - small helpers for normalisation that's repeated twice (on/off/\"\" values, sync_mode, trust, the ssh \"where\" string, \"Loading...\" + loadSettingsRemote)\n  - derive SETTING_FIELDS from the settings form's element names (all names containing \".\") instead of a hand-kept list\n- Use existing functions instead of copies:\n  - the batch model select's onchange should use pickModel\n  - use plural() everywhere instead of inline `n === 1 ? \"\" : \"s\"`\n  - one postAndToast(path, msg) for the Terminal and VS Code buttons\n  - one isScrolledToBottom(el) helper (3 copies with different thresholds)\n- Long functions:\n  - pull the status -> buttons switch out of renderDrawer into drawerActions(t), table-driven if it stays readable\n  - split init into setupDrawer() and setupGlobalKeys()\n- Move mutable globals (reachInFlight/reachAgain, remoteUrl, chat, function-property state like pollLive.timer/tabFor/userTab, renderChanges.key, toast.timer) into `state` or one small object per area. Move constants declared after first use (AUTO_MODES, KEEP_MODEL) above their users.\n- Dead JS: the unreachable `label` fallback in doBatch, BATCH_VERB.send_back if unused, chat.messages if never read, NOT_BUSY if it's just the complement of BUSY.\n- CSS:\n  - remove .badge.paused if nothing generates it\n  - remove [hidden] overrides on elements whose display isn't set by author CSS\n  - remove the undefined var(--border, ...) fallback and the redundant fallbacks in the live activity block\n  - merge the three near-identical pulse keyframes\n  - move the .remote-* rules before the media queries\n- HTML:\n  - a Jinja macro for the duplicated secrets warning (~194 and ~404)\n  - a single source for the automation tooltips (~172-186 vs ~569-574), which have drifted\n  - render the CLI fieldsets from a loop with per-CLI extras if that stays readable\n  - fix the missing spaces at app.js `t =>PLANNABLE` and app.css `{background`\n\nRules: this is part of a cleanup series (T1-T6). Behaviour must not change except for the listed bug fixes. Line numbers below are approximate (from a review at commit 1d1de27); find the real code before editing. Run `python -m unittest discover tests` before finishing; it must stay green. Don't touch unrelated code.",
       "plan": "",
-      "status": "unplanned",
+      "status": "queued",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
-      "paused": true,
+      "paused": false,
       "created_at": "2026-10-01T21:39:22+00:00",
-      "updated_at": "2026-10-01T21:39:22+00:00",
-      "queued_at": null,
+      "updated_at": "2026-10-02T01:36:10+00:00",
+      "queued_at": "2026-10-02T01:36:10+00:00",
       "started_at": null,
       "finished_at": null,
       "output": "",
@@ -2616,6 +2628,18 @@
         {
           "at": "2026-10-01T21:39:22+00:00",
           "event": "Created (paused)"
+        },
+        {
+          "at": "2026-10-02T01:36:06+00:00",
+          "event": "Resumed"
+        },
+        {
+          "at": "2026-10-02T01:36:10+00:00",
+          "event": "Marked planned"
+        },
+        {
+          "at": "2026-10-02T01:36:10+00:00",
+          "event": "Auto-queued"
         }
       ]
     },
@@ -2624,15 +2648,15 @@
       "title": "Cleanup T6: dedupe and split the test suite, refresh README",
       "description": "Tests (tests/test_patchgoblin.py, ~3000 lines):\n- The three secrets-ack tests (test_git_tracking_requires_secrets_ack, test_enable_git_requires_secrets_ack, test_untracked_add_needs_no_secrets_ack, ~49-65) are defined on the base class AppTestCase, so all 12 subclasses inherit them and they run 13 times each, each with a real git init. Move them into ProjectTests.\n- Remove the duplicate helpers: events (~532, ~931), slow_ai (~752, ~1000), batch (~748, ~1165), and git_log (~27) vs git (~1232).\n- Add base helpers on AppTestCase: engine/store/registry/settings properties (replacing ~49 app.config[...] lookups), get_task(pid, tid), put_settings(...), fake_cmd(mode, *flags) for the [sys.executable, FAKE, ...] lists.\n- Replace fixed time.sleep calls with wait_for(...) where a condition exists.\n- Split into a tests/ package along class boundaries: helpers.py (AppTestCase, H, FAKE, git helpers), test_projects.py, test_workflow.py (WorkflowTests + AutomationTests), test_remote.py, test_svn.py, test_hosts.py, test_providers.py, test_opencode.py, test_store.py, test_chat_activity_images.py. `python -m unittest discover tests` must still find everything; check the test count is unchanged except for the removed duplicate runs.\n\nREADME.md:\n- Document the reviewer approval note (task #39) and the sidebar push-status icons (task #35) where Approve and the sidebar are described.\n- Fix the contradiction between \"tasks/attachments are committed\" (~55-58) and \"new repos ignore .patchgoblin/ by default\" (~36-37).\n- Move the long \"How it works\" section (~25-206) into docs/usage.md, leaving a short overview and a link. Remove the repeated automation and pause explanations.\n\nRules: this is part of a cleanup series (T1-T6). Behaviour must not change except for the listed bug fixes. Line numbers below are approximate (from a review at commit 1d1de27); find the real code before editing. Run `python -m unittest discover tests` before finishing; it must stay green. Don't touch unrelated code.",
       "plan": "",
-      "status": "unplanned",
+      "status": "queued",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
-      "paused": true,
+      "paused": false,
       "created_at": "2026-10-01T21:39:22+00:00",
-      "updated_at": "2026-10-01T21:39:22+00:00",
-      "queued_at": null,
+      "updated_at": "2026-10-02T01:36:20+00:00",
+      "queued_at": "2026-10-02T01:36:20+00:00",
       "started_at": null,
       "finished_at": null,
       "output": "",
@@ -2649,6 +2673,18 @@
         {
           "at": "2026-10-01T21:39:22+00:00",
           "event": "Created (paused)"
+        },
+        {
+          "at": "2026-10-02T01:36:18+00:00",
+          "event": "Resumed"
+        },
+        {
+          "at": "2026-10-02T01:36:19+00:00",
+          "event": "Marked planned"
+        },
+        {
+          "at": "2026-10-02T01:36:20+00:00",
+          "event": "Auto-queued"
         }
       ]
     },

@@ -14,8 +14,8 @@ import time
 
 from . import gitops, svnops
 from .hosts import HostError, host_for, kill_tree
-from .providers import (Cancelled, Outcome, chat_prompt, plan_prompt, plan_questions, ready_status, run_ai,
-                        resolve_trust, run_prompt, split_title)
+from .prompts import chat_prompt, plan_prompt, plan_questions, ready_status, resolve_trust, run_prompt, split_title
+from .providers import Cancelled, Outcome, run_ai
 from .store import find_task, global_model, log_event, now, resolve_auto, set_status, vcs_for
 
 log = logging.getLogger("patchgoblin")

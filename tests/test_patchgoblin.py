@@ -16,8 +16,8 @@ from patchgoblin import hosts as hosts_mod  # noqa: E402
 from patchgoblin.engine import Job  # noqa: E402
 from patchgoblin.hosts import (HostError, LocalHost, Result, SSHHost, WindowsSSHHost, detect_ssh_os,  # noqa: E402
                                host_for, probe, terminal_command, vscode_command)
-from patchgoblin.providers import (OpenAIAgent, Outcome, ProjectFiles, _StreamJson,  # noqa: E402
-                                   describe_tool, run_claude)
+from patchgoblin.openai_agent import OpenAIAgent, ProjectFiles  # noqa: E402
+from patchgoblin.providers import Outcome, _StreamJson, describe_tool, run_claude  # noqa: E402
 
 FAKE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_agent.py")
 H = {"X-PatchGoblin": "1"}
@@ -1648,7 +1648,7 @@ class ChatTests(AppTestCase):
         self.assertEqual(self.client.get("/api/projects/nope/chat").status_code, 404)
 
     def test_chat_prompt_keeps_recent_history(self):
-        from patchgoblin.providers import MAX_CHAT_CONTEXT, chat_prompt
+        from patchgoblin.prompts import MAX_CHAT_CONTEXT, chat_prompt
         messages = [{"role": "user", "text": "old " * MAX_CHAT_CONTEXT},
                     {"role": "assistant", "text": "an answer"}, {"role": "user", "text": "latest question"}]
         prompt = chat_prompt(messages)
@@ -1659,7 +1659,7 @@ class ChatTests(AppTestCase):
 
 class PlanPromptTests(unittest.TestCase):
     def test_plan_questions_parsing(self):
-        from patchgoblin.providers import plan_questions, ready_status
+        from patchgoblin.prompts import plan_questions, ready_status
         plan = ("Summary.\n\n## Steps\n1. Do a thing\n\n## Questions for you\n"
                 "1. Should we keep the old API\n   for existing callers?\n2) Which DB?\n- Bullet one\n\n"
                 "Trailing prose.\n## Other\n1. not a question")
@@ -1679,7 +1679,7 @@ class PlanPromptTests(unittest.TestCase):
         self.assertEqual(ready_status("## Assumptions\n- B\n\n## Questions for you\nNone."), "planned")
 
     def test_plan_question_options(self):
-        from patchgoblin.providers import plan_questions
+        from patchgoblin.prompts import plan_questions
 
         def one(q):
             (parsed,) = plan_questions(f"## Questions for you\n1. {q}")
@@ -1694,11 +1694,11 @@ class PlanPromptTests(unittest.TestCase):
         self.assertEqual(one("Pick [A / B / C / D / E / F / G / H]")["options"], list("ABCDEF"))
 
     def test_plan_instructions_ask_for_options(self):
-        from patchgoblin.providers import PLAN_INSTRUCTIONS
+        from patchgoblin.prompts import PLAN_INSTRUCTIONS
         self.assertIn("[Yes / No]", PLAN_INSTRUCTIONS)
 
     def test_plan_prompt_with_answers(self):
-        from patchgoblin.providers import plan_prompt
+        from patchgoblin.prompts import plan_prompt
         task = {"id": 1, "title": "T", "description": "", "plan": "old plan"}
         prompt = plan_prompt(task, "use tabs", [{"question": "Colour?", "answer": "blue"},
                                                 {"question": "Log?", "answer": " "}])
@@ -1709,13 +1709,13 @@ class PlanPromptTests(unittest.TestCase):
         self.assertNotIn("## Answers", plan_prompt(task))
 
     def test_plan_prompt_title_instruction(self):
-        from patchgoblin.providers import plan_prompt
+        from patchgoblin.prompts import plan_prompt
         task = {"id": 1, "title": "T", "description": "", "plan": ""}
         self.assertNotIn("Title: <", plan_prompt(task))
         self.assertIn("Title: <", plan_prompt(task, rewrite_title=True))
 
     def test_plan_prompt_trust(self):
-        from patchgoblin.providers import plan_prompt
+        from patchgoblin.prompts import plan_prompt
         task = {"id": 1, "title": "T", "description": "", "plan": ""}
         self.assertEqual(plan_prompt(task), plan_prompt(task, trust="normal"))
         self.assertNotIn("Planning trust", plan_prompt(task))
@@ -1731,7 +1731,7 @@ class PlanPromptTests(unittest.TestCase):
         self.assertLess(both.index("Planning trust is HIGH"), both.index("Title: <"))
 
     def test_resolve_trust(self):
-        from patchgoblin.providers import resolve_trust
+        from patchgoblin.prompts import resolve_trust
         self.assertEqual(resolve_trust({"plan_trust": "low"}, {"plan_trust": "high"}), "low")
         self.assertEqual(resolve_trust({"plan_trust": "normal"}, {"plan_trust": "high"}), "normal")
         self.assertEqual(resolve_trust({"plan_trust": ""}, {"plan_trust": "high"}), "high")
@@ -1740,7 +1740,7 @@ class PlanPromptTests(unittest.TestCase):
         self.assertEqual(resolve_trust({}, {}), "normal")
 
     def test_split_title(self):
-        from patchgoblin.providers import MAX_TITLE, split_title
+        from patchgoblin.prompts import MAX_TITLE, split_title
         self.assertEqual(split_title("Title: Add X\n\n1. Step"), ("Add X", "1. Step"))
         self.assertEqual(split_title("**Title:** Add X\n\nPlan"), ("Add X", "Plan"))
         self.assertEqual(split_title("# Title: `Add X`\nPlan"), ("Add X", "Plan"))
@@ -1984,7 +1984,7 @@ class OpenAIAgentTests(unittest.TestCase):
             self.assertTrue(outcome.ok)
 
     def test_list_models(self):
-        from patchgoblin.providers import list_models
+        from patchgoblin.openai_agent import list_models
         data = {"data": [{"id": "b"}, {"id": "a"},
                          {"id": "no-tools", "supported_parameters": ["temperature"]},
                          {"id": "tools", "supported_parameters": ["tools", "temperature"]}]}
@@ -2925,7 +2925,7 @@ class ImageTests(AppTestCase):
         self.assertEqual(self.client.get(f"/api/projects/{pid}/attachments/{'0' * 32}.png").status_code, 404)
 
     def test_prompts_list_images_once(self):
-        from patchgoblin.providers import chat_prompt, image_refs, plan_prompt, run_prompt
+        from patchgoblin.prompts import chat_prompt, image_refs, plan_prompt, run_prompt
         a, b = (f".patchgoblin/attachments/{c * 32}.png" for c in "ab")
         task = {"id": 1, "title": "T", "description": f"see ![image]({a}) and ![x]({a})", "plan": "p"}
         for prompt in (plan_prompt(task, feedback=f"![image]({b})"), run_prompt(task)):
