@@ -2811,13 +2811,13 @@
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-02T22:57:50+00:00",
-      "updated_at": "2026-10-02T23:10:11+00:00",
+      "updated_at": "2026-10-02T23:10:19+00:00",
       "queued_at": "2026-10-02T23:04:44+00:00",
       "started_at": "2026-10-02T23:04:44+00:00",
       "finished_at": "2026-10-02T23:10:11+00:00",
       "output": "Planning results that fail to save are now retried, and if they still fail the task shows the real error and keeps the plan text. The full suite ran once and everything passed except my new `read_text` test, which had two bugs in the test itself. After fixing them, the 12 tests matching Windows SSH, save-failure and restart passed (with the `-k` filters I gave, those were the only tests that ran). I did not re-run the whole suite after the fix. I did not do the manual checks on a real PowerShell host, a `cmd` host or a Linux host.\n\n**`engine.py`**\n- The final `edit_task` body from `Engine._plan` is now `_record_plan(...)`, which returns whether the task was queued. The logic is unchanged.\n- `_plan` makes up to 3 attempts, sleeping 1s and then 3s between them, outside the store lock. Each retry logs a warning.\n- If all attempts fail, `_save_lost_plan` records `Planning finished but saving the result failed: <Type>: <exc>` in `self._lost`. It then makes one small write that restores the previous status (or `unplanned`), sets `error`, and puts the plan text in `output`. The job is popped in `finally`, after `_lost` is set.\n- `reconcile` uses the `_lost` text when there is one. It only says \"restarted\" when there is no `_lost` entry.\n- If the small write succeeds, I drop the `_lost` entry straight away, since the error is already on the task.\n\n**`hosts.py` (`WindowsSSHHost`)**\n- `read_text` and `write_text` now time out at 120s and go through `_exec_retry`, which retries once on `HostError` or a timeout.\n- Errors say which operation and path failed, and a timeout is reported as \"timed out\" instead of \"ssh failed\".\n- `read_text` on non-`cmd` shells now reads the file as base64 and decodes it in Python. `cmd` hosts keep the raw-bytes path.\n\n**Tests**\n- Persistent save failure: the task ends in its previous status with \"saving the result failed\" in `error` and the plan text in `output`. `reconcile` does not say \"restarted\", and `jobs` is cleared.\n- `reconcile` uses the `_lost` text and does not say \"restarted\" when the fallback write also failed.\n- One transient save failure: the task still reaches `planned` or `drafted`.\n- A `planning` task with no job and no `_lost` entry still gets \"restarted\".\n- Windows host: base64 on PowerShell, raw output on `cmd`, one retry after a timeout, and the error text names the operation and path.\n- Backoff sleeps are patched in the engine tests, so they run fast.\n- I changed the `_decode_ps` test helper to strip the `; exit $LASTEXITCODE` suffix that PowerShell hosts add.\n- I added `import base64` to the test file.\n\nThe suite takes about 3 minutes (the one full run was 195s).",
       "error": "",
-      "commit": "",
+      "commit": "287e8fca0741a05566a1a5d4df46fe7b053c2f71",
       "changes": [],
       "summary": "",
       "checkin_pending": false,
@@ -2877,6 +2877,10 @@
         {
           "at": "2026-10-02T23:10:11+00:00",
           "event": "AI run finished; awaiting review"
+        },
+        {
+          "at": "2026-10-02T23:10:19+00:00",
+          "event": "Committed 287e8fca07"
         }
       ],
       "prev_status": "drafted"
