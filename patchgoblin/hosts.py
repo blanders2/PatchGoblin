@@ -50,7 +50,8 @@ def kill_tree(proc: subprocess.Popen) -> None:
     try:
         if os.name == "nt":
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
         else:
             os.killpg(proc.pid, signal.SIGTERM)
     except (OSError, ProcessLookupError):
