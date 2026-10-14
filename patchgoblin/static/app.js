@@ -29,6 +29,8 @@ const state = {
   dirty: false,
   selected: new Set(), // task ids ticked for batch actions; always within the current tab
   lastSelected: null, // anchor for shift-click range selection
+  mode: "projects", // sidebar mode: "projects" or "ssh" (SSH tools); the project UI is only hidden in "ssh"
+  sshTool: "keys", // "keys", "install" or "tunnels"
   view: "board", // "board" or "settings" (the full-page Project settings view)
   settingsDirty: false,
   automation: {}, // the global automation defaults, for the project settings' "Default (…)" labels
@@ -2081,6 +2083,7 @@ function setupGlobalKeys() {
   });
   // Outside presses close the drawer/chat. pointerdown, not click: a card's click re-renders the board.
   document.addEventListener("pointerdown", e => {
+    if (state.mode === "ssh") return; // the hidden drawer/chat must stay open
     if (e.button !== 0 || !(e.target instanceof Element) || document.querySelector("dialog[open]")) return;
     const drawer = $("#drawer"), chatPanel = $("#chat");
     if (!drawer.hidden && isOutside(drawer, e.target)
@@ -2097,6 +2100,7 @@ function setupGlobalKeys() {
     if (!chatPanel.hidden && isOutside(chatPanel, e.target) && !e.target.closest("#chat-btn")) closeChat();
   });
   document.addEventListener("keydown", e => {
+    if (state.mode === "ssh") return; // hidden project UI must not react to keys
     // Esc closes an open dialog or drawer first; only then does it leave Project settings.
     if (e.key === "Escape" && state.view === "settings" && $("#drawer").hidden && $("#chat").hidden
         && !document.querySelector("dialog[open]")) {
@@ -2112,6 +2116,307 @@ function setupGlobalKeys() {
   window.addEventListener("beforeunload", e => { if (state.dirty || state.settingsDirty) e.preventDefault(); });
 }
 
+// ---- SSH tools -----------------------------------------------------------------------
+// The sidebar switches between the project list and these tools. Switching only hides the
+// project UI (body.mode-ssh, see app.css): nothing is closed, reset or reselected, and the
+// polling of tasks and reachability keeps updating the hidden DOM.
+
+const SSH_TOOLS = { keys: "Keys", install: "Install keys", tunnels: "Tunnels" };
+const ssh = {
+  targets: null, // [{target, port}] from /api/ssh/targets, once per session
+  keys: [], // keys listed in the Keys panel
+  installKeys: [],
+  tunnels: [],
+  running: 0,
+  timer: null,
+  confirmed: new Set(), // tunnel ids whose 0.0.0.0 bind was confirmed this session
+  highlight: null,
+};
+
+const sshSourceValue = t => `${t.target}\t${t.port || ""}`;
+function sshSource(value) {
+  const [target, port] = (value || "local").split("\t");
+  return target === "local" ? null : { target, port: port ? Number(port) : null };
+}
+const sshLabel = t => t.port ? `${t.target}:${t.port}` : t.target;
+
+function sshLog(lines) {
+  const log = $("#ssh-log");
+  log.textContent = [].concat(lines).join("\n");
+  log.hidden = false;
+}
+
+function setSidebarMode(mode, save = true) {
+  state.mode = mode === "ssh" ? "ssh" : "projects";
+  if (save) localStorageSet("pg.sidebarMode", state.mode);
+  const on = state.mode === "ssh";
+  document.body.classList.toggle("mode-ssh", on);
+  $("#sidebar-projects").hidden = on;
+  $("#sidebar-ssh").hidden = !on;
+  $("#ssh-tools-view").hidden = !on;
+  $("#mode-projects-btn").setAttribute("aria-selected", String(!on));
+  $("#mode-ssh-btn").setAttribute("aria-selected", String(on));
+  if (on) openSshTool(state.sshTool);
+  loadTunnels();
+  resetTunnelTimer();
+}
+
+function resetTunnelTimer() {
+  clearInterval(ssh.timer);
+  ssh.timer = setInterval(() => { if (!document.hidden) loadTunnels(); }, state.mode === "ssh" ? 5000 : 30000);
+}
+
+async function ensureSshTargets() {
+  if (ssh.targets) return;
+  try { ssh.targets = (await api("GET", "/api/ssh/targets")).targets; } catch { ssh.targets = []; }
+  $("#ssh-targets").replaceChildren(...ssh.targets.map(t => el("option", { value: t.target }, t.port ? `port ${t.port}` : "")));
+  for (const sel of $$("#ssh-key-source, #ssh-gen-source, #ssh-install-source")) {
+    sel.append(...ssh.targets.map(t => el("option", { value: sshSourceValue(t) }, sshLabel(t))));
+  }
+}
+
+async function openSshTool(tool) {
+  if (!SSH_TOOLS[tool]) tool = "keys";
+  state.sshTool = tool;
+  localStorageSet("pg.sshTool", tool);
+  for (const li of $$("#ssh-nav li")) li.classList.toggle("active", li.dataset.tool === tool);
+  for (const t of Object.keys(SSH_TOOLS)) $(`#ssh-${t}-panel`).hidden = t !== tool;
+  $("#ssh-title").textContent = SSH_TOOLS[tool];
+  $("#ssh-log").hidden = true;
+  await ensureSshTargets();
+  if (state.sshTool !== tool) return; // the user moved on while the targets loaded
+  if (tool === "keys") loadSshKeys();
+  if (tool === "install") loadInstallKeys();
+  if (tool === "tunnels") renderTunnelPanel();
+}
+
+async function copyText(text, done) {
+  try { await navigator.clipboard.writeText(text); toast(done); }
+  catch { toast("Could not copy", true); }
+}
+
+async function fetchKeys(value) {
+  const src = sshSource(value);
+  const q = src ? `source=${encodeURIComponent(src.target)}${src.port ? `&port=${src.port}` : ""}` : "source=local";
+  return (await api("GET", `/api/ssh/keys?${q}`)).keys;
+}
+
+async function loadSshKeys() {
+  const rows = $("#ssh-key-rows");
+  rows.replaceChildren(el("tr", {}, el("td", { colspan: 5, class: "muted" }, "Loading…")));
+  try { ssh.keys = await fetchKeys($("#ssh-key-source").value); }
+  catch (e) { ssh.keys = []; rows.replaceChildren(el("tr", {}, el("td", { colspan: 5 }, el("div", { class: "error" }, e.message)))); return; }
+  rows.replaceChildren(...(ssh.keys.length ? ssh.keys.map(k => el("tr", {},
+    el("td", {}, k.type), el("td", {}, k.name + (k.has_private ? "" : " (no private key)")),
+    el("td", { class: "mono" }, k.fingerprint), el("td", {}, k.comment),
+    el("td", {}, el("button", { class: "small ghost", onclick: () => copyText(k.text, "Public key copied") }, "Copy"))))
+    : [el("tr", {}, el("td", { colspan: 5, class: "muted" }, "No public keys found."))]));
+}
+
+async function generateKey(e) {
+  e.preventDefault();
+  const f = e.target, src = sshSource(f.elements.source.value);
+  const body = { name: f.elements.name.value.trim(), type: f.elements.type.value, comment: f.elements.comment.value, passphrase: f.elements.passphrase.value,
+                 source: src ? src.target : "local", port: src ? src.port : null };
+  try {
+    const { key } = await api("POST", "/api/ssh/keys/generate", body);
+    f.elements.passphrase.value = "";
+    sshLog([`Created ${key.path}`, key.fingerprint, key.text]);
+    toast("Key generated");
+    if ($("#ssh-key-source").value === f.elements.source.value) loadSshKeys();
+  } catch (err) { toast(err.message, true); sshLog(err.message); }
+}
+
+async function loadInstallKeys() {
+  const box = $("#ssh-install-keys");
+  box.replaceChildren(el("span", { class: "muted" }, "Loading…"));
+  try { ssh.installKeys = await fetchKeys($("#ssh-install-source").value); }
+  catch (e) { ssh.installKeys = []; box.replaceChildren(el("div", { class: "error" }, e.message)); return; }
+  box.replaceChildren(...(ssh.installKeys.length ? ssh.installKeys.map((k, i) => el("label", { class: "check" },
+    el("input", { type: "checkbox", value: String(i) }), `${k.name} — ${k.type} ${k.fingerprint}`))
+    : [el("span", { class: "muted" }, "No public keys found. Generate one first.")]));
+}
+
+function addInstallDest() {
+  const row = el("div", { class: "ssh-dest" },
+    el("input", { type: "text", list: "ssh-targets", placeholder: "user@host or alias", "aria-label": "Destination", autocomplete: "off" }),
+    el("input", { type: "number", min: 1, max: 65535, placeholder: "port", "aria-label": "Port" }),
+    el("label", { class: "check" }, el("input", { type: "checkbox" }), "Windows host"),
+    el("button", { type: "button", class: "ghost small", onclick: () => row.remove() }, "Remove"));
+  $("#ssh-install-dests").append(row);
+}
+
+async function installKeys() {
+  const keys = $$("#ssh-install-keys input:checked").map(c => ssh.installKeys[Number(c.value)].text);
+  const targets = $$("#ssh-install-dests .ssh-dest").map(r => {
+    const [t, p, w] = $$("input", r);
+    return { target: t.value.trim(), port: p.value ? Number(p.value) : null, windows: w.checked };
+  }).filter(t => t.target);
+  if (!keys.length) return toast("Choose at least one public key", true);
+  if (!targets.length) return toast("Add at least one destination", true);
+  const btn = $("#ssh-install-btn");
+  btn.disabled = true;
+  try {
+    const { results } = await api("POST", "/api/ssh/install", { keys, targets, interactive: $("#ssh-interactive").checked });
+    sshLog(results.map(r => r.ok
+      ? `${r.target}: ok — ${r.added.length} added, ${r.skipped.length} already there${r.note ? `\n  ${r.note}` : ""}`
+      : `${r.target}: FAILED — ${r.error}`));
+    const bad = results.filter(r => !r.ok).length;
+    toast(bad ? `${bad} of ${results.length} destinations failed` : `Keys installed on ${results.length} destination(s)`, bad > 0);
+  } catch (e) { toast(e.message, true); sshLog(e.message); }
+  finally { btn.disabled = false; }
+}
+
+// ---- tunnels
+const tunnelText = t => `${t.direction === "local" ? "L" : "R"} ${t.bind}:${t.listen_port}→${t.dest_host}:${t.dest_port}`;
+
+function tunnelDot(t) {
+  const cls = t.state === "running" ? "ok" : t.returncode ? "bad" : "";
+  const label = t.state === "running" ? "Running" : t.returncode ? `Stopped (exit ${t.returncode})` : "Stopped";
+  return el("span", { class: `p-dot ${cls}`, title: label, "aria-label": label, role: "img" });
+}
+
+async function loadTunnels() {
+  try {
+    const data = await api("GET", "/api/ssh/tunnels");
+    ssh.tunnels = data.tunnels;
+    ssh.running = data.running;
+  } catch { return; } // a failed poll shouldn't toast
+  const badge = $("#ssh-running-badge");
+  badge.textContent = ssh.running;
+  badge.hidden = !ssh.running;
+  if (state.mode !== "ssh") return;
+  renderTunnelList();
+  if (state.sshTool === "tunnels") renderTunnelPanel();
+}
+
+function tunnelToggle(t) {
+  return el("button", { class: "small ghost", type: "button", title: t.state === "running" ? "Stop" : "Start",
+    "aria-label": `${t.state === "running" ? "Stop" : "Start"} ${t.name}`,
+    onclick: e => { e.stopPropagation(); toggleTunnel(t); } }, t.state === "running" ? "■" : "▶");
+}
+
+function renderTunnelList() {
+  $("#ssh-tunnel-list").replaceChildren(...ssh.tunnels.map(t => el("li", {
+    tabindex: 0,
+    onclick: () => { ssh.highlight = t.id; openSshTool("tunnels"); },
+    onkeydown: e => { if (e.key === "Enter") { ssh.highlight = t.id; openSshTool("tunnels"); } },
+  }, tunnelDot(t), el("div", { class: "t-text" }, el("div", { class: "p-name" }, t.name),
+     el("div", { class: "p-sub", title: tunnelText(t) }, tunnelText(t))), tunnelToggle(t))));
+}
+
+async function toggleTunnel(t) {
+  try {
+    if (t.state === "running") {
+      await api("POST", `/api/ssh/tunnels/${t.id}/stop`);
+    } else {
+      if (t.bind === "0.0.0.0" && !ssh.confirmed.has(t.id)) {
+        if (!confirm(`"${t.name}" listens on all interfaces (0.0.0.0): anyone who can reach this network can use the forwarded port. Start it?`)) return;
+        ssh.confirmed.add(t.id);
+      }
+      toast("Starting tunnel…");
+      await api("POST", `/api/ssh/tunnels/${t.id}/start`);
+      toast("Tunnel running");
+    }
+  } catch (e) { toast(e.message, true); if (state.sshTool === "tunnels") sshLog(e.message); }
+  loadTunnels();
+}
+
+function renderTunnelPanel() {
+  const rows = $("#ssh-tunnel-rows");
+  rows.replaceChildren(...(ssh.tunnels.length ? ssh.tunnels.map(t => el("tr", { class: ssh.highlight === t.id ? "flash" : "", "data-tid": t.id },
+    el("td", {}, tunnelDot(t)), el("td", {}, t.name),
+    el("td", { class: "mono" }, tunnelText(t),
+      t.stderr ? el("details", {}, el("summary", {}, "ssh output"), el("pre", { class: "log" }, t.stderr)) : null),
+    el("td", {}, sshLabel(t)),
+    el("td", {}, el("div", { class: "actions" }, tunnelToggle(t),
+      el("button", { class: "small ghost", type: "button", onclick: () => editTunnel(t) }, "Edit"),
+      el("button", { class: "small ghost danger", type: "button", onclick: () => deleteTunnel(t) }, "Delete")))))
+    : [el("tr", {}, el("td", { colspan: 5, class: "muted" }, "No saved tunnels yet."))]));
+  const hit = ssh.highlight && $(`#ssh-tunnel-rows tr[data-tid="${ssh.highlight}"]`);
+  if (hit) { hit.scrollIntoView({ block: "nearest" }); ssh.highlight = null; }
+}
+
+const tunnelSpec = t => ({ id: t.id, name: t.name, target: t.target, port: t.port, direction: t.direction, bind: t.bind,
+  listen_port: t.listen_port, dest_host: t.dest_host, dest_port: t.dest_port });
+
+async function saveTunnels(list) {
+  const data = await api("PUT", "/api/ssh/tunnels", { tunnels: list });
+  ssh.tunnels = data.tunnels;
+  ssh.running = data.running;
+  renderTunnelList();
+  renderTunnelPanel();
+}
+
+function updateTunnelFormHints() {
+  const f = $("#ssh-tunnel-form");
+  $("#ssh-bind-warning").hidden = f.elements.bind.value !== "0.0.0.0";
+  $("#ssh-remote-note").hidden = f.elements.direction.value !== "remote";
+}
+
+function resetTunnelForm() {
+  const f = $("#ssh-tunnel-form");
+  f.reset();
+  f.elements.id.value = "";
+  $("#ssh-tunnel-form-title").textContent = "Add a tunnel";
+  $("#ssh-tunnel-cancel").hidden = true;
+  showError($("#ssh-tunnel-error"), "");
+  updateTunnelFormHints();
+}
+
+function editTunnel(t) {
+  const f = $("#ssh-tunnel-form");
+  for (const k of ["id", "name", "target", "port", "direction", "bind", "listen_port", "dest_host", "dest_port"]) f.elements[k].value = t[k] ?? "";
+  $("#ssh-tunnel-form-title").textContent = `Edit ${t.name}`;
+  $("#ssh-tunnel-cancel").hidden = false;
+  updateTunnelFormHints();
+  f.scrollIntoView({ block: "nearest" });
+}
+
+async function deleteTunnel(t) {
+  if (!confirm(`Delete the tunnel "${t.name}"?`)) return;
+  try { await saveTunnels(ssh.tunnels.filter(x => x.id !== t.id).map(tunnelSpec)); }
+  catch (e) { toast(e.message, true); }
+}
+
+async function submitTunnel(e) {
+  e.preventDefault();
+  const f = e.target;
+  const spec = { id: f.elements.id.value, name: f.elements.name.value.trim(), target: f.elements.target.value.trim(), port: f.elements.port.value ? Number(f.elements.port.value) : null,
+    direction: f.elements.direction.value, bind: f.elements.bind.value, listen_port: Number(f.elements.listen_port.value),
+    dest_host: f.elements.dest_host.value.trim(), dest_port: Number(f.elements.dest_port.value) };
+  const list = ssh.tunnels.map(tunnelSpec);
+  const at = list.findIndex(t => t.id === spec.id);
+  if (at >= 0) list[at] = spec; else list.push(spec);
+  try {
+    await saveTunnels(list);
+    resetTunnelForm();
+    toast("Tunnel saved");
+  } catch (err) { showError($("#ssh-tunnel-error"), err.message); }
+}
+
+function setupSshTools() {
+  state.mode = localStorageGet("pg.sidebarMode") === "ssh" ? "ssh" : "projects";
+  state.sshTool = SSH_TOOLS[localStorageGet("pg.sshTool")] ? localStorageGet("pg.sshTool") : "keys";
+  $("#mode-projects-btn").onclick = () => setSidebarMode("projects");
+  $("#mode-ssh-btn").onclick = () => setSidebarMode("ssh");
+  for (const li of $$("#ssh-nav li")) {
+    li.onclick = () => openSshTool(li.dataset.tool);
+    li.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSshTool(li.dataset.tool); } };
+  }
+  $("#ssh-key-source").onchange = loadSshKeys;
+  $("#ssh-keys-refresh").onclick = loadSshKeys;
+  $("#ssh-generate-form").onsubmit = generateKey;
+  $("#ssh-install-source").onchange = loadInstallKeys;
+  $("#ssh-add-dest").onclick = addInstallDest;
+  $("#ssh-install-btn").onclick = installKeys;
+  $("#ssh-tunnel-form").onsubmit = submitTunnel;
+  $("#ssh-tunnel-form").onchange = updateTunnelFormHints;
+  $("#ssh-tunnel-cancel").onclick = resetTunnelForm;
+  addInstallDest();
+  setSidebarMode(state.mode, false);
+}
+
 function init() {
   setupThemePicker();
   setupProjectDialog();
@@ -2123,6 +2428,7 @@ function init() {
   setupProjectSettings();
   setupDrawer();
   setupGlobalKeys();
+  setupSshTools();
   loadAutomation();
   $("#new-task").onsubmit = createTask;
   $("#commits-btn").onclick = showCommits;
@@ -2149,7 +2455,7 @@ function init() {
   setInterval(() => { if (!document.hidden) loadTasks(); }, 3000);
   setInterval(() => { if (!document.hidden) loadReachability(); }, 60000);
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) { loadTasks(); loadReachability(); }
+    if (!document.hidden) { loadTasks(); loadReachability(); loadTunnels(); }
   });
 }
 

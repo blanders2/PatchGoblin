@@ -90,6 +90,7 @@ DEFAULT_SETTINGS = {
             "plan_must_not_edit": True,  # fail a plan (or chat) that changed files
         },
     },
+    "ssh_tunnels": [],  # saved SSH port forwards (see sshtools.clean_tunnels)
     "endpoints": [{
         "id": "openai",
         "name": "OpenAI",
@@ -345,6 +346,8 @@ class Settings:
             if isinstance(cfg, dict):
                 models = cfg.get("models") if isinstance(cfg.get("models"), list) else []
                 cfg["models"] = [m for m in models if isinstance(m, str) and m.strip()]
+        if not isinstance(out.get("ssh_tunnels"), list):
+            out["ssh_tunnels"] = []
         if not isinstance(out.get("provider_renames"), dict):
             out["provider_renames"] = {}
         return out
@@ -373,6 +376,14 @@ class Settings:
             cfg["models"] = [*saved, *new]
             self.file.save(data)
             return new
+
+    def save_tunnels(self, tunnels: list[dict]) -> list[dict]:
+        """Replace the saved SSH tunnels."""
+        with self.file.lock:
+            data = self.file.load()
+            data["ssh_tunnels"] = tunnels
+            self.file.save(data)
+        return tunnels
 
     def save_endpoints(self, endpoints: list[dict]) -> dict:
         """Replace the whole endpoint list (``_merge`` would replace lists anyway)."""

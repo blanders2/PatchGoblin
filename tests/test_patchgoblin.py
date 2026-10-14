@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from patchgoblin import create_app  # noqa: E402
 from patchgoblin import hosts as hosts_mod  # noqa: E402
+from patchgoblin import sshtools  # noqa: E402
 from patchgoblin.engine import Job  # noqa: E402
 from patchgoblin.hosts import (HostError, LocalHost, Result, SSHHost, WindowsSSHHost, detect_ssh_os,  # noqa: E402
                                host_for, probe, terminal_command, vscode_command)
@@ -3203,6 +3204,279 @@ class CliModelListTests(AppTestCase):
         with mock.patch("patchgoblin.hosts.LocalHost.run", return_value=Result(0, "not json\n", "")):
             self.assertIn("unexpected", self.client.get(url + "?refresh=1").get_json()["error"])
         self.assertEqual(self.client.get("/api/projects/nope/cline/models").status_code, 404)
+
+
+class SshToolsTests(AppTestCase):
+    PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIabc test@box"
+    PUB2 = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ other@box"
+    SECRET = "SUPER-SECRET-PRIVATE-MATERIAL"
+
+    def fake_home(self):
+        home = os.path.join(self.tmp.name, "home")
+        os.makedirs(os.path.join(home, ".ssh"))
+        env = mock.patch.dict(os.environ, {"HOME": home, "USERPROFILE": home})
+        env.start()
+        self.addCleanup(env.stop)
+        return os.path.join(home, ".ssh")
+
+    def write(self, folder, name, text):
+        with open(os.path.join(folder, name), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    # ---- keys
+    def test_list_local_keys_never_reads_private_files(self):
+        folder = self.fake_home()
+        self.write(folder, "id_ed25519.pub", self.PUB + "\n")
+        self.write(folder, "id_ed25519", "-----BEGIN OPENSSH PRIVATE KEY-----\n" + self.SECRET + "\n")
+        self.write(folder, "junk.pub", "not a key\n")
+        with mock.patch("patchgoblin.sshtools.communicate",
+                        return_value=Result(0, "256 SHA256:abc test@box (ED25519)\n", "")) as run:
+            keys = sshtools.list_local_keys()
+        self.assertEqual([k["name"] for k in keys], ["id_ed25519"])
+        self.assertTrue(keys[0]["has_private"])
+        self.assertEqual(keys[0]["fingerprint"], "SHA256:abc")
+        self.assertEqual(keys[0]["text"], self.PUB)
+        self.assertNotIn(self.SECRET, json.dumps(keys))
+        self.assertEqual(run.call_args[0][0][:2], ["ssh-keygen", "-lf"])
+
+    def test_list_remote_keys_reads_only_pub_files(self):
+        host = mock.Mock()
+        host.home.return_value = "/home/me"
+        host.join.side_effect = lambda *p: "/".join(p)
+        host.list_dir.return_value = ["authorized_keys", "id_rsa", "id_rsa.pub", "orphan.pub"]
+        host.read_text.side_effect = lambda path: self.PUB2 + "\n" if path.endswith("id_rsa.pub") else "garbage"
+        with mock.patch("patchgoblin.sshtools.communicate", return_value=Result(0, "3072 SHA256:zz c (RSA)\n", "")):
+            keys = sshtools.list_remote_keys(host)
+        self.assertEqual([c.args[0] for c in host.read_text.call_args_list],
+                         ["/home/me/.ssh/id_rsa.pub", "/home/me/.ssh/orphan.pub"])
+        self.assertEqual([(k["name"], k["has_private"]) for k in keys], [("id_rsa", True)])
+
+    def test_generate_key_argv_and_validation(self):
+        folder = self.fake_home()
+
+        def fake(argv, **kw):
+            if argv[1] == "-lf":
+                return Result(0, "256 SHA256:new c (ED25519)\n", "")
+            path = argv[argv.index("-f") + 1]
+            self.write(os.path.dirname(path), os.path.basename(path), "private")
+            self.write(os.path.dirname(path), os.path.basename(path) + ".pub", self.PUB + "\n")
+            return Result(0, "256 SHA256:new c (ED25519)\n", "")
+
+        with mock.patch("patchgoblin.sshtools.communicate", side_effect=fake) as run:
+            key = sshtools.generate_key("mykey", "rsa", "me", "pw")
+        argv = run.call_args_list[0][0][0]
+        self.assertEqual(argv, ["ssh-keygen", "-t", "rsa", "-b", "4096", "-f", os.path.join(folder, "mykey"),
+                                "-C", "me", "-N", "pw", "-q"])
+        self.assertEqual(key["text"], self.PUB)
+        with mock.patch("patchgoblin.sshtools.communicate") as run:
+            for bad in ("mykey", "../x", "-o", "a b", ".hidden", ""):
+                with self.assertRaises(ValueError):
+                    sshtools.generate_key(bad)
+            with self.assertRaises(ValueError):
+                sshtools.generate_key("fresh", "dsa")
+            run.assert_not_called()
+
+    def test_generate_key_on_remote_host(self):
+        host = mock.Mock()
+        host.home.return_value = "/home/me"
+        host.join.side_effect = lambda *p: "/".join(p)
+        host.list_dir.return_value = []
+        host.run.return_value = Result(0, "", "")
+        host.read_text.return_value = self.PUB + "\n"
+        with mock.patch("patchgoblin.sshtools.communicate", return_value=Result(0, "256 SHA256:r c\n", "")):
+            key = sshtools.generate_key("k", "ed25519", host=host)
+        self.assertEqual(host.run.call_args[0][0][:3], ["ssh-keygen", "-t", "ed25519"])
+        self.assertEqual(host.run.call_args[1]["cwd"], "/home/me")
+        self.assertEqual(key["path"], "/home/me/.ssh/k.pub")
+
+    # ---- install
+    def test_install_keys_posix_sends_keys_on_stdin(self):
+        host = SSHHost("me@box")
+        out = f"ADD {self.PUB}\nSKIP {self.PUB2}\n"
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(0, out, "")) as run:
+            res = sshtools.install_keys(host, [self.PUB, self.PUB2, self.PUB])
+        self.assertEqual(run.call_args[1]["input"], f"{self.PUB}\n{self.PUB2}\n")
+        self.assertEqual(res, {"added": [self.PUB], "skipped": [self.PUB2], "note": ""})
+        self.assertIn("authorized_keys", run.call_args[0][0][-1])
+        self.assertNotIn(self.PUB, run.call_args[0][0][-1])
+
+    def test_install_keys_windows_uses_encoded_command_and_base64_markers(self):
+        host = WindowsSSHHost("me@win")
+        b64 = lambda t: base64.b64encode(t.encode()).decode()
+        out = f"##PATCHGOBLIN##\nADD {b64(self.PUB)}\nSKIP {b64(self.PUB2)}\nADMIN\n"
+        with mock.patch("patchgoblin.hosts.detect_windows_shell", return_value="powershell"), \
+                mock.patch("patchgoblin.hosts.communicate", return_value=Result(0, out, "")) as run:
+            res = sshtools.install_keys(host, [self.PUB, self.PUB2])
+        self.assertIn("-EncodedCommand", run.call_args[0][0][-1])
+        self.assertEqual(res["added"], [self.PUB])
+        self.assertEqual(res["skipped"], [self.PUB2])
+        self.assertIn("administrators_authorized_keys", res["note"])
+
+    def test_install_keys_rejects_bad_input_before_ssh(self):
+        host = SSHHost("me@box")
+        with mock.patch("patchgoblin.hosts.communicate") as run:
+            for bad in ("garbage", self.PUB + "\nssh-rsa AAAA x", "-----BEGIN OPENSSH PRIVATE KEY-----\nabc", "", None):
+                with self.assertRaises(ValueError):
+                    sshtools.install_keys(host, [bad])
+            with self.assertRaisesRegex(ValueError, "private key"):
+                sshtools.install_keys(host, ["-----BEGIN RSA PRIVATE KEY-----"])
+            with self.assertRaises(ValueError):
+                sshtools.install_keys(host, [])
+            run.assert_not_called()
+
+    def test_install_keys_auth_failure(self):
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(255, "", "Permission denied")):
+            with self.assertRaises(sshtools.AuthError):
+                sshtools.install_keys(SSHHost("me@box"), [self.PUB])
+
+    def test_install_keys_interactive_argv_and_cap(self):
+        with mock.patch("patchgoblin.sshtools.run_in_terminal") as term:
+            sshtools.install_keys_interactive("me@box", 2222, [self.PUB])
+            argv = term.call_args[0][0]
+            self.assertEqual(argv[:5], ["ssh", "-t", "-p", "2222", "me@box"])
+            self.assertIn("'" + self.PUB + "'", argv[5])
+            sshtools.install_keys_interactive("me@win", None, [self.PUB], windows=True)
+            argv = term.call_args[0][0]
+            self.assertEqual(argv[:3], ["ssh", "-t", "me@win"])
+            self.assertTrue(argv[3].startswith("powershell -NoProfile -EncodedCommand "))
+            term.reset_mock()
+            many = [f"ssh-ed25519 AAAA{i:04d}{'A' * 100} k{i}" for i in range(100)]
+            with self.assertRaisesRegex(ValueError, "fewer"):
+                sshtools.install_keys_interactive("me@win", None, many, windows=True)
+            term.assert_not_called()
+
+    def test_run_in_terminal_wraps_for_each_platform(self):
+        argv = ["ssh", "-t", "me@box", "echo hi"]
+        with mock.patch("patchgoblin.hosts._spawn") as spawn:
+            hosts_mod.run_in_terminal(argv, "win32", which=lambda n: None)
+            spawn.assert_called_with(argv, None, "CREATE_NEW_CONSOLE")
+            hosts_mod.run_in_terminal(argv, "darwin")
+            self.assertEqual(spawn.call_args[0][0][0], "osascript")
+            hosts_mod.run_in_terminal(argv, "linux", which=lambda n: n == "xterm")
+            self.assertEqual(spawn.call_args[0][0], ["xterm", "-e", *argv])
+
+    # ---- targets
+    def test_ssh_targets_merges_config_and_projects(self):
+        folder = self.fake_home()
+        self.write(folder, "config", "Host *\n  User x\nHost alpha beta !neg wild*\n  HostName 1.2.3.4\n"
+                                     "host Gamma\nMatch host foo\nInclude other\n")
+        registry = mock.Mock()
+        registry.list.return_value = [{"location": "ssh", "ssh_target": "me@box", "ssh_port": 2200},
+                                      {"location": "local"}, {"location": "ssh", "ssh_target": "me@box", "ssh_port": 2200}]
+        targets = sshtools.ssh_targets(registry)
+        self.assertEqual(targets, [{"target": "me@box", "port": 2200}, {"target": "alpha", "port": None},
+                                   {"target": "beta", "port": None}, {"target": "Gamma", "port": None}])
+
+    # ---- tunnels
+    SPEC = {"id": "web", "name": "Web", "target": "me@box", "port": None, "direction": "local",
+            "bind": "127.0.0.1", "listen_port": 8080, "dest_host": "localhost", "dest_port": 80}
+
+    def test_tunnel_argv(self):
+        for direction, flag in (("local", "-L"), ("remote", "-R")):
+            for bind in ("127.0.0.1", "0.0.0.0"):
+                argv = sshtools.tunnel_argv({**self.SPEC, "direction": direction, "bind": bind, "port": 2200})
+                self.assertEqual(argv, ["ssh", "-N", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
+                                        "-o", "ServerAliveInterval=30", "-p", "2200", flag,
+                                        f"{bind}:8080:localhost:80", "me@box"])
+
+    def test_validate_tunnel_rules(self):
+        self.assertEqual(sshtools.validate_tunnel(self.SPEC)["listen_port"], 8080)
+        for change in ({"listen_port": 0}, {"listen_port": 70000}, {"dest_port": "x"}, {"dest_host": "-oProxy"},
+                       {"dest_host": "a b"}, {"dest_host": "a;b"}, {"bind": "10.0.0.1"}, {"direction": "dynamic"},
+                       {"target": "-oProxyCommand=x"}, {"target": "a b"}, {"id": "Bad Id"}, {"id": ""}, {"port": 99999}):
+            with self.assertRaises(ValueError, msg=change):
+                sshtools.validate_tunnel({**self.SPEC, **change})
+
+    def test_clean_tunnels_drops_invalid_and_dedupes(self):
+        out = sshtools.clean_tunnels([self.SPEC, {**self.SPEC, "name": "dupe"}, {**self.SPEC, "id": "x", "dest_port": 0},
+                                      "junk", {**self.SPEC, "id": "", "name": "My Tunnel"}])
+        self.assertEqual([t["id"] for t in out], ["web", "my-tunnel"])
+        with self.assertRaises(ValueError):
+            sshtools.clean_tunnels([self.SPEC, self.SPEC], strict=True)
+
+    def test_tunnel_exiting_immediately_raises_with_stderr(self):
+        manager = sshtools.TunnelManager()
+        code = "import sys; sys.stderr.write('bind: Address already in use\\n'); sys.exit(255)"
+        with mock.patch("patchgoblin.sshtools.tunnel_argv", return_value=[sys.executable, "-c", code]):
+            with self.assertRaisesRegex(HostError, "Address already in use"):
+                manager.start(self.SPEC)
+        self.assertEqual(manager.running_count(), 0)
+        self.assertEqual(manager.status()["web"]["state"], "stopped")
+
+    def test_tunnel_start_stop_all_and_count(self):
+        manager = sshtools.TunnelManager()
+        code = "import time; time.sleep(60)"
+        with mock.patch("patchgoblin.sshtools.tunnel_argv", return_value=[sys.executable, "-c", code]), \
+                mock.patch.object(sshtools, "STARTUP_WAIT", 0.3):
+            manager.start(self.SPEC)
+            self.addCleanup(manager.stop_all)
+            self.assertEqual(manager.running_count(), 1)
+            self.assertEqual(manager.status()["web"]["state"], "running")
+            with self.assertRaises(ValueError):
+                manager.start(self.SPEC)  # one process per id
+            manager.stop_all()
+        self.assertEqual(manager.running_count(), 0)
+        self.assertEqual(manager.status()["web"]["state"], "stopped")
+
+    # ---- settings + routes
+    def test_global_settings_save_keeps_tunnels(self):
+        self.client.put("/api/ssh/tunnels", headers=H, json={"tunnels": [self.SPEC]})
+        res = self.client.put("/api/settings", headers=H, json={"git": {"gitignore": "x"}})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual([t["id"] for t in self.app.config["SETTINGS"].get()["ssh_tunnels"]], ["web"])
+
+    def test_routes_require_header_and_list_tunnels(self):
+        self.assertEqual(self.client.post("/api/ssh/install", json={}).status_code, 403)
+        self.assertEqual(self.client.put("/api/ssh/tunnels", json={"tunnels": []}).status_code, 403)
+        self.assertEqual(self.client.post("/api/ssh/tunnels/web/start").status_code, 403)
+        data = self.client.get("/api/ssh/tunnels").get_json()
+        self.assertEqual(data, {"tunnels": [], "running": 0})
+        self.assertEqual(self.client.put("/api/ssh/tunnels", headers=H, json={"tunnels": [{**self.SPEC, "dest_port": 0}]}).status_code, 400)
+        data = self.client.put("/api/ssh/tunnels", headers=H, json={"tunnels": [self.SPEC]}).get_json()
+        self.assertEqual(data["tunnels"][0]["state"], "stopped")
+        self.assertEqual(self.client.post("/api/ssh/tunnels/nope/start", headers=H).status_code, 404)
+
+    def test_running_tunnel_cannot_be_changed(self):
+        self.client.put("/api/ssh/tunnels", headers=H, json={"tunnels": [self.SPEC]})
+        manager = self.app.config["TUNNELS"]
+        code = "import time; time.sleep(60)"
+        with mock.patch("patchgoblin.sshtools.tunnel_argv", return_value=[sys.executable, "-c", code]), \
+                mock.patch.object(sshtools, "STARTUP_WAIT", 0.3):
+            self.addCleanup(manager.stop_all)
+            res = self.client.post("/api/ssh/tunnels/web/start", headers=H)
+            self.assertEqual(res.get_json()["running"], 1)
+            self.assertEqual(self.client.put("/api/ssh/tunnels", headers=H, json={"tunnels": []}).status_code, 400)
+            self.assertEqual(self.client.put("/api/ssh/tunnels", headers=H,
+                                             json={"tunnels": [{**self.SPEC, "listen_port": 9}]}).status_code, 400)
+            self.assertEqual(self.client.post("/api/ssh/tunnels/web/stop", headers=H).get_json()["running"], 0)
+
+    def test_install_route_reports_each_target(self):
+        def fake_install(host, keys):
+            if host.target == "bad@box":
+                raise sshtools.AuthError("SSH login to bad@box failed: Permission denied")
+            return {"added": keys, "skipped": [], "note": ""}
+
+        with mock.patch("patchgoblin.sshtools.install_keys", side_effect=fake_install):
+            res = self.client.post("/api/ssh/install", headers=H, json={
+                "keys": [self.PUB], "targets": [{"target": "bad@box", "windows": False}, {"target": "-x"},
+                                                {"target": "good@box", "port": 22}]})
+        results = res.get_json()["results"]
+        self.assertEqual([r["ok"] for r in results], [False, False, True])
+        self.assertIn("Use password", results[0]["error"])
+        self.assertEqual(results[2]["added"], [self.PUB])
+        bad = self.client.post("/api/ssh/install", headers=H,
+                               json={"keys": ["-----BEGIN OPENSSH PRIVATE KEY-----"], "targets": [{"target": "a@b"}]})
+        self.assertEqual(bad.status_code, 400)
+
+    def test_keys_route_never_returns_private_material(self):
+        folder = self.fake_home()
+        self.write(folder, "id_ed25519.pub", self.PUB + "\n")
+        self.write(folder, "id_ed25519", "-----BEGIN OPENSSH PRIVATE KEY-----\n" + self.SECRET + "\n")
+        with mock.patch("patchgoblin.sshtools.communicate", return_value=Result(0, "256 SHA256:abc c\n", "")):
+            res = self.client.get("/api/ssh/keys?source=local")
+        self.assertEqual(res.status_code, 200)
+        self.assertNotIn(self.SECRET, res.get_data(as_text=True))
+        self.assertNotIn("PRIVATE KEY", res.get_data(as_text=True))
 
 
 if __name__ == "__main__":

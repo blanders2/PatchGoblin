@@ -1,6 +1,7 @@
 """Flask app: JSON API plus a single-page UI."""
 from __future__ import annotations
 
+import atexit
 import base64
 import binascii
 import json
@@ -13,7 +14,7 @@ from urllib.parse import urlparse
 
 from flask import Flask, Response, abort, jsonify, render_template, request
 
-from . import cline, gitops, opencode, svnops
+from . import cline, gitops, opencode, sshtools, svnops
 from .engine import Engine
 from .hosts import HostError, host_for, open_terminal, open_vscode, probe
 from .openai_agent import endpoint_key, list_models, valid_base_url, valid_header
@@ -194,7 +195,9 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         registry.rename_provider(old, new)
     store = TaskStore(settings.get()["provider_renames"])
     engine = Engine(registry, store, settings)
-    app.config.update(REGISTRY=registry, SETTINGS=settings, STORE=store, ENGINE=engine)
+    tunnels = sshtools.TunnelManager()
+    atexit.register(tunnels.stop_all)
+    app.config.update(REGISTRY=registry, SETTINGS=settings, STORE=store, ENGINE=engine, TUNNELS=tunnels)
 
     # ---- request guards ---------------------------------------------------
     @app.before_request
@@ -931,6 +934,105 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             abort(404)
         return Response(data, mimetype=IMAGE_MIME[name.rsplit(".", 1)[1]],
                         headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=3600"})
+
+    # ---- SSH tools (keys, key copying, tunnels) ----------------------------------------
+    def ssh_host(source: dict):
+        """A host for a key picker value: "local"/empty is this computer (None)."""
+        target = str(source.get("target") or "").strip()
+        if not target or target == "local":
+            return None
+        return host_for({"location": "ssh", "ssh_target": target, "ssh_port": source.get("port") or None,
+                         "ssh_os": source.get("os") or ("windows" if source.get("windows") else None)})
+
+    @app.get("/api/ssh/targets")
+    def ssh_targets():
+        return jsonify(targets=sshtools.ssh_targets(registry))
+
+    @app.get("/api/ssh/keys")
+    def ssh_keys():
+        port = request.args.get("port")
+        host = ssh_host({"target": request.args.get("source", "local"), "port": int(port) if port else None,
+                         "windows": request.args.get("windows") == "1"})
+        return jsonify(keys=sshtools.list_local_keys() if host is None else sshtools.list_remote_keys(host))
+
+    @app.post("/api/ssh/keys/generate")
+    def ssh_generate():
+        data = body()
+        port = data.get("port")
+        host = ssh_host({"target": data.get("source"), "port": int(port) if port else None,
+                         "windows": bool(data.get("windows"))})
+        key = sshtools.generate_key(str(data.get("name") or ""), str(data.get("type") or "ed25519"),
+                                    str(data.get("comment") or ""), str(data.get("passphrase") or ""), host)
+        return jsonify(key=key), 201
+
+    @app.post("/api/ssh/install")
+    def ssh_install():
+        data = body()
+        dests = data.get("targets")
+        if not isinstance(dests, list) or not dests:
+            raise ValueError("Add at least one destination.")
+        keys = sshtools.clean_pubkeys(data.get("keys"))  # reject bad keys before touching any host
+        results = []
+        for dest in dests:
+            dest = dest if isinstance(dest, dict) else {}
+            target = str(dest.get("target") or "").strip()
+            row = {"target": target, "ok": False, "added": [], "skipped": [], "note": "", "error": ""}
+            try:
+                port = int(dest["port"]) if dest.get("port") else None
+                windows = bool(dest.get("windows"))
+                if data.get("interactive"):
+                    row.update(sshtools.install_keys_interactive(target, port, keys, windows))
+                else:
+                    host = ssh_host({"target": target, "port": port, "os": "windows" if windows else "posix"})
+                    if host is None:
+                        raise ValueError("Choose an SSH destination.")
+                    row.update(sshtools.install_keys(host, keys))
+                row["ok"] = True
+            except sshtools.AuthError as exc:
+                row["error"] = f'{exc} Retry with "Use password (opens terminal)".'
+            except (HostError, ValueError) as exc:
+                row["error"] = str(exc)
+            results.append(row)
+        return jsonify(results=results)
+
+    def tunnels_view() -> dict:
+        status = tunnels.status()
+        idle = {"state": "stopped", "returncode": None, "stderr": "", "started": 0}
+        specs = [{**spec, **status.get(spec["id"], idle)}
+                 for spec in sshtools.clean_tunnels(settings.get()["ssh_tunnels"])]
+        return {"tunnels": specs, "running": tunnels.running_count()}
+
+    @app.get("/api/ssh/tunnels")
+    def get_tunnels():
+        return jsonify(tunnels_view())
+
+    @app.put("/api/ssh/tunnels")
+    def put_tunnels():
+        cleaned = sshtools.clean_tunnels(body().get("tunnels"), strict=True)
+        old = {t["id"]: t for t in sshtools.clean_tunnels(settings.get()["ssh_tunnels"])}
+        kept = {s["id"] for s in cleaned}
+        for tid, spec in old.items():
+            if tunnels.is_running(tid) and (tid not in kept or next(s for s in cleaned if s["id"] == tid) != spec):
+                raise ValueError(f"Stop the tunnel {spec['name']!r} before changing or deleting it.")
+        settings.save_tunnels(cleaned)
+        return jsonify(tunnels_view())
+
+    def saved_tunnel(tid: str) -> dict:
+        for spec in sshtools.clean_tunnels(settings.get()["ssh_tunnels"]):
+            if spec["id"] == tid:
+                return spec
+        abort(404)
+
+    @app.post("/api/ssh/tunnels/<tid>/start")
+    def start_tunnel(tid):
+        tunnels.start(saved_tunnel(tid))
+        return jsonify(tunnels_view())
+
+    @app.post("/api/ssh/tunnels/<tid>/stop")
+    def stop_tunnel(tid):
+        saved_tunnel(tid)
+        tunnels.stop(tid)
+        return jsonify(tunnels_view())
 
     if start_engine:
         engine.startup()

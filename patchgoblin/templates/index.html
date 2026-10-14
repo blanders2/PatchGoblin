@@ -51,11 +51,26 @@
 
 <div class="layout">
   <aside class="sidebar">
-    <div class="sidebar-head">
-      <h2>Projects</h2>
-      <button class="small" id="add-project-btn">+ Add</button>
+    <div class="sidebar-modes" role="tablist" aria-label="Sidebar">
+      <button type="button" role="tab" id="mode-projects-btn" aria-selected="true">Projects</button>
+      <button type="button" role="tab" id="mode-ssh-btn" aria-selected="false">SSH tools
+        <span id="ssh-running-badge" class="count" hidden title="Running SSH tunnels"></span></button>
     </div>
-    <ul id="project-list" class="project-list"></ul>
+    <div id="sidebar-projects">
+      <div class="sidebar-head">
+        <h2>Projects</h2>
+        <button class="small" id="add-project-btn">+ Add</button>
+      </div>
+      <ul id="project-list" class="project-list"></ul>
+    </div>
+    <div id="sidebar-ssh" hidden>
+      <ul id="ssh-nav" class="project-list ssh-nav">
+        <li data-tool="keys" tabindex="0">Keys</li>
+        <li data-tool="install" tabindex="0">Install keys</li>
+        <li data-tool="tunnels" tabindex="0">Tunnels</li>
+      </ul>
+      <ul id="ssh-tunnel-list" class="project-list ssh-tunnel-list"></ul>
+    </div>
     <div class="sidebar-foot">
       <button class="ghost icon-btn" id="settings-btn" title="Global settings" aria-label="Global settings">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -136,6 +151,103 @@
         <div class="column" id="col-{{ col }}" data-col="{{ col }}" role="tabpanel" aria-labelledby="tab-{{ col }}"><div class="cards"></div></div>
         {% endfor %}
       </div>
+    </section>
+
+    <section id="ssh-tools-view" hidden>
+      <h1 id="ssh-title">Keys</h1>
+
+      <div id="ssh-keys-panel" class="ssh-panel" hidden>
+        <fieldset>
+          <legend>Public keys</legend>
+          <div class="row">
+            <label>Keys on <select id="ssh-key-source"><option value="local">This computer</option></select></label>
+            <button type="button" class="ghost small" id="ssh-keys-refresh">↻ Refresh</button>
+          </div>
+          <table class="ssh-table">
+            <thead><tr><th>Type</th><th>Name</th><th>Fingerprint</th><th>Comment</th><th></th></tr></thead>
+            <tbody id="ssh-key-rows"></tbody>
+          </table>
+          <p class="muted small">Only public keys are listed or copied. Private keys are never read.</p>
+        </fieldset>
+        <form id="ssh-generate-form">
+          <fieldset>
+            <legend>Generate a key</legend>
+            <div class="row">
+              <label>Name <input name="name" value="id_ed25519" required autocomplete="off"></label>
+              <label>Type
+                <select name="type"><option value="ed25519">ed25519</option><option value="rsa">rsa (4096)</option><option value="ecdsa">ecdsa</option></select>
+              </label>
+              <label>Comment <input name="comment" autocomplete="off"></label>
+              <label>Passphrase <input name="passphrase" type="password" autocomplete="new-password"></label>
+              <label>Create on <select name="source" id="ssh-gen-source"><option value="local">This computer</option></select></label>
+            </div>
+            <p class="muted small">The passphrase is passed to ssh-keygen on its command line, so it is briefly visible in the process list. Leave it empty for no passphrase.</p>
+            <div class="actions"><button type="submit">Generate</button></div>
+          </fieldset>
+        </form>
+      </div>
+
+      <div id="ssh-install-panel" class="ssh-panel" hidden>
+        <fieldset>
+          <legend>1. Choose public keys</legend>
+          <label>Take keys from <select id="ssh-install-source"><option value="local">This computer</option></select></label>
+          <div id="ssh-install-keys" class="ssh-checks"></div>
+          <p class="muted small"><strong>Only public keys are copied.</strong> Nothing from a private key file is read or sent.</p>
+        </fieldset>
+        <fieldset>
+          <legend>2. Destinations</legend>
+          <datalist id="ssh-targets"></datalist>
+          <div id="ssh-install-dests"></div>
+          <button type="button" class="ghost small" id="ssh-add-dest">+ Add destination</button>
+          <label class="check"><input type="checkbox" id="ssh-interactive"> Use password (opens terminal)</label>
+          <p class="muted small">Without it, the host must already accept your key login. With it, a terminal window opens running ssh so you can type the password there; PatchGoblin never sees it.</p>
+        </fieldset>
+        <div class="actions"><button type="button" id="ssh-install-btn">Install keys</button></div>
+      </div>
+
+      <div id="ssh-tunnels-panel" class="ssh-panel" hidden>
+        <fieldset>
+          <legend>Saved tunnels</legend>
+          <table class="ssh-table">
+            <thead><tr><th></th><th>Name</th><th>Forward</th><th>Via</th><th></th></tr></thead>
+            <tbody id="ssh-tunnel-rows"></tbody>
+          </table>
+          <p class="muted small">Tunnels never start by themselves and stop when PatchGoblin quits.</p>
+        </fieldset>
+        <form id="ssh-tunnel-form">
+          <fieldset>
+            <legend id="ssh-tunnel-form-title">Add a tunnel</legend>
+            <input type="hidden" name="id">
+            <div class="row">
+              <label>Name <input name="name" autocomplete="off"></label>
+              <label>SSH host <input name="target" list="ssh-targets" required autocomplete="off" placeholder="user@host or alias"></label>
+              <label>SSH port <input name="port" type="number" min="1" max="65535" placeholder="22"></label>
+            </div>
+            <div class="row">
+              <label>Direction
+                <select name="direction"><option value="local">Local (-L): this computer listens</option><option value="remote">Remote (-R): the SSH host listens</option></select>
+              </label>
+              <label>Bind
+                <select name="bind"><option value="127.0.0.1">localhost (127.0.0.1)</option><option value="0.0.0.0">all interfaces (0.0.0.0)</option></select>
+              </label>
+              <label>Listen port <input name="listen_port" type="number" min="1" max="65535" required></label>
+            </div>
+            <div class="row">
+              <label>Destination host <input name="dest_host" value="localhost" required autocomplete="off"></label>
+              <label>Destination port <input name="dest_port" type="number" min="1" max="65535" required></label>
+            </div>
+            <p id="ssh-bind-warning" class="error" hidden>0.0.0.0 exposes the forwarded port to everyone who can reach this network, with no authentication in front of it.</p>
+            <p id="ssh-remote-note" class="muted small" hidden>For a remote tunnel, binding to 0.0.0.0 only works if the SSH server sets <code>GatewayPorts yes</code> (or <code>clientspecified</code>); otherwise it falls back to loopback.</p>
+            <div id="ssh-tunnel-error" class="error" hidden></div>
+            <div class="actions">
+              <button type="submit">Save tunnel</button>
+              <button type="button" class="ghost" id="ssh-tunnel-cancel" hidden>Cancel edit</button>
+            </div>
+          </fieldset>
+        </form>
+      </div>
+
+      <pre id="ssh-log" class="log mono small" hidden></pre>
     </section>
 
     <section id="project-settings-view" hidden>

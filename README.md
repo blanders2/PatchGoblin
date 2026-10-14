@@ -391,6 +391,39 @@ versions (a single "OpenAI API" block) become an endpoint with id `openai`.
 - Cancelling a remote run closes the SSH session. Most CLIs exit when that happens, but
   check the host if one doesn't.
 
+## SSH tools
+
+The switch at the top of the sidebar (**Projects | SSH tools**) swaps the sidebar between
+your projects and a set of SSH helpers. Switching only hides the project screens. Running
+tasks, the open drawer or chat and unsaved Project settings all keep going, and switching
+back returns you to exactly where you were. The last mode and tool are remembered. While
+you're on **Projects**, a badge on the **SSH tools** switch counts the tunnels still running.
+
+- **Keys** lists the public keys in `~/.ssh` on this computer (or on any SSH host), with a
+  Copy button, and generates new ed25519, RSA (4096) or ECDSA key pairs with `ssh-keygen`.
+- **Install keys** adds chosen public keys to `authorized_keys` on one or more hosts
+  (skipping keys that are already there), e.g. to copy a key from host A to host B.
+  Host suggestions come from your projects and the `Host` aliases in `~/.ssh/config`.
+  The host must already accept your login by key. For a password-only host, tick
+  **Use password (opens terminal)**: a terminal window opens running `ssh`, you type the
+  password there, and PatchGoblin never sees it.
+- **Tunnels** saves and runs `ssh -N -L` / `-R` port forwards, with a live status dot in
+  the sidebar. Tunnels never start by themselves, and they stop when PatchGoblin quits.
+
+Only **public** keys are ever listed, copied or sent. Private key files are never opened.
+
+Things to know:
+
+- On a Windows host whose account is an Administrator, sshd ignores
+  `~/.ssh/authorized_keys` and reads `C:\ProgramData\ssh\administrators_authorized_keys`
+  instead. PatchGoblin shows a note and does not write there; add the key yourself.
+- A tunnel bound to `0.0.0.0` exposes the forwarded port to everyone on the network, with
+  no authentication in front of it. PatchGoblin asks before starting one. For a remote
+  (`-R`) tunnel the SSH server must set `GatewayPorts` for a non-loopback bind to apply.
+- The passphrase of a generated key is passed to `ssh-keygen -N`, so it is briefly visible
+  in the process list of the machine running it. Leave it empty to avoid that.
+- A hard kill of PatchGoblin (not Quit) can leave `ssh` tunnel processes behind.
+
 ## Safety notes
 
 - The server only listens on 127.0.0.1 and rejects requests with a foreign `Host`.
@@ -398,6 +431,7 @@ versions (a single "OpenAI API" block) become an endpoint with id `openai`.
   no login, so don't expose it on a network.
 - AI agents act with your user account's permissions in the project directory. Review
   commits (`git show`) before relying on them.
+- SSH tools only handle public keys, never start tunnels on their own, and stop them when PatchGoblin quits. A `0.0.0.0` tunnel is reachable from the network, so use it deliberately.
 - If PatchGoblin is restarted during a job, that task is marked interrupted: planning
   goes back to its previous state and a run is marked failed. Queued tasks resume.
 

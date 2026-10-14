@@ -62,6 +62,13 @@ def kill_tree(proc: subprocess.Popen) -> None:
         proc.kill()
 
 
+def background_kwargs() -> dict:
+    """Popen kwargs for a child with no console window that kill_tree can take down whole."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {"start_new_session": True}
+
+
 def communicate(argv, cwd=None, input: Optional[str] = None, timeout: Optional[float] = None,
                 on_output: OutputFn = None, on_start: StartFn = None, shell: bool = False,
                 env: Optional[dict] = None) -> Result:
@@ -69,13 +76,9 @@ def communicate(argv, cwd=None, input: Optional[str] = None, timeout: Optional[f
 
     ``env`` holds extra environment variables added to this process's own environment.
     """
-    kwargs = {}
+    kwargs = background_kwargs()
     if env:
         kwargs["env"] = {**os.environ, **env}
-    if os.name == "nt":
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    else:
-        kwargs["start_new_session"] = True
     try:
         proc = subprocess.Popen(
             argv, cwd=cwd, shell=shell,
@@ -673,25 +676,21 @@ _LINUX_TERMINALS = (
 )
 
 
-def terminal_command(host, path: str, platform: str = sys.platform,
-                     which: Callable[[str], Optional[str]] = shutil.which) -> tuple[list[str], Optional[str]]:
-    """Argv and working directory that open a new terminal window on this computer.
-
-    Local projects get a shell in ``path``; SSH projects get a local terminal running
-    ssh that lands in ``path`` on the remote host.
-    """
-    inner = host.shell_argv(path) if host.kind == "ssh" else None
-    cwd = path if inner is None else None
+def _wrap_terminal(inner: Optional[list[str]], cwd_path: Optional[str], platform: str,
+                   which: Callable[[str], Optional[str]]) -> tuple[list[str], Optional[str]]:
+    """Argv and cwd opening a terminal on this computer that runs ``inner`` (or a shell in
+    ``cwd_path`` when ``inner`` is None)."""
+    cwd = cwd_path if inner is None else None
     if platform == "win32":
         if which("wt"):
             # Windows Terminal treats ";" as a command separator, so escape it.
             if inner is None:
-                return ["wt", "-d", path.replace(";", "\\;")], None
+                return ["wt", "-d", cwd_path.replace(";", "\\;")], None
             return ["wt", *[a.replace(";", "\\;") for a in inner]], None
         return inner or ["powershell.exe", "-NoExit"], cwd
     if platform == "darwin":
         if inner is None:
-            return ["open", "-a", "Terminal", path], None
+            return ["open", "-a", "Terminal", cwd_path], None
         script = shlex.join(inner).replace("\\", "\\\\").replace('"', '\\"')
         return ["osascript", "-e", f'tell application "Terminal" to do script "{script}"',
                 "-e", 'tell application "Terminal" to activate'], None
@@ -699,6 +698,26 @@ def terminal_command(host, path: str, platform: str = sys.platform,
         if which(name):
             return [name, *(flags + inner if inner else [])], cwd
     raise HostError("No terminal emulator found (tried " + ", ".join(n for n, _ in _LINUX_TERMINALS) + ").")
+
+
+def terminal_command(host, path: str, platform: str = sys.platform,
+                     which: Callable[[str], Optional[str]] = shutil.which) -> tuple[list[str], Optional[str]]:
+    """Argv and working directory that open a new terminal window on this computer.
+
+    Local projects get a shell in ``path``; SSH projects get a local terminal running
+    ssh that lands in ``path`` on the remote host.
+    """
+    return _wrap_terminal(host.shell_argv(path) if host.kind == "ssh" else None, path, platform, which)
+
+
+def run_in_terminal(argv: list[str], platform: str = sys.platform,
+                    which: Callable[[str], Optional[str]] = shutil.which) -> None:
+    """Open a new terminal window on this computer running ``argv`` (e.g. ssh asking for a password)."""
+    cmd, cwd = _wrap_terminal(argv, None, platform, which)
+    try:
+        _spawn(cmd, cwd, "CREATE_NEW_CONSOLE")
+    except OSError as exc:
+        raise HostError(f"Could not open a terminal: {exc}") from exc
 
 
 def _local_dir_guard(project: dict) -> tuple:
