@@ -90,6 +90,7 @@ DEFAULT_SETTINGS = {
             "plan_must_not_edit": True,  # fail a plan (or chat) that changed files
         },
     },
+    "ssh_servers": [],  # saved SSH servers (see sshtools.clean_servers)
     "ssh_tunnels": [],  # saved SSH port forwards (see sshtools.clean_tunnels)
     "endpoints": [{
         "id": "openai",
@@ -348,6 +349,8 @@ class Settings:
                 cfg["models"] = [m for m in models if isinstance(m, str) and m.strip()]
         if not isinstance(out.get("ssh_tunnels"), list):
             out["ssh_tunnels"] = []
+        if not isinstance(out.get("ssh_servers"), list):
+            out["ssh_servers"] = []
         if not isinstance(out.get("provider_renames"), dict):
             out["provider_renames"] = {}
         return out
@@ -376,6 +379,14 @@ class Settings:
             cfg["models"] = [*saved, *new]
             self.file.save(data)
             return new
+
+    def save_servers(self, servers: list[dict]) -> list[dict]:
+        """Replace the saved SSH servers."""
+        with self.file.lock:
+            data = self.file.load()
+            data["ssh_servers"] = servers
+            self.file.save(data)
+        return servers
 
     def save_tunnels(self, tunnels: list[dict]) -> list[dict]:
         """Replace the saved SSH tunnels."""

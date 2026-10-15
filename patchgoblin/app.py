@@ -941,18 +941,29 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         target = str(source.get("target") or "").strip()
         if not target or target == "local":
             return None
+        os_name = source.get("os")
         return host_for({"location": "ssh", "ssh_target": target, "ssh_port": source.get("port") or None,
-                         "ssh_os": source.get("os") or ("windows" if source.get("windows") else None)})
+                         "ssh_os": os_name if os_name in ("posix", "windows")
+                         else ("windows" if source.get("windows") else None)})
 
-    @app.get("/api/ssh/targets")
-    def ssh_targets():
-        return jsonify(targets=sshtools.ssh_targets(registry))
+    def servers_view() -> dict:
+        servers = sshtools.clean_servers(settings.get()["ssh_servers"])
+        return {"servers": servers, "suggestions": sshtools.server_suggestions(registry, servers)}
+
+    @app.get("/api/ssh/servers")
+    def get_servers():
+        return jsonify(servers_view())
+
+    @app.put("/api/ssh/servers")
+    def put_servers():
+        settings.save_servers(sshtools.clean_servers(body().get("servers"), strict=True))
+        return jsonify(servers_view())
 
     @app.get("/api/ssh/keys")
     def ssh_keys():
         port = request.args.get("port")
         host = ssh_host({"target": request.args.get("source", "local"), "port": int(port) if port else None,
-                         "windows": request.args.get("windows") == "1"})
+                         "os": request.args.get("os"), "windows": request.args.get("windows") == "1"})
         return jsonify(keys=sshtools.list_local_keys() if host is None else sshtools.list_remote_keys(host))
 
     @app.post("/api/ssh/keys/generate")
@@ -960,7 +971,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         data = body()
         port = data.get("port")
         host = ssh_host({"target": data.get("source"), "port": int(port) if port else None,
-                         "windows": bool(data.get("windows"))})
+                         "os": data.get("os"), "windows": bool(data.get("windows"))})
         key = sshtools.generate_key(str(data.get("name") or ""), str(data.get("type") or "ed25519"),
                                     str(data.get("comment") or ""), str(data.get("passphrase") or ""), host)
         return jsonify(key=key), 201

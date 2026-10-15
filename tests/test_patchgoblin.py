@@ -3356,16 +3356,52 @@ class SshToolsTests(AppTestCase):
             self.assertEqual(spawn.call_args[0][0], ["xterm", "-e", *argv])
 
     # ---- targets
-    def test_ssh_targets_merges_config_and_projects(self):
+    def test_server_suggestions_exclude_saved(self):
         folder = self.fake_home()
         self.write(folder, "config", "Host *\n  User x\nHost alpha beta !neg wild*\n  HostName 1.2.3.4\n"
                                      "host Gamma\nMatch host foo\nInclude other\n")
         registry = mock.Mock()
-        registry.list.return_value = [{"location": "ssh", "ssh_target": "me@box", "ssh_port": 2200},
+        registry.list.return_value = [{"location": "ssh", "ssh_target": "me@box", "ssh_port": 2200, "ssh_os": "windows"},
                                       {"location": "local"}, {"location": "ssh", "ssh_target": "me@box", "ssh_port": 2200}]
-        targets = sshtools.ssh_targets(registry)
-        self.assertEqual(targets, [{"target": "me@box", "port": 2200}, {"target": "alpha", "port": None},
-                                   {"target": "beta", "port": None}, {"target": "Gamma", "port": None}])
+        out = sshtools.server_suggestions(registry, [])
+        self.assertEqual(out, [{"target": "me@box", "port": 2200, "source": "project", "ssh_os": "windows"},
+                               {"target": "alpha", "port": None, "source": "ssh config"},
+                               {"target": "beta", "port": None, "source": "ssh config"},
+                               {"target": "Gamma", "port": None, "source": "ssh config"}])
+        saved = [{"target": "ME@BOX", "port": 2200}, {"target": "gamma", "port": None}]
+        self.assertEqual([s["target"] for s in sshtools.server_suggestions(registry, saved)], ["alpha", "beta"])
+        self.assertEqual(len(sshtools.server_suggestions(registry, [{"target": "ME@BOX", "port": 22}])), 4)
+
+    SERVER = {"id": "box", "name": "Box", "target": "me@box", "port": 2200, "os": "windows"}
+
+    def test_validate_server_rules(self):
+        self.assertEqual(sshtools.validate_server(self.SERVER), self.SERVER)
+        out = sshtools.validate_server({"id": "a", "target": "me@box"})
+        self.assertEqual((out["name"], out["os"], out["port"]), ("me@box", "auto", None))
+        for change in ({"target": "-oProxyCommand=x"}, {"port": 99999}, {"os": "beos"}, {"name": "a\nb"}, {"id": "Bad Id"}):
+            with self.assertRaises(ValueError, msg=change):
+                sshtools.validate_server({**self.SERVER, **change})
+
+    def test_clean_servers(self):
+        dup = [self.SERVER, {**self.SERVER, "id": "box"}, {**self.SERVER, "id": "other", "target": "ME@box"},
+               {"name": "New", "target": "new@host"}]
+        out = sshtools.clean_servers(dup)
+        self.assertEqual([s["id"] for s in out], ["box", "new"])
+        with self.assertRaises(ValueError):
+            sshtools.clean_servers(dup[:2], strict=True)
+        with self.assertRaisesRegex(ValueError, "already saved"):
+            sshtools.clean_servers([self.SERVER, {**self.SERVER, "id": "other"}], strict=True)
+
+    def test_servers_routes_never_add_automatically(self):
+        self.client.post("/api/projects", headers=H, json={"location": "ssh", "ssh_target": "me@box", "path": "/x"})
+        data = self.client.get("/api/ssh/servers").get_json()
+        self.assertEqual(data["servers"], [])
+        self.assertEqual(self.app.config["SETTINGS"].get()["ssh_servers"], [])
+        self.assertEqual(self.client.put("/api/ssh/servers", json={"servers": []}).status_code, 403)
+        self.assertEqual(self.client.put("/api/ssh/servers", headers=H, json={"servers": [{**self.SERVER, "os": "x"}]}).status_code, 400)
+        data = self.client.put("/api/ssh/servers", headers=H, json={"servers": [self.SERVER]}).get_json()
+        self.assertEqual(data["servers"], [self.SERVER])
+        self.assertNotIn("box", [s["target"] for s in data["suggestions"]])
 
     # ---- tunnels
     SPEC = {"id": "web", "name": "Web", "target": "me@box", "port": None, "direction": "local",

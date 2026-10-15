@@ -65,6 +65,7 @@
     </div>
     <div id="sidebar-ssh" hidden>
       <ul id="ssh-nav" class="project-list ssh-nav">
+        <li data-tool="servers" tabindex="0">Servers</li>
         <li data-tool="keys" tabindex="0">Keys</li>
         <li data-tool="install" tabindex="0">Install keys</li>
         <li data-tool="tunnels" tabindex="0">Tunnels</li>
@@ -155,6 +156,43 @@
 
     <section id="ssh-tools-view" hidden>
       <h1 id="ssh-title">Keys</h1>
+
+      <div id="ssh-servers-panel" class="ssh-panel" hidden>
+        <fieldset>
+          <legend>Saved servers</legend>
+          <table class="ssh-table">
+            <thead><tr><th>Name</th><th>Host</th><th>Port</th><th>OS</th><th></th></tr></thead>
+            <tbody id="ssh-server-rows"></tbody>
+          </table>
+        </fieldset>
+        <fieldset>
+          <legend>Suggestions</legend>
+          <table class="ssh-table">
+            <thead><tr><th>Host</th><th>Port</th><th>From</th><th></th></tr></thead>
+            <tbody id="ssh-suggestion-rows"></tbody>
+          </table>
+          <p class="muted small">Hosts used by your projects and aliases from <code>~/.ssh/config</code>. Nothing is saved until you press Save on the form below.</p>
+        </fieldset>
+        <form id="ssh-server-form">
+          <fieldset>
+            <legend id="ssh-server-form-title">Add a server</legend>
+            <input type="hidden" name="id">
+            <div class="row">
+              <label>Name <input name="name" autocomplete="off" placeholder="defaults to the host"></label>
+              <label>SSH host <input name="target" required autocomplete="off" placeholder="user@host or alias"></label>
+              <label>SSH port <input name="port" type="number" min="1" max="65535" placeholder="22"></label>
+              <label>OS
+                <select name="os"><option value="auto">Auto-detect</option><option value="posix">Linux/macOS</option><option value="windows">Windows</option></select>
+              </label>
+            </div>
+            <div id="ssh-server-error" class="error" hidden></div>
+            <div class="actions">
+              <button type="submit">Save server</button>
+              <button type="button" class="ghost" id="ssh-server-cancel" hidden>Cancel edit</button>
+            </div>
+          </fieldset>
+        </form>
+      </div>
 
       <div id="ssh-keys-panel" class="ssh-panel" hidden>
         <fieldset>
@@ -493,7 +531,8 @@
       <label><input type="radio" name="location" value="ssh"> SSH host</label>
     </div>
     <div class="ssh-only row" hidden>
-      <label class="grow">SSH target <input name="ssh_target" placeholder="user@host or ssh-config alias"></label>
+      <label class="grow">SSH target <input name="ssh_target" list="pf-ssh-servers" autocomplete="off" placeholder="user@host or ssh-config alias"></label>
+      <datalist id="pf-ssh-servers"></datalist>
       <label>Port <input name="ssh_port" type="number" min="1" max="65535" placeholder="22" size="5"></label>
     </div>
     <div class="field">

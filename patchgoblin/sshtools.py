@@ -255,18 +255,81 @@ def install_keys_interactive(target: str, port: Optional[int], pubkeys, windows:
 
 # ---- targets -------------------------------------------------------------------------
 
-def ssh_targets(registry) -> list[dict]:
-    """SSH targets worth suggesting: those of saved projects plus ~/.ssh/config Host aliases."""
-    out, seen = [], set()
+SERVER_OSES = ("auto", "posix", "windows")
 
-    def add(target, port):
-        if target and (target, port) not in seen:
-            seen.add((target, port))
-            out.append({"target": target, "port": port})
+
+def validate_server(spec) -> dict:
+    """The cleaned saved-server spec, or ValueError."""
+    if not isinstance(spec, dict):
+        raise ValueError("A server must be an object.")
+    sid = str(spec.get("id") or "").strip()
+    if not TUNNEL_ID.match(sid):
+        raise ValueError("A server id is 1–32 lowercase letters, digits, - or _.")
+    name = str(spec.get("name") or "").strip()
+    if len(name) > 60 or any(c in name for c in "\r\n"):
+        raise ValueError("The server name must be a single line of up to 60 characters.")
+    target = str(spec.get("target") or "").strip()
+    port = spec.get("port")
+    try:
+        SSHHost(target, port if port not in (None, "") else None)
+    except HostError as exc:
+        raise ValueError(str(exc)) from None
+    except (TypeError, ValueError):
+        raise ValueError("The SSH port must be a whole number.") from None
+    ssh_port = _port(port, "SSH port") if port not in (None, "") else None
+    os_name = spec.get("os") or "auto"
+    if os_name not in SERVER_OSES:
+        raise ValueError("The server OS must be auto, posix or windows.")
+    return {"id": sid, "name": name or target, "target": target, "port": ssh_port, "os": os_name}
+
+
+def _server_key(target, port) -> tuple:
+    return (str(target).lower(), port or None)
+
+
+def clean_servers(values, strict: bool = False) -> list[dict]:
+    """Validate saved servers. Invalid entries and repeats are dropped (an error if ``strict``)."""
+    if not isinstance(values, list):
+        if strict:
+            raise ValueError("servers must be a list.")
+        return []
+    out, seen, keys = [], set(), set()
+    for raw in values:
+        try:
+            if isinstance(raw, dict) and not str(raw.get("id") or "").strip():
+                raw = {**raw, "id": _free_id(str(raw.get("name") or raw.get("target") or "server"),
+                                             seen, values, "server")}
+            spec = validate_server(raw)
+            if spec["id"] in seen:
+                raise ValueError(f"Server id {spec['id']!r} is used twice.")
+            if _server_key(spec["target"], spec["port"]) in keys:
+                raise ValueError("That server is already saved.")
+        except ValueError:
+            if strict:
+                raise
+            continue
+        seen.add(spec["id"])
+        keys.add(_server_key(spec["target"], spec["port"]))
+        out.append(spec)
+    return out
+
+
+def server_suggestions(registry, servers) -> list[dict]:
+    """Hosts of saved projects plus ~/.ssh/config aliases that aren't saved servers yet."""
+    out = []
+    seen = {_server_key(s["target"], s.get("port")) for s in servers}
+
+    def add(target, port, source, os_name=None):
+        if target and _server_key(target, port) not in seen:
+            seen.add(_server_key(target, port))
+            item = {"target": target, "port": port, "source": source}
+            if os_name:
+                item["ssh_os"] = os_name
+            out.append(item)
 
     for project in registry.list():
         if project.get("location") == "ssh":
-            add(project.get("ssh_target"), project.get("ssh_port") or None)
+            add(project.get("ssh_target"), project.get("ssh_port") or None, "project", project.get("ssh_os"))
     try:
         with open(os.path.join(ssh_dir(), "config"), "r", encoding="utf-8", errors="replace") as fh:
             lines = fh.read().splitlines()
@@ -277,7 +340,7 @@ def ssh_targets(registry) -> list[dict]:
         if len(words) > 1 and words[0].lower() == "host":
             for alias in words[1:]:
                 if not any(c in alias for c in "*?!") and _target_ok(alias):
-                    add(alias, None)
+                    add(alias, None, "ssh config")
     return out
 
 
@@ -356,8 +419,8 @@ def clean_tunnels(values, strict: bool = False) -> list[dict]:
     return out
 
 
-def _free_id(name: str, seen: set, values: list) -> str:
-    base = re.sub(r"[^a-z0-9_-]+", "-", name.lower()).strip("-")[:28].strip("-") or "tunnel"
+def _free_id(name: str, seen: set, values: list, fallback: str = "tunnel") -> str:
+    base = re.sub(r"[^a-z0-9_-]+", "-", name.lower()).strip("-")[:28].strip("-") or fallback
     used = seen | {str(v.get("id")) for v in values if isinstance(v, dict)}
     tid, n = base, 2
     while tid in used:

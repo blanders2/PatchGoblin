@@ -399,11 +399,16 @@ tasks, the open drawer or chat and unsaved Project settings all keep going, and 
 back returns you to exactly where you were. The last mode and tool are remembered. While
 you're on **Projects**, a badge on the **SSH tools** switch counts the tunnels still running.
 
+- **Servers** is your own list of SSH hosts (name, host, port, OS), stored in the global
+  settings. The key, install and tunnel pickers list these first. Hosts your projects use and
+  `~/.ssh/config` aliases appear as **suggestions**: **Add** only fills the form, and nothing
+  is saved until you press **Save server**. Nothing is ever added automatically. In the Add
+  project dialog, the SSH target field suggests saved servers and fills in the port.
 - **Keys** lists the public keys in `~/.ssh` on this computer (or on any SSH host), with a
   Copy button, and generates new ed25519, RSA (4096) or ECDSA key pairs with `ssh-keygen`.
 - **Install keys** adds chosen public keys to `authorized_keys` on one or more hosts
   (skipping keys that are already there), e.g. to copy a key from host A to host B.
-  Host suggestions come from your projects and the `Host` aliases in `~/.ssh/config`.
+  Host suggestions come from your saved servers, then your projects and the `Host` aliases in `~/.ssh/config`.
   The host must already accept your login by key. For a password-only host, tick
   **Use password (opens terminal)**: a terminal window opens running `ssh`, you type the
   password there, and PatchGoblin never sees it.

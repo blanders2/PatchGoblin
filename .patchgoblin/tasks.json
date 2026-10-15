@@ -1,6 +1,6 @@
 {
   "version": 7,
-  "next_id": 51,
+  "next_id": 55,
   "tasks": [
     {
       "id": 1,
@@ -2918,20 +2918,20 @@
       "title": "Add an SSH tools sidebar section for keys, key copying and port tunnels",
       "description": "",
       "plan": "The sidebar gets a two-way switch at the top: **Projects | SSH tools**. Clicking **SSH tools** swaps the sidebar's contents. The project list is replaced by SSH tools navigation (Keys, Install keys, Tunnels, plus a live list of saved tunnels with status dots), and the main area shows the selected tool. Nothing on the projects side is torn down. Task polling, running AI jobs, the selected project, the open drawer or chat, and unsaved Project settings edits all stay as they are. They are only hidden, using a `mode-ssh` class on `<body>`, so switching back to **Projects** returns you to exactly where you left off. While you're in Projects mode, a running-tunnel count badge on the **SSH tools** switch shows that tunnels are still up.\n\nThe backend is unchanged from the draft. A new `patchgoblin/sshtools.py` module sits behind `/api/ssh/...` routes and reuses the `SSHHost`/`WindowsSSHHost` layer in `hosts.py`. Only public keys are ever read or copied. There's a password-terminal fallback for hosts without key login. Tunnels are `ssh -N -L/-R` processes bound to `127.0.0.1` or `0.0.0.0`, saved in `settings.json`, and killed when PatchGoblin exits.\n\n## Steps\n\n1. **New module `patchgoblin/sshtools.py`** (docstring style like `hosts.py`):\n   - `ssh_dir()` returns `~/.ssh` locally.\n   - **Validation:**\n     - `KEY_NAME = re.compile(r\"^[A-Za-z0-9._-]{1,64}$\")`, and the name must not start with `-` or `.`.\n     - `PUBKEY_RE = ^(ssh-|ecdsa-|sk-)\\S+ [A-Za-z0-9+/=]+( [^\\r\\n]*)?$`.\n   - **`list_local_keys() -> list[dict]`:**\n     - For each `*.pub` in `ssh_dir()`, return `{name, path, type, comment, fingerprint, has_private, text}`, where `text` is the public line only.\n     - Get the fingerprint from `communicate([\"ssh-keygen\", \"-lf\", path])`.\n     - Skip files whose content fails `PUBKEY_RE`.\n   - **`list_remote_keys(host)`:**\n     - Call `host.home()`, then `host.list_dir(host.join(home, \".ssh\"))`, then `host.read_text` on `*.pub` files only.\n     - Never open a file that isn't `.pub`. `has_private` comes from the directory listing only.\n     - Compute fingerprints locally with `ssh-keygen -lf -` on stdin.\n   - **`generate_key(name, key_type=\"ed25519\"|\"rsa\"|\"ecdsa\", comment=\"\", passphrase=\"\", host=None)`:**\n     - Validate the name and type.\n     - Refuse if `<name>` or `<name>.pub` already exists.\n     - Run `ssh-keygen -t <type> [-b 4096 for rsa] -f <path> -C <comment> -N <passphrase> -q`, locally via `communicate` or remotely via `host.run([...], cwd=home)`.\n     - Return the new key's public dict.\n   - **`install_keys(host, pubkeys) -> {added, skipped, note}`:**\n     - Validate every entry first: a single line matching `PUBKEY_RE`. Reject `-----BEGIN` with an explicit \"private key\" error.\n     - **POSIX:** pipe the keys on stdin into this `host._exec` script: `umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; while IFS= read -r k; do [ -n \"$k\" ] || continue; grep -qxF \"$k\" ~/.ssh/authorized_keys && echo \"SKIP $k\" || { printf '%s\\n' \"$k\" >> ~/.ssh/authorized_keys; echo \"ADD $k\"; }; done; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys`.\n     - **Windows (`WindowsSSHHost`):** do the same in PowerShell against `$env:USERPROFILE\\.ssh\\authorized_keys`.\n       - Read stdin the way `write_text` does.\n       - Append the missing lines and write UTF-8 without a BOM.\n       - Emit base64-encoded ADD/SKIP markers so they survive shell re-encoding.\n       - If the user is an Administrator (`IsInRole('Administrators')`), return a `note` about `C:\\ProgramData\\ssh\\administrators_authorized_keys`.\n   - **`install_keys_interactive(target, port, pubkeys, windows=False)`** is the password bootstrap:\n     - Build `ssh -t [-p port] target \"<append script with keys shlex-quoted>\"`. For Windows targets, use `powershell -NoProfile -EncodedCommand <b64>` instead.\n     - Open it through a new `hosts.run_in_terminal(argv, platform=sys.platform)`. On Windows this calls `_spawn(argv, None, \"CREATE_NEW_CONSOLE\")`. On macOS and Linux it shares the wrapping refactored out of `terminal_command` (`hosts.py:676`).\n     - Cap the argv length under Windows' 8,000-character command limit. If it's exceeded, return \"too many keys, install fewer at once\".\n   - **`ssh_targets(registry)`:** return the distinct SSH `{target, port}` of all projects, plus `Host` aliases from `~/.ssh/config`. Skip `*`, `?` and `!` patterns, and don't follow `Include` or `Match`.\n   - **Tunnels:** a `Tunnel` dataclass and a `TunnelManager` (a lock plus `{id: Tunnel}`).\n     - **Spec:** `{id, name, target, port, direction: local|remote, bind: 127.0.0.1|0.0.0.0, listen_port, dest_host, dest_port}`.\n     - **Runtime state:** `proc`, `started`, and a `deque(maxlen=20)` stderr tail.\n     - **`tunnel_argv(spec)`:** `[\"ssh\",\"-N\",\"-o\",\"BatchMode=yes\",\"-o\",\"ExitOnForwardFailure=yes\",\"-o\",\"ServerAliveInterval=30\",*port_args,\"-L\"|\"-R\",f\"{bind}:{listen_port}:{dest_host}:{dest_port}\",target]`.\n     - **`start(spec)`:**\n       - `Popen` with the same no-window / `start_new_session` kwargs as `communicate`. Factor those into a shared helper in `hosts.py` if they're inline.\n       - A daemon thread pumps stderr.\n       - Wait about 2 s. If the process has already exited, raise `HostError` with the stderr tail.\n       - Allow only one running process per id.\n     - **`stop(id)`** calls `kill_tree`.\n     - **`status()`** returns `{id: {state, returncode, stderr, started}}`.\n     - **`running_count()`** feeds the badge.\n     - **`stop_all()`** is registered with `atexit`.\n     - **`validate_tunnel(spec)`:**\n       - ports are integers from 1 to 65535\n       - `dest_host` matches `^[A-Za-z0-9.\\-:\\[\\]_]+$` and doesn't start with `-`\n       - `bind` and `direction` are one of their allowed values\n       - the target goes through `SSHHost(...)`, so `_TARGET_RE` applies\n       - the id is a short slug\n\n2. **`patchgoblin/store.py` `Settings`:**\n   - Add an `ssh_tunnels: []` default.\n   - Add `clean_tunnels(values)` in `sshtools.py`, in the style of `clean_endpoints` (`app.py:131`). It validates each spec and dedupes ids.\n   - Make sure the main Global settings save keeps the existing `ssh_tunnels`.\n\n3. **`patchgoblin/app.py`:** in `create_app`, store one `TunnelManager` in `app.config[\"TUNNELS\"]`. Add these routes, all under `guard` (`app.py:201`):\n   - `GET /api/ssh/targets`\n   - `GET /api/ssh/keys?source=local|<target>[&port=]`, using `host_for({\"location\": \"ssh\", ...})` for remote sources.\n   - `POST /api/ssh/keys/generate` with `{name, type, comment, passphrase, source}`.\n   - `POST /api/ssh/install` with `{keys: [pubkey lines], targets: [{target, port, windows}], interactive}`:\n     - Accept key text only, never file paths.\n     - Return per-target `{target, ok, added, skipped, note, error}` and keep going after a failure.\n     - On exit 255 or an auth failure, hint: retry with \"Use password (opens terminal)\".\n   - `GET /api/ssh/tunnels` returns the specs merged with live status, plus `running` (the count).\n   - `PUT /api/ssh/tunnels` saves via `clean_tunnels` and refuses changes to a running tunnel.\n   - `POST /api/ssh/tunnels/<id>/start` and `POST /api/ssh/tunnels/<id>/stop`.\n\n4. **`patchgoblin/templates/index.html`: sidebar takeover.**\n   - **Mode switch:** at the top of `<aside class=\"sidebar\">`, before `.sidebar-head`, add `<div class=\"sidebar-modes\" role=\"tablist\">` with two buttons:\n     - `#mode-projects-btn`: \"Projects\"\n     - `#mode-ssh-btn`: \"SSH tools\", plus `<span id=\"ssh-running-badge\" class=\"count\" hidden>` for the running-tunnel count\n   - **Projects part:** wrap the existing `.sidebar-head` and `#project-list` in `<div id=\"sidebar-projects\">`. Their markup doesn't change.\n   - **SSH part:** add a sibling `<div id=\"sidebar-ssh\" hidden>` containing:\n     - a nav list `#ssh-nav` with `<li data-tool=\"keys\">Keys</li>`, `install` and `tunnels` items, styled like `.project-list`\n     - under the Tunnels item, a compact `#ssh-tunnel-list` showing each saved tunnel with a status dot (reuse the `reachDot` look), name, `L 127.0.0.1:8080\u2192localhost:80`, and an inline \u25b6/\u25a0 button\n   - **Footer:** `.sidebar-foot` (Global settings) stays visible in both modes.\n   - **Main area:** add `<section id=\"ssh-tools-view\" hidden>` in `<main>`, next to `#project-settings-view`. It contains:\n     - an `<h1>` that changes with the selected tool\n     - three panels: `#ssh-keys-panel`, `#ssh-install-panel` and `#ssh-tunnels-panel`\n     - a shared `<pre id=\"ssh-log\" class=\"log\">` for action output\n   - **Keys panel:** a key table (type, name, fingerprint, comment, \"Copy\"), and a Generate form (name, type, comment, passphrase, and a host picker defaulting to \"This computer\").\n   - **Install panel:**\n     - a source picker, then key checkboxes, then a destination list\n     - each row has a target (`<datalist id=\"ssh-targets\">`), port and a \"Windows host\" checkbox; a \"+ Add destination\" button adds rows\n     - a \"Use password (opens terminal)\" checkbox\n     - a visible \"Only public keys are copied\" note\n   - **Tunnels panel:**\n     - a full table with Start/Stop/Edit/Delete, plus an add/edit form\n     - the bind select offers `localhost (127.0.0.1)` and `all interfaces (0.0.0.0)`; picking 0.0.0.0 shows a warning\n     - for remote tunnels, a `GatewayPorts` note\n     - each row's stderr tail goes in a `<details>`\n\n5. **`patchgoblin/static/app.js`:**\n   - **State:** add `state.mode = \"projects\" | \"ssh\"` and `state.sshTool = \"keys\" | \"install\" | \"tunnels\"`, both restored from `localStorage` (`pg.sidebarMode`, `pg.sshTool`) via `localStorageSet`. This is separate from `state.view`, which stays the project's `board`/`settings`.\n   - **`setSidebarMode(mode)`:**\n     - Toggle `document.body.classList` `mode-ssh`, `#sidebar-projects`/`#sidebar-ssh` `hidden`, `#ssh-tools-view` `hidden`, and `aria-selected` on the switch buttons.\n     - It must **not** call `closeDrawer`, `closeChat`, `closeProjectSettings`, `clearSelection` or `selectProject`. Project state stays untouched.\n     - Entering SSH mode calls `openSshTool(state.sshTool)` and starts the tunnel poll.\n   - **Hiding project UI:** do it with CSS (step 6), not by changing `hidden`. That way `renderProjects()` (`app.js:354`) and the 3 s `loadTasks` interval (`app.js:2149`) keep updating the hidden DOM, and returning to Projects mode shows current data. If `renderProjects()` ever needs to know the mode, read `state.mode` only.\n   - **`openSshTool(tool)`:**\n     - Mark the active `#ssh-nav` item, show the matching panel and set the `<h1>`.\n     - Lazy-load: `/api/ssh/keys?source=local`, and `/api/ssh/targets` once per session into the datalist.\n     - Clicking a tunnel in `#ssh-tunnel-list` opens the Tunnels tool and scrolls to or highlights that row.\n   - **Keyboard guard:** the global `keydown` handler (`app.js:2099`) currently runs the Escape-leaves-Project-settings branch. It must do nothing when `state.mode === \"ssh\"`. Check other global shortcuts (e.g. Ctrl+S in the drawer, batch Esc) the same way, so hidden project UI never reacts to keys.\n   - **Tunnel polling:** `loadTunnels()` fills both `#ssh-tunnel-list` and the Tunnels panel, and updates `#ssh-running-badge`. Run it every 5 s while `state.mode === \"ssh\"` and `!document.hidden`. In Projects mode, refresh only the badge every 30 s. Use one timer, reset on mode change.\n   - **Clipboard:** use `navigator.clipboard.writeText`, with a toast on success.\n   - **Confirmation:** starting a 0.0.0.0 tunnel asks for `confirm()` once per tunnel id per session.\n   - **Results:** install results are written per target to `#ssh-log`, plus a summary toast.\n\n6. **`patchgoblin/static/app.css`:**\n   - `.sidebar-modes`: a segmented control at the top of the sidebar, using the existing `--panel-2`/`--line`/`--b-planned` variables so every theme works.\n   - Hide the project UI while in SSH mode:\n     ```css\n     body.mode-ssh #empty-state, body.mode-ssh #project-view, body.mode-ssh #project-settings-view,\n     body.mode-ssh #drawer, body.mode-ssh #chat { display: none !important; }\n     ```\n   - `#sidebar-projects`, `#sidebar-ssh`: `display:flex; flex-direction:column; flex:1; min-height:0`, so the lists keep scrolling like `.project-list`.\n   - `#ssh-nav` and `#ssh-tunnel-list` reuse the `.project-list li` styles.\n   - `#ssh-tools-view` reuses the `#project-settings-view` width and padding. `#ssh-log` uses the existing `.log` mono style.\n   - Check the narrow-screen rule at `app.css:471`, where the sidebar is capped at 30vh, so the mode switch stays visible.\n\n7. **`tray.pyw`:** use `app = create_app()`, and call `app.config[\"TUNNELS\"].stop_all()` after `server.close()`.\n\n8. **`README.md`:** add an \"SSH tools\" section covering:\n   - the Projects/SSH tools switch, and that projects keep running in the background\n   - what each tool does\n   - that only public keys are copied\n   - that key install needs working key login or the password-terminal fallback\n   - the Windows `administrators_authorized_keys` caveat\n   - that tunnels stop with PatchGoblin and never auto-start\n   - that a 0.0.0.0 bind exposes the port to the network\n   - that the passphrase is briefly visible in the local process list\n\n   Update the Safety notes to match.\n\n## Verification\n\n- Add tests to `tests/test_patchgoblin.py`, mocking `communicate`/`_spawn` the way the existing SSH tests do:\n  - **`list_local_keys`:** use a temp `HOME`/`USERPROFILE` with a fake `.pub` and a private file. Assert the private file's contents appear nowhere in the output.\n  - **`list_remote_keys`:** `read_text` is only called on `*.pub` paths.\n  - **`generate_key`:** the argv is correct, an existing name is refused, and `../x`, `-o` and `a b` are rejected.\n  - **`install_keys`:**\n    - The POSIX path sends the keys on stdin and the ADD/SKIP output is parsed.\n    - The Windows path uses `-EncodedCommand` and the base64 markers are decoded.\n    - Garbage, embedded newlines and private keys are rejected before any ssh call.\n  - **`install_keys_interactive`:** the argv is built for POSIX and Windows targets, and the length cap is enforced.\n  - **Tunnels:**\n    - `tunnel_argv` for local/remote \u00d7 127.0.0.1/0.0.0.0.\n    - Each validation rule rejects bad input.\n    - A process that exits immediately makes `start` raise with its stderr. Use a patched argv that runs `sys.executable -c`.\n    - `stop_all` kills a running fake process, and `running_count` is correct.\n  - **`ssh_targets`:** config parsing keeps aliases, skips wildcards and negations, and merges in project targets.\n  - **`clean_tunnels`:** drops invalid entries and dedupes ids. Saving Global settings keeps `ssh_tunnels`.\n  - **Routes (Flask test client):**\n    - A POST without `X-PatchGoblin` gets 403.\n    - Install returns per-target results when one target fails.\n    - `GET /api/ssh/tunnels` includes `running`.\n    - No response contains private key text.\n- Run `uv run python -m unittest discover -s tests -v`.\n- **Manual check, `uv run run.py`:**\n  - **Sidebar and project state:**\n    - Start a task running on a project, open its drawer, and type into Project settings without saving.\n    - Switch to SSH tools: the sidebar shows Keys/Install keys/Tunnels and the main area shows the tool.\n    - Press Esc: nothing happens to the hidden project.\n    - Switch back: the same project, view, open drawer and unsaved edits are still there, and the task has progressed.\n    - Reload the page: the last mode and tool are restored.\n  - **Keys:**\n    - Generate an ed25519 key and copy it.\n    - Install it on a POSIX host and a Windows host, run the install again and confirm the key is skipped.\n    - Install on a password-only host via the terminal.\n    - Copy a public key from host A to host B.\n  - **Tunnels:**\n    - Start `-L 127.0.0.1:8080:localhost:80`, `curl localhost:8080`, and watch the sidebar dot turn green.\n    - Switch to Projects: the badge shows 1.\n    - Try 0.0.0.0 from another machine.\n    - Use a port that's already in use: the error is shown.\n    - Quit from the tray: no `ssh.exe` remains.\n  - **Narrow window:** the mode switch is still usable.\n\n## Assumptions\n\n- \"The left bar is taken over\" means the sidebar's project list and \"+ Add\" are swapped for SSH tools navigation and a live tunnel list. The bigger tool screens (key table, install form, tunnel editor) go in the main area, because they don't fit in the sidebar's width. The draft's footer \"SSH tools\" button is dropped in favour of the switch.\n- \"Everything keeps running in projects\" means project UI is only hidden with CSS, never closed or reset. Polling, running tasks, the drawer, chat and unsaved settings all survive the switch. The drawer and chat overlays are hidden while in SSH mode and come back when you return.\n- Global settings (the gear in `.sidebar-foot`) stays reachable in both modes.\n- The sidebar mode and the selected tool are remembered in `localStorage`, like `pg.pid`.\n- Only **public** keys are copied (your earlier answer). Private keys are never read, returned or transferred.\n- Key generation defaults to ed25519 on this computer. The passphrase is passed via `ssh-keygen -N`, so it's briefly visible in the process list (documented), and an empty passphrase is allowed.\n- The password fallback uses a visible terminal, so the app never stores or proxies passwords.\n- Tunnels persist in `settings.json`, never auto-start, and support only `-L`/`-R` (no `-D`). The bind address applies to the listening side.\n- Host pickers suggest project targets plus `~/.ssh/config` aliases, and free-typed `user@host` is allowed.\n\n## Risks\n\n- **Hidden project UI still reacting:**\n  - Global key handlers (Esc leaving settings, batch Esc, drawer Ctrl+S) and anything that calls `.focus()` on project elements must check `state.mode`. Otherwise a hidden form can be closed, or a hidden card focused.\n  - Audit every `document`-level listener.\n  - `renderProjects()` must not un-hide `#project-view` in a way that beats the CSS. Keep the `!important` rule, or pass the mode check through.\n- **Re-entrancy:** `selectProject` can be triggered by refresh code while in SSH mode. That's fine, because it renders into hidden DOM, but it must not switch the mode back.\n- **Windows sshd and administrators:** keys in `%USERPROFILE%` are ignored for admin users. Show the note, and don't write to `ProgramData`.\n- **Permissions:** keep `authorized_keys` at mode 600 and `~/.ssh` at mode 700. Let `ssh-keygen` create local key files, because it sets the correct Windows ACLs.\n- **Zombie tunnels:** `atexit` doesn't run on a hard kill. A follow-up could record PIDs in the data directory and clean them up at startup.\n- **Bind failures:** `ExitOnForwardFailure=yes` is essential, and the 2 s check is only a heuristic, so keep showing the live stderr.\n- **0.0.0.0 binds:** they expose the forwarded service to the LAN with no authentication in front. A remote 0.0.0.0 bind silently falls back to loopback unless the server sets `GatewayPorts`.\n- **Quoting and injection:** validate before any ssh call, pass keys on stdin, quote with `shlex.quote`/`_ps_quote`/base64, and respect the 8,000-character Windows command limit.\n- **Encoding:** PowerShell default shells re-encode output, so use base64 markers.\n- **Settings overwrite:** the Global settings save must keep `ssh_tunnels`.\n- **Polling cost:** the background badge poll must stay cheap (in-memory status only, no ssh calls).\n\n## Questions for you\n\nNone.",
-      "status": "review",
+      "status": "done",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-14T23:33:07+00:00",
-      "updated_at": "2026-10-14T23:58:35+00:00",
+      "updated_at": "2026-10-15T00:15:42+00:00",
       "queued_at": "2026-10-14T23:47:37+00:00",
       "started_at": "2026-10-14T23:47:37+00:00",
       "finished_at": "2026-10-14T23:58:35+00:00",
       "output": "The SSH tools section is in: the sidebar switch, the Keys, Install keys and Tunnels tools, the `/api/ssh/...` routes, and the backend module. The full suite passes (251 tests, 9 skipped, run before the README edit). I haven't run `uv run run.py`, so none of the manual checks in the plan were done. The UI is only syntax-checked with `node --check` and has never been loaded in a browser. Nothing has been tried against a real host, including key install, the password-terminal fallback, the Windows host path and live tunnels. Please run that checklist before relying on it.\n\n- **Backend:** the new `patchgoblin/sshtools.py` holds the key listing, generation and install code, the host suggestions and the tunnel manager. All of it follows the plan, including that only public keys are ever read or copied.\n- **`hosts.py`:** I factored out `background_kwargs()`, a shared terminal wrapper and `run_in_terminal()`. `terminal_command` now goes through the wrapper.\n- **`store.py`, `app.py`, `tray.pyw`:** the `ssh_tunnels` setting and the `/api/ssh/...` routes are in. The Global settings save keeps saved tunnels. A running tunnel can't be edited or deleted, and `tray.pyw` stops all tunnels on quit.\n- **UI:**\n  - **Switch:** it hides the project UI with `body.mode-ssh`, and the drawer, chat and unsaved settings are left alone.\n  - **Hidden-UI guards:** the global keydown handler and the drawer/chat outside-click handler do nothing in SSH mode. The outside-click handler wasn't in your plan, but it would otherwise have closed the hidden drawer on any click in the SSH view.\n  - **State and polling:** the mode and tool are restored from `localStorage`. Tunnel polling runs every 5 s in SSH mode and every 30 s in Projects mode, and updates the badge.\n- **README:** I added an \"SSH tools\" section and a line under Safety notes.\n- **Tests:** a new `SshToolsTests` class in `tests/test_patchgoblin.py` covers the plan's list, including a real `sys.executable` process for the tunnel start and stop tests.\n\nA few small deviations:\n- Install passes `posix` or `windows` explicitly based on the checkbox, so it skips OS autodetection. Without that, a failed login wouldn't get the \"Use password\" hint.\n- `clean_tunnels` has a `strict` flag, used by the PUT route, so the user gets an error instead of a silently dropped tunnel.\n- A tunnel without an id gets one generated from its name.",
       "error": "",
-      "commit": "",
+      "commit": "0cc3baa61995b7a6ef70d9af32bfc97a2ef51a99",
       "changes": [],
       "summary": "",
       "checkin_pending": false,
@@ -2995,9 +2995,196 @@
         {
           "at": "2026-10-14T23:58:35+00:00",
           "event": "AI run finished; awaiting review"
+        },
+        {
+          "at": "2026-10-14T23:58:37+00:00",
+          "event": "Committed 0cc3baa619"
+        },
+        {
+          "at": "2026-10-15T00:15:42+00:00",
+          "event": "Approved by engineer"
         }
       ],
       "prev_status": "planned"
+    },
+    {
+      "id": 51,
+      "title": "There appears to still be a bug that has to do with using claude in a windows ssh terminal in PS mode",
+      "description": "",
+      "plan": "",
+      "status": "unplanned",
+      "provider": "",
+      "plan_model": "",
+      "code_model": "",
+      "plan_trust": "",
+      "paused": false,
+      "created_at": "2026-10-14T23:59:17+00:00",
+      "updated_at": "2026-10-15T00:01:07+00:00",
+      "queued_at": null,
+      "started_at": null,
+      "finished_at": null,
+      "output": "",
+      "error": "Planning was interrupted (PatchGoblin restarted).",
+      "commit": "",
+      "changes": [],
+      "summary": "",
+      "checkin_pending": false,
+      "checkin": "",
+      "review_feedback": "",
+      "approval_note": "",
+      "approval_commit": "",
+      "history": [
+        {
+          "at": "2026-10-14T23:59:17+00:00",
+          "event": "Created"
+        },
+        {
+          "at": "2026-10-14T23:59:17+00:00",
+          "event": "Auto-planned: AI planning started"
+        },
+        {
+          "at": "2026-10-15T00:01:07+00:00",
+          "event": "Planning interrupted"
+        }
+      ],
+      "prev_status": "unplanned"
+    },
+    {
+      "id": 52,
+      "title": "add a reset option to the tray icon that restarts the tray process",
+      "description": "",
+      "plan": "",
+      "status": "unplanned",
+      "provider": "",
+      "plan_model": "",
+      "code_model": "",
+      "plan_trust": "",
+      "paused": false,
+      "created_at": "2026-10-15T00:00:46+00:00",
+      "updated_at": "2026-10-15T00:01:07+00:00",
+      "queued_at": null,
+      "started_at": null,
+      "finished_at": null,
+      "output": "",
+      "error": "Planning was interrupted (PatchGoblin restarted).",
+      "commit": "",
+      "changes": [],
+      "summary": "",
+      "checkin_pending": false,
+      "checkin": "",
+      "review_feedback": "",
+      "approval_note": "",
+      "approval_commit": "",
+      "history": [
+        {
+          "at": "2026-10-15T00:00:46+00:00",
+          "event": "Created"
+        },
+        {
+          "at": "2026-10-15T00:00:46+00:00",
+          "event": "Auto-planned: AI planning started"
+        },
+        {
+          "at": "2026-10-15T00:01:07+00:00",
+          "event": "Planning interrupted"
+        }
+      ],
+      "prev_status": "unplanned"
+    },
+    {
+      "id": 53,
+      "title": "Add a manually managed SSH servers list with suggestions in both directions",
+      "description": "",
+      "plan": "## Summary\nThe SSH tools section has no list of servers of its own yet. `sshtools.ssh_targets()` builds one on the fly from saved projects and `~/.ssh/config`, and that list fills every host picker. The plan adds a saved list of SSH servers, stored next to `ssh_tunnels` in the global settings and managed only by you. A new **Servers** tool in the SSH tools sidebar lets you add, edit and delete entries. Hosts your projects use, and `~/.ssh/config` aliases, show up as **suggestions** you can add with one click. Nothing is ever added for you. The key, install and tunnel pickers list saved servers first and suggestions after. In the other direction, the Add project dialog's SSH target field suggests saved servers and fills in the port when you pick one. This follows the existing tunnel pattern: a `validate_*`/`clean_*` pair in `sshtools.py`, a `save_*` method in `store.py`, a GET/PUT pair of routes, and a table plus form panel in `app.js`/`index.html`.\n\n## Steps\n1. **`patchgoblin/sshtools.py`: server model**\n   - Add `SERVER_OSES = (\"auto\", \"posix\", \"windows\")`.\n   - Add `validate_server(spec)`, modelled on `validate_tunnel`. It returns `{id, name, target, port, os}`:\n     - `id` is checked with `TUNNEL_ID`.\n     - `name` is one line of up to 60 characters and defaults to the target.\n     - `target`/`port` are checked through `SSHHost(target, port)` and `_port`.\n     - `os` must be one of `SERVER_OSES` and defaults to `\"auto\"`.\n   - Add `clean_servers(values, strict=False)`, modelled on `clean_tunnels`. It fills missing ids with `_free_id` and rejects a repeated id, and also a repeated `(target.lower(), port)` pair (\"That server is already saved\"). With `strict=False` it drops bad entries instead.\n   - Replace `ssh_targets(registry)` with `server_suggestions(registry, servers)`. It uses the same project and `~/.ssh/config` sources and returns `{target, port, source}`, where `source` is `\"project\"` or `\"ssh config\"`. It leaves out anything already in `servers` (matched on `(target.lower(), port or None)`). For project entries it also carries `ssh_os`, so adding the suggestion keeps the OS already detected.\n2. **`patchgoblin/store.py`**\n   - Add `\"ssh_servers\": []` to `DEFAULT_SETTINGS`, next to `ssh_tunnels`.\n   - Add the same `isinstance(list)` guard in `Settings.get()`.\n   - Add `save_servers(servers)`, copied from `save_tunnels`.\n3. **`patchgoblin/app.py` (SSH tools block, around lines 938\u20131035)**\n   - Replace `GET /api/ssh/targets` with `GET /api/ssh/servers`. It returns `{servers: clean_servers(settings[\"ssh_servers\"]), suggestions: server_suggestions(registry, servers)}`.\n   - Add `PUT /api/ssh/servers`. It runs `clean_servers(body()[\"servers\"], strict=True)`, then `settings.save_servers`, and returns the same view.\n   - Leave `ssh_host()` as it is. The frontend now sends `os` from the saved server: `\"auto\"` sends nothing, so `host_for` detects the OS.\n   - In `/api/ssh/keys`, also accept `os`, the same way `windows=1` is accepted now.\n4. **`patchgoblin/templates/index.html`**\n   - Add `<li data-tool=\"servers\">Servers</li>` as the first `#ssh-nav` item.\n   - Add `#ssh-servers-panel` with three parts:\n     - a table of saved servers: name, target, port, OS, and Edit/Delete buttons;\n     - a \"Suggestions\" list where each row shows its source and has an **Add** button;\n     - a form `#ssh-server-form` with name, target, port, an OS select (Auto-detect / Linux-macOS / Windows), Save, Cancel edit, and an error box.\n   - In the Add project dialog, add `list=\"pf-ssh-servers\"` to `ssh_target` and a matching `<datalist id=\"pf-ssh-servers\">`.\n5. **`patchgoblin/static/app.js`**\n   - Add `servers: \"Servers\"` to `SSH_TOOLS`. Keep `\"keys\"` as the default tool.\n   - Replace `ssh.targets`/`ensureSshTargets()` with `ssh.servers`, `ssh.suggestions` and `loadSshServers(force)`. This calls `GET /api/ssh/servers` and then `fillSshPickers()`.\n   - `fillSshPickers()` fills `#ssh-key-source`, `#ssh-gen-source` and `#ssh-install-source`:\n     - the existing \"This computer\" option stays first and is not removed;\n     - saved servers come next;\n     - suggestions go in an `<optgroup label=\"Suggestions\">`.\n   - It also fills the `#ssh-targets` and `#pf-ssh-servers` datalists with saved servers and suggestions.\n   - Extend `sshSourceValue`/`sshSource` to carry `os`, and pass it in `fetchKeys` and `generateKey`.\n   - Add `renderServerPanel`, `submitServer`, `editServer`, `deleteServer` and `saveServers(list)`, mirroring the tunnel functions.\n     - A suggestion's **Add** button fills the form, it does not save. You review the entry and press Save, so nothing is added without you.\n     - After any save, re-run `fillSshPickers()`.\n   - Add a helper `matchServer(target)` that finds a saved server by exact target. Use it for autofill:\n     - install destination rows (`addInstallDest`): set port and the \"Windows host\" box when the target matches;\n     - tunnel form `target` input: set the port;\n     - Add project dialog `ssh_target` input: set `ssh_port` when the port field is empty.\n   - Call `loadSshServers()` when the project dialog opens, so its suggestions are current.\n   - After a project is added, clear the cache so new project hosts show up as suggestions next time.\n   - Wire up the form and buttons in `setupSshTools()`.\n6. **`patchgoblin/static/app.css`**: reuse `.ssh-table` and `.ssh-panel`. Add a small style for the suggestion rows if needed.\n7. **`README.md`**: document the Servers tool and say that suggestions are never added automatically.\n\n## Verification\n- **Tests in `tests/test_patchgoblin.py`**:\n  - Rework `test_ssh_targets_merges_config_and_projects` into `test_server_suggestions_exclude_saved`. Check the same merge order, plus that already-saved servers (case-insensitive target, same port) are left out.\n  - `test_validate_server_rules`: bad target `-oProxyCommand=x`, port 99999, a bad `os`, a multi-line name, and the name defaulting to the target.\n  - `test_clean_servers`: duplicate id and duplicate target/port raise an error when strict and are dropped when not; missing ids are filled.\n  - Flask client tests:\n    - GET `/api/ssh/servers` on fresh settings returns `servers: []` and suggestions from a registered SSH project. This confirms nothing is added automatically.\n    - PUT saves, and invalid input returns 400.\n    - Adding a project does not change `ssh_servers`.\n- **Run the suite:** `python -m pytest tests -q`.\n- **Manual check (the `run` skill):**\n  1. Open SSH tools \u2192 Servers and confirm project hosts appear only under Suggestions.\n  2. Add one; confirm it appears in the key and install pickers and the tunnel host datalist.\n  3. Open Add project \u2192 SSH host, pick the saved server from the datalist, and confirm the port fills in.\n\n## Assumptions\n- Saved servers go in global settings (`ssh_servers`, next to `ssh_tunnels`), not in any one project's files.\n- Suggestions come from projects and `~/.ssh/config`, as they do today. Adding one means reviewing it in the form and pressing Save.\n- The pickers still show unsaved suggestions in a separate \"Suggestions\" group, so the tools keep working before you've saved any servers.\n- Deleting a saved server doesn't touch projects or tunnels that use the same host.\n- The `/api/ssh/targets` route can be replaced, since only `app.js` uses it.\n- Projects keep their own `ssh_target`/`ssh_port`. Picking a saved server only fills the form; projects aren't linked to server entries.\n\n## Risks\n- `ensureSshTargets` appended options once per session. `fillSshPickers` must replace the options after \"This computer\" and keep the selected value, or the key panels will reset or duplicate entries after every save.\n- Matching on `(target, port)`: a project with port 22 should probably match a saved server with no port. Treat an empty port and 22 as the same, or note that they're treated as different.\n- `ssh_host()` uses `source.get(\"os\")` before `windows`. `\"auto\"` must become `None` so `detect_ssh_os` runs, not a literal `\"auto\"`.\n- The tunnel form's port autofill must not overwrite a port you typed yourself. Only fill an empty field.\n- Settings `_merge` replaces lists whole, so always write through `save_servers` and never through `update()`.\n\n## Questions for you\nNone.",
+      "status": "review",
+      "provider": "",
+      "plan_model": "",
+      "code_model": "",
+      "plan_trust": "",
+      "paused": false,
+      "created_at": "2026-10-15T00:09:11+00:00",
+      "updated_at": "2026-10-15T00:17:03+00:00",
+      "queued_at": "2026-10-15T00:11:43+00:00",
+      "started_at": "2026-10-15T00:11:43+00:00",
+      "finished_at": "2026-10-15T00:17:03+00:00",
+      "output": "The Servers tool is in. I didn't do the manual browser check from the plan, so the UI itself hasn't been exercised.\n\nThe full unittest suite (254 tests) had one failure, a wrong expectation in my new suggestions test. I fixed it and re-ran the 15 ssh/server tests, which pass. I didn't re-run the full suite after that fix. `pytest` isn't installed in the repo's `.venv`, so I ran it with `python -m unittest` instead of `python -m pytest`. `node --check` passes on `app.js`.\n\n- **Backend:**\n  - **`sshtools.py`:** Saved servers are validated and de-duplicated by id, and by target (ignoring case) plus port. `ssh_targets` is replaced by `server_suggestions`, which tags each suggestion \"project\" or \"ssh config\", carries a project's detected OS, and leaves out hosts you've already saved.\n  - **`store.py`:** `ssh_servers` is a new setting, written through `save_servers`.\n  - **`app.py`:** `GET` and `PUT /api/ssh/servers` replace `/api/ssh/targets`. The keys and generate routes now accept `os`, and `\"auto\"` still triggers OS detection.\n- **UI:**\n  - **Servers tool:** a new tool in the SSH sidebar with a saved-servers table, a Suggestions table and an add/edit form. A suggestion's Add button only fills the form, and nothing is saved until you press Save server.\n  - **Pickers:** the key, generate and install pickers list \"This computer\" first, then saved servers, then a \"Suggestions\" group. They keep your selection when refreshed.\n  - **Autofill:** picking a saved server fills the port (and the Windows box in install rows) in the install and tunnel forms, and the port in the Add project dialog. It only fills an empty port field.\n- **README:** documents the Servers tool and that nothing is added automatically.\n- **Tests:** I replaced the old targets test with new ones for suggestions, validation, cleaning and the GET/PUT routes. They check that fresh settings and adding a project leave `ssh_servers` empty, that an invalid PUT returns 400, and that PUT without the header returns 403.\n\nAn empty port and port 22 are treated as different when matching saved servers against suggestions. I added a test for it, and it means a project on port 22 still shows as a suggestion even if you saved the same host with no port.",
+      "error": "",
+      "commit": "",
+      "changes": [],
+      "summary": "",
+      "checkin_pending": false,
+      "checkin": "",
+      "review_feedback": "",
+      "approval_note": "",
+      "approval_commit": "",
+      "history": [
+        {
+          "at": "2026-10-15T00:09:11+00:00",
+          "event": "Created"
+        },
+        {
+          "at": "2026-10-15T00:09:14+00:00",
+          "event": "AI planning started"
+        },
+        {
+          "at": "2026-10-15T00:11:43+00:00",
+          "event": "Title rewritten by AI (was: SSH tools should let me manually add the servers that I have access on to it. While you may suggest ones that I already access through projects, don't auto add. in this same way, servers in ssh tools can be suggested for projects being added)"
+        },
+        {
+          "at": "2026-10-15T00:11:43+00:00",
+          "event": "AI plan ready"
+        },
+        {
+          "at": "2026-10-15T00:11:43+00:00",
+          "event": "Auto-queued"
+        },
+        {
+          "at": "2026-10-15T00:11:43+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-10-15T00:17:03+00:00",
+          "event": "AI run finished; awaiting review"
+        }
+      ],
+      "prev_status": "unplanned"
+    },
+    {
+      "id": 54,
+      "title": "Add an epic network diagram to ssh tools that show all known connections to servers I add to my list looking at authorized_keys or whatever windows uses for admin. do not auto generate continuously, generate when I open or hit a button to refresh",
+      "description": "",
+      "plan": "",
+      "status": "unplanned",
+      "provider": "",
+      "plan_model": "",
+      "code_model": "",
+      "plan_trust": "",
+      "paused": false,
+      "created_at": "2026-10-15T00:12:01+00:00",
+      "updated_at": "2026-10-15T00:14:20+00:00",
+      "queued_at": null,
+      "started_at": null,
+      "finished_at": null,
+      "output": "",
+      "error": "",
+      "commit": "",
+      "changes": [],
+      "summary": "",
+      "checkin_pending": false,
+      "checkin": "",
+      "review_feedback": "",
+      "approval_note": "",
+      "approval_commit": "",
+      "history": [
+        {
+          "at": "2026-10-15T00:12:01+00:00",
+          "event": "Created"
+        },
+        {
+          "at": "2026-10-15T00:14:20+00:00",
+          "event": "Edited title"
+        }
+      ]
     }
   ]
 }
