@@ -3011,7 +3011,7 @@
       "id": 51,
       "title": "There appears to still be a bug that has to do with using claude in a windows ssh terminal in PS mode",
       "description": "",
-      "plan": "",
+      "plan": "I think it has to do with response length?",
       "status": "unplanned",
       "provider": "",
       "plan_model": "",
@@ -3019,7 +3019,7 @@
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-14T23:59:17+00:00",
-      "updated_at": "2026-10-15T00:01:07+00:00",
+      "updated_at": "2026-10-15T02:51:20+00:00",
       "queued_at": null,
       "started_at": null,
       "finished_at": null,
@@ -3045,6 +3045,10 @@
         {
           "at": "2026-10-15T00:01:07+00:00",
           "event": "Planning interrupted"
+        },
+        {
+          "at": "2026-10-15T02:51:20+00:00",
+          "event": "Edited plan"
         }
       ],
       "prev_status": "unplanned"
