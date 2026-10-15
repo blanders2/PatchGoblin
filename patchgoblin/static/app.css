@@ -585,7 +585,7 @@ body.mode-ssh #drawer, body.mode-ssh #chat { display: none !important; }
 .ssh-table td { padding: 3px 6px; border-top: 1px solid var(--line); vertical-align: middle;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 0; }
 .ssh-table tr.flash td { background: var(--b-planned); }
-.ssh-table th:last-child, .ssh-table td:last-child { width: 1%; max-width: none; overflow: visible; text-align: right; }
+.ssh-table th:last-child, .ssh-table td:last-child { max-width: none; overflow: hidden; text-align: right; }
 .ssh-table .actions { flex-wrap: nowrap; gap: 4px; justify-content: flex-end; }
 .ssh-table details { margin-top: 4px; white-space: normal; }
 .ssh-checks { display: flex; flex-direction: column; gap: 2px; }

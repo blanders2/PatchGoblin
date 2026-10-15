@@ -3169,13 +3169,13 @@
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-15T00:12:01+00:00",
-      "updated_at": "2026-10-15T00:39:15+00:00",
+      "updated_at": "2026-10-15T00:39:16+00:00",
       "queued_at": "2026-10-15T00:33:47+00:00",
       "started_at": "2026-10-15T00:33:47+00:00",
       "finished_at": "2026-10-15T00:39:15+00:00",
       "output": "The full-suite run finished. It used the test file from before my fix, so that one error is the Windows-host test failure I'd already fixed. The log shows 261 tests with 1 error and 9 skipped. The \"disk went away\" lines are output from existing tests that simulate a disk failure on purpose. I re-ran `SshToolsTests` after the fix and all 34 passed. I did not re-run the full suite after the fix.",
       "error": "",
-      "commit": "",
+      "commit": "1e88d6233af6ce3b6b85261451ac9a63b7cd954d",
       "changes": [],
       "summary": "",
       "checkin_pending": false,
@@ -3215,6 +3215,10 @@
         {
           "at": "2026-10-15T00:39:15+00:00",
           "event": "AI run finished; awaiting review"
+        },
+        {
+          "at": "2026-10-15T00:39:16+00:00",
+          "event": "Committed 1e88d6233a"
         }
       ],
       "prev_status": "unplanned"
@@ -3286,18 +3290,18 @@
       "title": "Stop SSH table action buttons overlapping the OS and adjacent columns",
       "description": "",
       "plan": "The overlap comes from how the SSH tables are sized. They use `table-layout: fixed` (`patchgoblin/static/app.css:551`), so each column's width comes only from its `<col>`, and the cell contents are ignored. The action column is declared as `<col style=\"width:1%\">`. CSS then sets `overflow: visible` on the last cell (`app.css:556`), and the `.actions` flex row is `nowrap` with `justify-content: flex-end` (`app.css:557`). So the Edit/Delete buttons don't fit in the tiny column and spill left over the OS cell. The fix is to give each table's action column a real width that fits its buttons, instead of 1%. The Saved servers table needs the fix. The Tunnels table (Start/Stop + Edit + Delete) has the same bug, and so do the Keys and Suggestions tables whenever the column next to the buttons has text, so all four get the same fix.\n\n1. In `patchgoblin/templates/index.html`, change the last `<col>` of each `.ssh-table` colgroup from `width:1%` to a fixed width that fits its buttons:\n   - Saved servers (line 164): Edit + Delete \u2192 roughly `width:8.5em`.\n   - Suggestions (line 172): Add \u2192 roughly `width:3.5em`.\n   - Keys (line 207): the copy button(s) rendered near `app.js:2322`. Measure them and size the column to fit.\n   - Tunnels (line 255): toggle + Edit + Delete \u2192 roughly `width:12em`.\n   Use `em` so the widths scale with the 12px button font. Check the actual widths in the browser and adjust.\n2. In `patchgoblin/static/app.css:556`, drop `width: 1%` from the `.ssh-table th:last-child, td:last-child` rule so the colgroup alone controls the width. Keep `max-width: none` and `text-align: right`. Change `overflow: visible` to `overflow: hidden`, so a column that is still too narrow clips its buttons instead of covering the next column. That way a future sizing mistake shows up clearly rather than as overlap.\n3. Optionally, shrink the Saved servers OS column (`width:16%`) a little so the Host column keeps its space at narrow widths. \"Linux/macOS\" and \"Auto-detect\" should still ellipsize cleanly thanks to the existing `text-overflow: ellipsis`.\n4. No JS changes are needed: `renderServerPanel` and `renderTunnelPanel` in `app.js` keep the same markup.\n\n**Verification**\n- Run the app (`/run`) and open SSH tools. Under Servers, add servers with OS set to Auto-detect, Linux/macOS and Windows. The OS text should end before the Edit button at both a wide and a narrow window width.\n- Check the Tunnels table in both running and stopped states (the toggle label may change width), plus the Keys and Suggestions tables. No buttons should overlap neighbouring cells or wrap onto two lines.\n- Check that the empty-state rows (`colspan`) still render correctly.\n- Run the existing test suite (e.g. `pytest`) as a sanity check. This is a CSS/HTML-only change, so no new tests.\n\n## Assumptions\n- I'm fixing all four SSH tables, not only the Servers table, because they share the same flawed 1%-width pattern.\n- I'm using fixed `em` widths in the colgroup rather than switching to `table-layout: auto`. Auto layout would undo the compact layout from task #55.\n- Clipping (`overflow: hidden`) is a better failure mode than overlap if a column ends up too narrow.\n\n## Risks\n- The tunnel toggle's label may differ in width between states (e.g. \"Start\" vs \"Stop\"). Size the column for the wider label.\n- At very narrow viewports, fixed action columns take space from the percentage and auto columns. Make sure the Host and Fingerprint columns still get usable space.\n- If anything else depends on the `width: 1%` rule in `app.css:556`, the colgroup values must now be correct for each table. Grep found only these four tables using `.ssh-table`.\n\n## Questions for you\nNone.",
-      "status": "queued",
+      "status": "review",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-15T00:33:16+00:00",
-      "updated_at": "2026-10-15T00:34:01+00:00",
+      "updated_at": "2026-10-15T00:39:41+00:00",
       "queued_at": "2026-10-15T00:34:01+00:00",
-      "started_at": null,
-      "finished_at": null,
-      "output": "[2026-10-15T00:33:19+00:00] plan with claude / opus in C:\\src\\PatchGoblin\n$ claude -p --output-format stream-json --verbose --allowedTools Read,Glob,Grep --disallowedTools Edit,Write,NotebookEdit,Bash --model opus\n\u00b7 Started: model claude-opus-5-5, in C:\\src\\PatchGoblin\n\u2192 Searching `ssh-server|sshServer|ssh-srv`\n\u2192 Searching `\\bos\\b|\\.os|-os`\n\u2192 Reading patchgoblin/static/app.js\n\u2192 Searching `ssh`\n\u2192 Reading patchgoblin/templates/index.html\n\u2192 Searching `ssh-table|ssh-panel|\\.actions`\n\u2192 Searching `colgroup`\n\u2192 Searching `\"small ghost[^\"]*\"[^)]*\\)[^,]*, \"[^\"]+\"`\nI found the cause in the CSS. Now I'm checking the tunnel table's action buttons so the fix covers that table too.\n\u2192 Reading patchgoblin/static/app.js\nTitle: Stop SSH table action buttons overlapping the OS and adjacent columns\n\nThe overlap comes from how the SSH tables are sized. They use `table-layout: fixed` (`patchgoblin/static/app.css:551`), so each column's width comes only from its `<col>`, and the cell contents are ignored. The action column is declared as `<col style=\"width:1%\">`. CSS then sets `overflow: visible` on the last cell (`app.css:556`), and the `.actions` flex row is `nowrap` with `justify-content: flex-end` (`app.css:557`). So the Edit/Delete buttons don't fit in the tiny column and spill left over the OS cell. The fix is to give each table's action column a real width that fits its buttons, instead of 1%. The Saved servers table needs the fix. The Tunnels table (Start/Stop + Edit + Delete) has the same bug, and so do the Keys and Suggestions tables whenever the column next to the buttons has text, so all four get the same fix.\n\n1. In `patchgoblin/templates/index.html`, change the last `<col>` of each `.ssh-table` colgroup from `width:1%` to a fixed width that fits its buttons:\n   - Saved servers (line 164): Edit + Delete \u2192 roughly `width:8.5em`.\n   - Suggestions (line 172): Add \u2192 roughly `width:3.5em`.\n   - Keys (line 207): the copy button(s) rendered near `app.js:2322`. Measure them and size the column to fit.\n   - Tunnels (line 255): toggle + Edit + Delete \u2192 roughly `width:12em`.\n   Use `em` so the widths scale with the 12px button font. Check the actual widths in the browser and adjust.\n2. In `patchgoblin/static/app.css:556`, drop `width: 1%` from the `.ssh-table th:last-child, td:last-child` rule so the colgroup alone controls the width. Keep `max-width: none` and `text-align: right`. Change `overflow: visible` to `overflow: hidden`, so a column that is still too narrow clips its buttons instead of covering the next column. That way a future sizing mistake shows up clearly rather than as overlap.\n3. Optionally, shrink the Saved servers OS column (`width:16%`) a little so the Host column keeps its space at narrow widths. \"Linux/macOS\" and \"Auto-detect\" should still ellipsize cleanly thanks to the existing `text-overflow: ellipsis`.\n4. No JS changes are needed: `renderServerPanel` and `renderTunnelPanel` in `app.js` keep the same markup.\n\n**Verification**\n- Run the app (`/run`) and open SSH tools. Under Servers, add servers with OS set to Auto-detect, Linux/macOS and Windows. The OS text should end before the Edit button at both a wide and a narrow window width.\n- Check the Tunnels table in both running and stopped states (the toggle label may change width), plus the Keys and Suggestions tables. No buttons should overlap neighbouring cells or wrap onto two lines.\n- Check that the empty-state rows (`colspan`) still render correctly.\n- Run the existing test suite (e.g. `pytest`) as a sanity check. This is a CSS/HTML-only change, so no new tests.\n\n## Assumptions\n- I'm fixing all four SSH tables, not only the Servers table, because they share the same flawed 1%-width pattern.\n- I'm using fixed `em` widths in the colgroup rather than switching to `table-layout: auto`. Auto layout would undo the compact layout from task #55.\n- Clipping (`overflow: hidden`) is a better failure mode than overlap if a column ends up too narrow.\n\n## Risks\n- The tunnel toggle's label may differ in width between states (e.g. \"Start\" vs \"Stop\"). Size the column for the wider label.\n- At very narrow viewports, fixed action columns take space from the percentage and auto columns. Make sure the Host and Fingerprint columns still get usable space.\n- If anything else depends on the `width: 1%` rule in `app.css:556`, the colgroup values must now be correct for each table. Grep found only these four tables using `.ssh-table`.\n\n## Questions for you\nNone.\n\u00b7 Finished: 39s, 10 turns, $0.26\n",
+      "started_at": "2026-10-15T00:39:16+00:00",
+      "finished_at": "2026-10-15T00:39:41+00:00",
+      "output": "I changed the action column widths in all four SSH tables so the buttons no longer spill over the neighbouring columns. I haven't run it in a browser, and the test suite didn't run because pytest isn't installed here.\n\n- **Column widths (`templates/index.html`):** each action column's `width:1%` is now a fixed `em` width sized by estimate from the button text and padding.\n\n  | Table | Buttons | New width |\n  |---|---|---|\n  | Saved servers | Edit + Delete | `9.5em` |\n  | Suggestions | Add | `4.5em` |\n  | Keys | Copy | `5em` |\n  | Tunnels | \u25b6/\u25a0 toggle + Edit + Delete | `12em` |\n\n  The Tunnels toggle is a one-character icon, so its two states don't change the width. I also shrank the Saved servers OS column from 16% to 14% so Host keeps its space.\n- **Last-cell rule (`static/app.css`, now line 588):** I dropped `width: 1%` and changed `overflow: visible` to `overflow: hidden`. If a column is ever too narrow, the buttons now clip instead of covering the next column.\n- **Not touched:** the `colspan` empty-state rows and the network table, which has no action column. No JS changes.\n\nThe task plan's line numbers were out of date, so I located the lines by search. The widths still need checking in the running app at wide and narrow window sizes.",
       "error": "",
       "commit": "",
       "changes": [],
@@ -3327,6 +3331,14 @@
         {
           "at": "2026-10-15T00:34:01+00:00",
           "event": "Auto-queued"
+        },
+        {
+          "at": "2026-10-15T00:39:16+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-10-15T00:39:41+00:00",
+          "event": "AI run finished; awaiting review"
         }
       ],
       "prev_status": "unplanned"
