@@ -4173,6 +4173,73 @@ class TerminalsTests(unittest.TestCase):
         bad = self.client.post("/api/terminals/sessions", headers=H, json={"project": "nope"})
         self.assertEqual(bad.status_code, 400)
 
+    def test_multiplexed_stream(self):
+        made = []
+        for word in ("olleh", "dlrow"):  # one at a time: two Windows PTYs starting together can lose output
+            sid = self.client.post("/api/terminals/sessions", headers=H, json={}).get_json()["session"]["id"]
+            session = self.plugin.sessions.get(sid)
+            self.assertTrue(wait_until(lambda: "ready" in session.buf), session.buf)
+            session.write(word + "\r")
+            self.assertTrue(wait_until(lambda: not session.running))
+            made.append(sid)
+        a, b = made
+
+        def many(since):
+            res = self.client.post("/api/terminals/sessions/stream", headers=H, json={"since": since})
+            return [json.loads(line) for line in res.get_data(as_text=True).splitlines() if line.strip()]
+
+        events = many({a: 0, b: 0, "nope": 0})  # returns, so the stream ended
+        text = {sid: "".join(e.get("d", "") for e in events if e["event"] == "out" and e["s"] == sid) for sid in made}
+        self.assertIn("hello", text[a])
+        self.assertIn("world", text[b])
+        self.assertEqual([e for e in events if e["event"] == "gone"], [{"event": "gone", "s": "nope"}])
+        for sid in made:
+            self.assertEqual(len([e for e in events if e["event"] == "exit" and e["s"] == sid]), 1)
+        first = next(e for e in events if e["event"] == "out" and e["s"] == a)
+        resumed = many({a: first["end"]})
+        self.assertEqual("".join(e.get("d", "") for e in resumed if e["event"] == "out"), "")
+        self.assertEqual([e["event"] for e in resumed], ["exit"])
+        partial = many({a: 5})
+        self.assertEqual("".join(e.get("d", "") for e in partial if e["event"] == "out"), text[a][5:])
+        for bad in ({"since": [1]}, {"since": 3}, {}, {"since": {str(i): 0 for i in range(term_sessions.MAX_SESSIONS + 1)}}):
+            res = self.client.post("/api/terminals/sessions/stream", headers=H, json=bad)
+            self.assertEqual(res.status_code, 400, bad)
+
+    def test_newer_stream_from_the_same_page_supersedes(self):
+        sid = self.client.post("/api/terminals/sessions", headers=H, json={}).get_json()["session"]["id"]
+        session = self.plugin.sessions.get(sid)
+        self.assertTrue(wait_until(lambda: "ready" in session.buf), session.buf)
+        done = threading.Event()
+
+        def first():
+            res = self.app.test_client().post("/api/terminals/sessions/stream", headers=H, json={"since": {sid: 0}, "client": "page1"})
+            res.get_data()
+            done.set()
+        threading.Thread(target=first, daemon=True).start()
+        time.sleep(0.5)  # the first stream is now idle, waiting for output
+        self.assertFalse(done.is_set())
+        stream = self.client.post("/api/terminals/sessions/stream", headers=H, json={"since": {sid: 0}, "client": "page1"},
+                                  buffered=False)
+        next(iter(stream.response))  # the newer stream starts
+        self.assertTrue(done.wait(5), "the superseded stream stayed open")
+        stream.close()
+
+    def test_wait_any(self):
+        manager = term_sessions.SessionManager()
+        self.addCleanup(manager.kill_all)
+        s = manager.create([sys.executable, "-u", "-c", "import time; time.sleep(60)"], None, "t")
+        time.sleep(1)  # let any startup output settle
+        started = time.monotonic()
+        manager.wait_any({s.id: s.end}, 0.3)
+        self.assertGreaterEqual(time.monotonic() - started, 0.25)  # nothing happened: timed out
+        threading.Timer(0.2, s._append, ["hi"]).start()
+        started = time.monotonic()
+        manager.wait_any({s.id: s.end}, 5)
+        self.assertLess(time.monotonic() - started, 3)
+        started = time.monotonic()
+        manager.wait_any({s.id: 0}, 5)  # already has output past the offset
+        self.assertLess(time.monotonic() - started, 1)
+
     def test_session_cap_and_plugin_off(self):
         with mock.patch.object(term_sessions, "MAX_SESSIONS", 1):
             ok = self.client.post("/api/terminals/sessions", headers=H, json={})

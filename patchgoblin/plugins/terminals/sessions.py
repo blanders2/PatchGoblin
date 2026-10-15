@@ -131,7 +131,8 @@ def clamp_size(cols, rows) -> tuple[int, int]:
 
 class Session:
     def __init__(self, argv: list[str], cwd: str | None, title: str, color: str = "", project: str = "",
-                 cols: int = 100, rows: int = 30):
+                 cols: int = 100, rows: int = 30, notify: threading.Condition | None = None):
+        self.notify = notify  # the manager's shared condition, woken on any change
         self.id = uuid.uuid4().hex[:10]
         self.argv, self.cwd, self.title, self.color, self.project = argv, cwd, title, color, project
         self.created = time.time()
@@ -166,6 +167,7 @@ class Session:
             self.exit_code = self.pty.exit_code()
             self.running = False
             self.cond.notify_all()
+        self._notify()
         self.pty.close()
 
     def _append(self, data: str) -> None:
@@ -177,6 +179,13 @@ class Session:
                 self.buf = self.buf[cut:]
                 self.start += cut
             self.cond.notify_all()
+        self._notify()
+
+    def _notify(self) -> None:
+        """Wake multiplexed streams; called outside ``self.cond`` so the lock order stays simple."""
+        if self.notify is not None:
+            with self.notify:
+                self.notify.notify_all()
 
     def read_since(self, since: int, wait: float = 0) -> tuple[str, int, bool]:
         """``(text, next offset, truncated)``: output after ``since`` (waiting up to ``wait`` s
@@ -207,6 +216,7 @@ class Session:
         with self.cond:
             self.running = False
             self.cond.notify_all()
+        self._notify()
 
     def view(self) -> dict:
         return {"id": self.id, "title": self.title, "color": self.color, "project": self.project,
@@ -218,12 +228,27 @@ class SessionManager:
     def __init__(self):
         self.sessions: dict[str, Session] = {}
         self.lock = threading.Lock()
+        self.changed = threading.Condition()  # notified when any session gets output or stops
+
+    def wait_any(self, offsets: dict[str, int], timeout: float, stop=None) -> None:
+        """Return once any listed session has output past its offset or has stopped, ``stop()``
+        is true (or after ``timeout`` s). Wakeups may be spurious; callers re-check."""
+        def ready() -> bool:
+            if stop is not None and stop():
+                return True
+            for sid, offset in offsets.items():
+                s = self.get(sid)
+                if s is None or not s.running or s.end > offset:
+                    return True
+            return False
+        with self.changed:
+            self.changed.wait_for(ready, timeout)
 
     def create(self, argv, cwd, title, color="", project="", cols=100, rows=30) -> Session:
         with self.lock:
             if sum(s.running for s in self.sessions.values()) >= MAX_SESSIONS:
                 raise ValueError(f"At most {MAX_SESSIONS} terminals can run at once. Close one first.")
-        session = Session(argv, cwd, title, color, project, cols, rows)
+        session = Session(argv, cwd, title, color, project, cols, rows, notify=self.changed)
         with self.lock:
             self.sessions[session.id] = session
         return session

@@ -3,6 +3,11 @@
 Output reaches the page through a streamed POST (waitress has no WebSockets): the page
 attaches to the session it shows, from the last offset it has, and gets the missed scrollback
 plus live output. Keystrokes and resizes are small POSTs.
+
+The page shows several terminals at once, but a browser allows only about six HTTP/1.1
+connections per origin, so ``POST /sessions/stream`` multiplexes every visible session over one
+connection (events carry ``s``, the session id). The per-session ``/sessions/<id>/stream`` stays
+for compatibility.
 """
 from __future__ import annotations
 
@@ -17,7 +22,7 @@ from patchgoblin.hosts import (HostError, host_for, open_terminal, terminal_colo
                                windows_shell)
 from patchgoblin.pluginkit import Plugin
 
-from .sessions import SessionManager
+from .sessions import MAX_SESSIONS, SessionManager
 
 PING_SECONDS = 15  # an idle stream sends a ping this often, so a closed page frees its thread
 MAX_INPUT = 65536
@@ -44,6 +49,7 @@ class TerminalsPlugin(Plugin):
     def __init__(self, ctx):
         super().__init__(ctx)
         self.sessions = SessionManager()
+        self.streams: dict[str, object] = {}  # page id -> its newest multiplexed stream
 
     def stop(self) -> None:
         self.sessions.kill_all()
@@ -104,6 +110,58 @@ class TerminalsPlugin(Plugin):
             s = create(old.project, old.cols, old.rows, old.title)
             self.sessions.close(sid)
             return jsonify(session=s.view(), **views())
+
+        @bp.post("/sessions/stream")
+        def stream_many():
+            since = body().get("since")
+            if not isinstance(since, dict) or len(since) > MAX_SESSIONS:
+                raise ValueError(f"since must map at most {MAX_SESSIONS} session ids to offsets.")
+            pos = {str(sid): (o if isinstance(o, int) and not isinstance(o, bool) and o >= 0 else 0)
+                   for sid, o in since.items()}
+
+            # A page that reopens its stream (the visible panes changed) names itself, so the
+            # superseded stream ends at once instead of holding a server thread until its ping.
+            client = str(body().get("client") or "")[:40]
+            token = object()
+            if client:
+                self.streams[client] = token
+                with self.sessions.changed:
+                    self.sessions.changed.notify_all()
+
+            def superseded() -> bool:
+                return bool(client) and self.streams.get(client) is not token
+
+            def gen():
+                first, idle = True, time.monotonic()
+                while pos:
+                    if not first:
+                        self.sessions.wait_any(pos, PING_SECONDS, superseded)
+                        if superseded():
+                            return
+                        if any((s := self.sessions.get(sid)) and s.running for sid in pos):
+                            time.sleep(0.008)  # let a burst of output arrive as one event
+                    first = False
+                    for sid in list(pos):
+                        s = self.sessions.get(sid)
+                        if s is None:
+                            del pos[sid]
+                            yield ndjson("gone", s=sid)
+                            idle = time.monotonic()
+                            continue
+                        text, end, truncated = s.read_since(pos[sid])
+                        if text:
+                            yield ndjson("out", s=sid, o=pos[sid], d=text, end=end, truncated=truncated)
+                            pos[sid], idle = end, time.monotonic()
+                        elif not s.running:
+                            del pos[sid]
+                            yield ndjson("exit", s=sid, code=s.exit_code)
+                            idle = time.monotonic()
+                    if pos and time.monotonic() - idle >= PING_SECONDS - 0.5:
+                        yield ndjson("ping")
+                        idle = time.monotonic()
+
+            return Response(stream_with_context(gen()), mimetype="application/x-ndjson",
+                            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
         @bp.post("/sessions/<sid>/stream")
         def stream(sid):

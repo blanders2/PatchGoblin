@@ -13,18 +13,52 @@
 
 /* the view fills the main area; main's own padding stays around it */
 #view-terminals:not([hidden]) { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.term-hint { margin: 8px 0 0; line-height: 1.4; }
+#term-list .term-group-head { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+  padding: 8px 8px 2px; cursor: default; }
+#term-list .term-group-head:hover { background: none; }
+#term-list li.shown { box-shadow: inset 3px 0 0 var(--line); }
+#term-list li.active { box-shadow: inset 3px 0 0 var(--accent); }
+
 #term-view { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 8px; }
-.term-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.term-swatch { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
-.term-actions { margin-left: auto; display: flex; gap: 4px; }
-.term-actions button { padding: 2px 9px; font-size: 12.5px; }
-.term-stage { flex: 1; min-height: 240px; position: relative; border: 1px solid var(--line); border-radius: 6px;
-  background: var(--panel); overflow: hidden; }
-.term-stage[hidden] { display: none; }
-.term-host { position: absolute; inset: 6px; }
-.term-host[hidden] { display: none; }
+#term-view [hidden] { display: none !important; }
+.term-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.term-groups { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; min-width: 0; }
+.term-tab { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 6px; background: var(--panel);
+  font-size: 12.5px; }
+.term-tab.active { border-color: var(--accent); }
+.term-tab.drop { outline: 2px dashed var(--accent); }
+.term-tab button { background: none; border: 0; color: inherit; padding: 3px 8px; cursor: pointer; font: inherit; }
+.term-tab .term-tab-x { padding: 3px 6px 3px 0; opacity: .6; }
+.term-tab .term-tab-x:hover { opacity: 1; }
+.term-tab-add { border: 1px dashed var(--line); border-radius: 6px; background: none; color: inherit; padding: 3px 9px; cursor: pointer; }
+.term-tools { margin-left: auto; display: flex; gap: 4px; }
+.term-tools button { padding: 2px 9px; font-size: 12.5px; }
+.term-stage { flex: 1; min-height: 240px; position: relative; display: flex; overflow: hidden; }
+.term-stage.dragging { user-select: none; }
+.term-split { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; }
+.term-split.row { flex-direction: row; }
+.term-split.col { flex-direction: column; }
+.term-gutter { flex: 0 0 6px; background: var(--line); border-radius: 3px; touch-action: none; }
+.term-split.row > .term-gutter { cursor: col-resize; }
+.term-split.col > .term-gutter { cursor: row-resize; }
+.term-gutter:hover, .term-gutter.drag { background: var(--accent); }
+.term-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--panel); overflow: hidden; }
+.term-pane.focused { border-color: var(--accent); }
+.term-pane-head { display: flex; align-items: center; gap: 6px; padding: 2px 6px; font-size: 12px; cursor: grab;
+  border-bottom: 1px solid var(--line); flex-shrink: 0; user-select: none; }
+.term-pane-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; min-width: 0; }
+.term-pane-btns { margin-left: auto; display: flex; gap: 2px; flex-shrink: 0; }
+.term-pane-btns button { padding: 0 6px; font-size: 12px; line-height: 1.5; }
+.term-swatch { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+.term-slot { flex: 1; min-height: 0; position: relative; }
+.term-host { position: absolute; inset: 4px; }
 .term-host .xterm { height: 100%; }
 /* the leftover sliver below the last row shows the viewport, which xterm paints black */
 .term-host .xterm-viewport { background-color: var(--panel) !important; }
+.term-drop { position: absolute; background: var(--accent); opacity: .25; pointer-events: none; z-index: 5; }
+.term-menu { position: fixed; z-index: 20; display: flex; flex-direction: column; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; padding: 3px; box-shadow: 0 4px 14px #0005; }
+.term-menu button { text-align: left; font-size: 12.5px; padding: 3px 12px; }
 .term-empty { margin: auto; text-align: center; max-width: 34em; }
-.term-empty[hidden] { display: none; }

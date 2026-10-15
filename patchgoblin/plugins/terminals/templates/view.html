@@ -1,17 +1,16 @@
-{# Terminals main view: a header for the shown session, then the terminal filling the rest. #}
+{# Terminals main view: a toolbar (group tabs, split and font buttons), then the tiled panes filling the rest. #}
 <div id="term-view">
-  <div class="term-head">
-    <span class="term-swatch" id="term-swatch"></span>
-    <strong id="term-title">No terminal open</strong>
-    <span id="term-state" class="muted small"></span>
-    <span class="term-actions">
-      <button type="button" class="ghost small" id="term-rename" title="Rename this terminal">Rename</button>
-      <button type="button" class="ghost small" id="term-popout" title="Open this project in Windows Terminal">Pop out</button>
-      <button type="button" class="ghost small" id="term-restart" title="Start the shell again">Restart</button>
-      <button type="button" class="ghost small danger" id="term-close" title="End the shell and close the terminal">Close</button>
+  <div class="term-bar" id="term-bar">
+    <div class="term-groups" id="term-groups" role="tablist" aria-label="Terminal groups"></div>
+    <span class="term-tools">
+      <button type="button" class="ghost small" id="term-split-right" title="Split right (Ctrl+Shift+D)">Split right</button>
+      <button type="button" class="ghost small" id="term-split-down" title="Split down (Ctrl+Shift+E)">Split down</button>
+      <button type="button" class="ghost small" id="term-font-minus" title="Smaller text (Ctrl+-)" aria-label="Smaller text">A−</button>
+      <button type="button" class="ghost small" id="term-font-plus" title="Larger text (Ctrl+=)" aria-label="Larger text">A+</button>
     </span>
   </div>
   <div id="term-stage" class="term-stage"></div>
+  <div id="term-parking" hidden></div>
   <div id="term-empty" class="term-empty muted">
     <p>Open a terminal for a project with <b>+ New</b> in the sidebar, or with a project's <b>Terminal</b> button once Settings → Terminal opens terminals in the browser.</p>
   </div>

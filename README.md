@@ -550,13 +550,24 @@ A built-in plugin with real shells inside the page, drawn with [xterm.js](https:
   PatchGoblin stops.
 - **Keys:** Ctrl+C copies when text is selected and interrupts the running command otherwise.
   Ctrl+V or right-click pastes.
-- **Header buttons:** **Rename**, **Pop out** (opens the project in Windows Terminal),
-  **Restart** and **Close**.
+- **Splits and groups:** terminals are tiled like tmux or VS Code. **Split right** / **Split down**
+  (toolbar or a pane's own buttons) add a terminal beside the focused one. Drag the dividers to
+  resize, and the shells redraw at the new size. Drag a pane's header onto another pane's edge to
+  move it there (the middle swaps the two), or onto a group tab to move it to that group. Groups
+  are the tabs along the top: **+** adds one, double-click a name to rename it, **×** closes it
+  and its terminals. New terminals open beside the focused pane (along its longer side), or in a
+  new group once a group has 4 panes. The layout is remembered per browser, and terminals the
+  server has that aren't in it are added automatically.
+- **Pane buttons:** split, zoom, **⋯** (**Rename**, **Pop out** into Windows Terminal,
+  **Restart**) and close.
+- **Shortcuts** (Ctrl+Shift so shell keys are untouched): `D` split right, `E` split down, `W`
+  close, arrows move focus, `Z` zoom, `T` new group, `PageUp`/`PageDown` switch group. Ctrl+`=`,
+  Ctrl+`-` and Ctrl+`0` change the font size. Some browsers reserve a few of these (e.g. `W`, `T`).
 - **Limit:** up to 12 shells can run at once.
 
 On Windows the shell runs in a pseudo-console through `pywinpty`, using its WinPTY backend
 because pywinpty's ConPTY backend doesn't pass Ctrl+C on. The page gets output through a
-streamed request and sends keys as small requests, all under the same localhost-only guards as
+single streamed request shared by all visible panes (browsers limit connections per site) and sends keys as small requests, all under the same localhost-only guards as
 the rest of PatchGoblin. Anyone who can use PatchGoblin can already run commands through it,
 and a browser shell doesn't change that.
 
