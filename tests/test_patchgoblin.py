@@ -445,15 +445,40 @@ class ProjectTests(AppTestCase):
         with mock.patch("patchgoblin.hosts.communicate", return_value=listing):
             self.assertEqual(ps_host.list_dirs(r"C:\a")["path"], r"C:\a")
 
+        big = '{"type":"result","result":"' + "é ✓ — long answer " * 1200 + '"}'
+        lines = ['{"type":"x"}', "", big]
+        framed = "".join(base64.b64encode(ln.encode("utf-8")).decode("ascii") + "." for ln in lines)
+        wrapped = "\r\n".join(framed[i:i + 80] for i in range(0, len(framed), 80)) + "\r\n"
+
         def streamed(argv, **kw):
-            for line in ("profile line\r\n", f"{mark}\r\n", '{"type":"x"}\n'):
-                kw["on_output"](line)
-            return Result(0, f"profile line\r\n{mark}\r\n" + '{"type":"x"}\n', "")
+            self.assertIn("ToBase64String", self._decode_ps(argv))
+            self.assertIn("ForEach-Object", self._decode_ps(argv))
+            kw["on_output"]("profile line\r\n")
+            kw["on_output"](f"{mark}\r\n")
+            for i in range(0, len(wrapped), 997):
+                kw["on_output"](wrapped[i:i + 997])
+            return Result(0, f"profile line\r\n{mark}\r\n" + wrapped, "")
         seen = []
         with mock.patch("patchgoblin.hosts.communicate", side_effect=streamed):
             res = ps_host.run(["claude"], cwd=r"C:\p", on_output=seen.append)
-        self.assertEqual(seen, ['{"type":"x"}\n'])
-        self.assertEqual(res.stdout, '{"type":"x"}\n')
+        expected = "".join(ln + "\n" for ln in lines)
+        self.assertEqual("".join(seen), expected)
+        self.assertEqual(res.stdout, expected)
+
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(0, "", "")) as comm:
+            hosts_mod._WIN_SHELL[("a@cmd", None)] = "cmd"
+            cmd_host.run(["claude"], cwd=r"C:\p")
+            self.assertNotIn("ToBase64String", self._decode_ps(comm.call_args[0][0]))
+
+    def test_unframer(self):
+        un = hosts_mod._Unframer()
+        a = base64.b64encode("héllo".encode("utf-8")).decode("ascii")
+        out = un.feed(a[:3]) + un.feed(a[3:] + ".." + "  ")
+        out += un.feed("\r\n" + a[:4] + "\r\n " + a[4:] + ".")
+        self.assertEqual(out, "héllo\n\nhéllo\n")
+        self.assertEqual(un.close(), "")
+        self.assertEqual(un.feed("!!!"), "")
+        self.assertEqual(un.close(), "")
 
     def test_windows_ssh_read_text_encoding_and_retry(self):
         self.addCleanup(hosts_mod._WIN_SHELL.clear)
@@ -3015,6 +3040,13 @@ class StreamJsonTests(unittest.TestCase):
         outcome, job = self.run_with(TRANSCRIPT)
         self.assertTrue(outcome.ok)
         self.assertEqual(outcome.text, "Final answer")
+
+    def test_run_claude_long_result_line(self):
+        answer = "é ✓ — long plan. " * 1500
+        line = json.dumps({"type": "result", "is_error": False, "result": answer}, ensure_ascii=False) + "\n"
+        outcome, _ = self.run_with(line)
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.text, answer.strip())
 
     def test_run_claude_failures(self):
         outcome, _ = self.run_with(TRANSCRIPT.rsplit("\n", 2)[0] + "\n")

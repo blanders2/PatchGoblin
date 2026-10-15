@@ -429,6 +429,45 @@ def _skip_to_mark(on_output: OutputFn) -> OutputFn:
     return forward
 
 
+# Under a PowerShell default shell, command output passes through a second PowerShell that
+# re-wraps and re-encodes long lines. Each output line is sent as ASCII base64 + "." instead.
+_PS_FRAME = (" | ForEach-Object { [Console]::Out.WriteLine("
+             "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$_)) + '.') }")
+
+
+def _decode_frame(token: str) -> str:
+    try:
+        return base64.b64decode(token, validate=True).decode("utf-8", errors="replace") + "\n"
+    except ValueError:
+        return ""
+
+
+class _Unframer:
+    """Decodes the ``base64.`` frames of _PS_FRAME back into lines, ignoring any whitespace wrapping."""
+
+    def __init__(self) -> None:
+        self.buf = ""
+
+    def feed(self, text: str) -> str:
+        self.buf += re.sub(r"\s+", "", text)
+        *tokens, self.buf = self.buf.split(".")
+        return "".join(_decode_frame(t) for t in tokens)
+
+    def close(self) -> str:
+        rest, self.buf = self.buf, ""
+        return _decode_frame(rest) if rest else ""
+
+
+def _unframe_stream(on_output: OutputFn) -> OutputFn:
+    un = _Unframer()
+
+    def forward(text: str) -> None:
+        out = un.feed(text)
+        if out:
+            on_output(out)
+    return forward
+
+
 _WIN_ABS_RE = re.compile(r"^[A-Za-z]:\\")
 
 
@@ -599,11 +638,21 @@ class WindowsSSHHost(SSHHost):
         # ``login`` is a no-op: Windows sshd sessions already carry the user's PATH.
         sets = "".join(f"$env:{k}={_ps_quote(v)}; " for k, v in (env or {}).items())
         call = "& " + " ".join(_ps_quote(a) for a in argv)
+        framed = detect_windows_shell(self.target, self.port) != "cmd"
+        if framed:
+            call += _PS_FRAME
+            if on_output:
+                on_output = _unframe_stream(on_output)
         script = f"{sets}Set-Location -LiteralPath {_ps_quote(cwd)}; {call}; exit $LASTEXITCODE"
-        return self._exec(script, input=input, timeout=timeout, on_output=on_output, on_start=on_start)
+        res = self._exec(script, input=input, timeout=timeout, on_output=on_output, on_start=on_start)
+        if framed:
+            un = _Unframer()
+            res.stdout = un.feed(res.stdout) + un.close()
+        return res
 
     def run_shell(self, command: str, cwd: str, timeout: Optional[float] = None,
                   on_output: OutputFn = None, on_start: StartFn = None) -> Result:
+        # Unframed on purpose: arbitrary PowerShell keeps its own output formatting.
         script = (f"Set-Location -LiteralPath {_ps_quote(cwd)}; {command}\n"
                   "if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }")
         return self._exec(script, timeout=timeout, on_output=on_output, on_start=on_start)

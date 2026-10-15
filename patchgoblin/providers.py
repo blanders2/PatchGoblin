@@ -273,6 +273,7 @@ class _StreamJson:
         self.result_text: str | None = None
         self.is_error = False
         self.stray = ""  # the tail of the non-JSON output, for error messages
+        self.stray_lines = 0
 
     def write(self, text: str) -> None:
         self._buf += text
@@ -300,6 +301,7 @@ class _StreamJson:
             self._raw(line[:500])
 
     def _raw(self, line: str) -> None:
+        self.stray_lines += 1
         self.stray = (self.stray + line + "\n")[-2000:]
         self._job.write(line + "\n")
 
@@ -354,7 +356,8 @@ def run_claude(cfg: dict, mode: str, prompt: str, *, host, cwd: str, model: str,
         if not outcome.ok:  # timed out or exited with an error: that message says why
             return outcome
         tail = stream.stray.strip()
-        return Outcome(False, "", "Claude Code ended without a result." + (f"\n{tail}" if tail else ""))
+        seen = f" ({stream.stray_lines} non-JSON output lines)" if stream.stray_lines else ""
+        return Outcome(False, "", f"Claude Code ended without a result{seen}." + (f"\n{tail}" if tail else ""))
     text = stream.result_text.strip()
     if stream.is_error:
         return Outcome(False, text, text or "Claude Code reported an error.")
