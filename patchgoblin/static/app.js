@@ -2213,13 +2213,13 @@ const OS_LABELS = { auto: "Auto-detect", posix: "Linux/macOS", windows: "Windows
 
 function renderServerPanel() {
   $("#ssh-server-rows").replaceChildren(...(ssh.servers.length ? ssh.servers.map(s => el("tr", {},
-    el("td", {}, s.name), el("td", { class: "mono" }, s.target), el("td", {}, s.port || ""), el("td", {}, OS_LABELS[s.os] || s.os),
+    el("td", {}, s.name), el("td", { class: "mono", title: s.target }, s.target), el("td", {}, s.port || ""), el("td", {}, OS_LABELS[s.os] || s.os),
     el("td", {}, el("div", { class: "actions" },
       el("button", { class: "small ghost", type: "button", onclick: () => editServer(s) }, "Edit"),
       el("button", { class: "small ghost danger", type: "button", onclick: () => deleteServer(s) }, "Delete")))))
     : [el("tr", {}, el("td", { colspan: 5, class: "muted" }, "No saved servers yet."))]));
   $("#ssh-suggestion-rows").replaceChildren(...(ssh.suggestions.length ? ssh.suggestions.map(s => el("tr", {},
-    el("td", { class: "mono" }, s.target), el("td", {}, s.port || ""), el("td", { class: "muted" }, s.source),
+    el("td", { class: "mono", title: s.target }, s.target), el("td", {}, s.port || ""), el("td", { class: "muted" }, s.source),
     el("td", {}, el("button", { class: "small ghost", type: "button", onclick: () => suggestServer(s) }, "Add"))))
     : [el("tr", {}, el("td", { colspan: 4, class: "muted" }, "No suggestions."))]));
 }
@@ -2318,7 +2318,7 @@ async function loadSshKeys() {
   catch (e) { ssh.keys = []; rows.replaceChildren(el("tr", {}, el("td", { colspan: 5 }, el("div", { class: "error" }, e.message)))); return; }
   rows.replaceChildren(...(ssh.keys.length ? ssh.keys.map(k => el("tr", {},
     el("td", {}, k.type), el("td", {}, k.name + (k.has_private ? "" : " (no private key)")),
-    el("td", { class: "mono" }, k.fingerprint), el("td", {}, k.comment),
+    el("td", { class: "mono", title: k.fingerprint }, k.fingerprint), el("td", { title: k.comment }, k.comment),
     el("td", {}, el("button", { class: "small ghost", onclick: () => copyText(k.text, "Public key copied") }, "Copy"))))
     : [el("tr", {}, el("td", { colspan: 5, class: "muted" }, "No public keys found."))]));
 }
@@ -2343,7 +2343,8 @@ async function loadInstallKeys() {
   try { ssh.installKeys = await fetchKeys($("#ssh-install-source").value); }
   catch (e) { ssh.installKeys = []; box.replaceChildren(el("div", { class: "error" }, e.message)); return; }
   box.replaceChildren(...(ssh.installKeys.length ? ssh.installKeys.map((k, i) => el("label", { class: "check" },
-    el("input", { type: "checkbox", value: String(i) }), `${k.name} — ${k.type} ${k.fingerprint}`))
+    el("input", { type: "checkbox", value: String(i) }), `${k.name} — ${k.type}`,
+    el("span", { class: "mono fp", title: k.fingerprint }, k.fingerprint)))
     : [el("span", { class: "muted" }, "No public keys found. Generate one first.")]));
 }
 
@@ -2442,10 +2443,10 @@ async function toggleTunnel(t) {
 function renderTunnelPanel() {
   const rows = $("#ssh-tunnel-rows");
   rows.replaceChildren(...(ssh.tunnels.length ? ssh.tunnels.map(t => el("tr", { class: ssh.highlight === t.id ? "flash" : "", "data-tid": t.id },
-    el("td", {}, tunnelDot(t)), el("td", {}, t.name),
-    el("td", { class: "mono" }, tunnelText(t),
+    el("td", {}, tunnelDot(t)), el("td", { title: t.name }, t.name),
+    el("td", { class: "mono", title: tunnelText(t) }, tunnelText(t),
       t.stderr ? el("details", {}, el("summary", {}, "ssh output"), el("pre", { class: "log" }, t.stderr)) : null),
-    el("td", {}, sshLabel(t)),
+    el("td", { title: sshLabel(t) }, sshLabel(t)),
     el("td", {}, el("div", { class: "actions" }, tunnelToggle(t),
       el("button", { class: "small ghost", type: "button", onclick: () => editTunnel(t) }, "Edit"),
       el("button", { class: "small ghost danger", type: "button", onclick: () => deleteTunnel(t) }, "Delete")))))
