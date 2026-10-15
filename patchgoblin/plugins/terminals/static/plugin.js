@@ -7,7 +7,8 @@
 (() => {
 const { $, el, api, toast } = PG;
 
-const MAX_PANES = 4; // new terminals go to a new group past this many panes in one
+const MAX_PANES = 4; // hard cap on tiled panes in one group; the rest can be minimized
+const MIN_COLS = 40, MIN_ROWS = 8; // a pane narrower or shorter than this isn't readable
 const MIN_FRACTION = 0.1;
 const LAYOUT_KEY = "pg.term.layout", FONT_KEY = "pg.term.font";
 const clientId = Math.random().toString(36).slice(2, 12); // names this page's stream to the server
@@ -39,8 +40,8 @@ const newGroupId = () => `g${Date.now().toString(36)}${(gid++).toString(36)}`;
 // node: {type:"pane", sid} | {type:"split", dir:"row"|"col", sizes:[fractions], children:[node]}
 const panesOf = node => !node ? [] : node.type === "pane" ? [node.sid] : node.children.flatMap(panesOf);
 const curGroup = () => T.layout.groups.find(g => g.id === T.layout.current) || T.layout.groups[0] || null;
-const groupOf = sid => T.layout.groups.find(g => panesOf(g.root).includes(sid)) || null;
-const newGroup = name => ({ id: newGroupId(), name: name || `Group ${T.layout.groups.length + 1}`, root: null, focus: null, zoom: null });
+const groupOf = sid => T.layout.groups.find(g => panesOf(g.root).includes(sid) || g.minimized.includes(sid)) || null;
+const newGroup = name => ({ id: newGroupId(), name: name || `Group ${T.layout.groups.length + 1}`, root: null, focus: null, zoom: null, minimized: [] });
 
 function normalize(sizes, n) {
   let s = Array.isArray(sizes) && sizes.length === n ? sizes.map(x => (typeof x === "number" && x > 0 ? x : 0)) : [];
@@ -100,7 +101,8 @@ function loadLayout() {
     const data = JSON.parse(PG.storageGet(LAYOUT_KEY) || "null");
     const groups = (data && Array.isArray(data.groups) ? data.groups : []).map(g => ({
       id: typeof g.id === "string" ? g.id : newGroupId(), name: typeof g.name === "string" ? g.name.slice(0, 40) : "Group",
-      root: sanitize(g.root), focus: typeof g.focus === "string" ? g.focus : null, zoom: typeof g.zoom === "string" ? g.zoom : null }));
+      root: sanitize(g.root), focus: typeof g.focus === "string" ? g.focus : null, zoom: typeof g.zoom === "string" ? g.zoom : null,
+      minimized: Array.isArray(g.minimized) ? g.minimized.filter(x => typeof x === "string") : [] }));
     T.layout = { groups, current: data && typeof data.current === "string" ? data.current : null };
   } catch { T.layout = { groups: [], current: null }; }
   const f = parseInt(PG.storageGet(FONT_KEY), 10);
@@ -116,26 +118,26 @@ function longerSide(target) {
   return r.width >= r.height ? "right" : "bottom";
 }
 
-// Place a session in the layout. where: {group, target, side, force, switch}.
+// Size in cells of each half when `ref`'s pane is split on `side`, less a cell for the gutter and border.
+function splitSize(ref, side) {
+  let cols = ref ? ref.term.cols : 120, rows = ref ? ref.term.rows : 32;
+  if (side === "left" || side === "right") cols = Math.floor((cols - 1) / 2);
+  else rows = Math.floor((rows - 1) / 2);
+  return { cols, rows };
+}
+
+// Place a session in the layout. where: {group, target, side}. Only an explicit side splits a pane;
+// otherwise the session fills an empty group, or goes to the dock rather than shrink what's on screen.
 function addPane(sid, where = {}) {
   if (groupOf(sid)) return;
   let g = where.group ? T.layout.groups.find(x => x.id === where.group) : curGroup();
   if (!g) { g = newGroup(); T.layout.groups.push(g); T.layout.current = g.id; }
-  if (!where.force && !where.side && panesOf(g.root).length >= MAX_PANES) {
-    const last = T.layout.groups[T.layout.groups.length - 1];
-    if (!where.switch && last !== g && panesOf(last.root).length < MAX_PANES) g = last; // fill the spare group first
-    else {
-      g = newGroup();
-      T.layout.groups.push(g);
-      if (where.switch) T.layout.current = g.id;
-    }
-  }
-  const panes = panesOf(g.root);
   if (!g.root) g.root = { type: "pane", sid };
-  else {
+  else if (where.side) {
+    const panes = panesOf(g.root);
     const target = panes.includes(where.target) ? where.target : panes.includes(g.focus) ? g.focus : panes[panes.length - 1];
-    g.root = insertAt(g.root, target, sid, where.side || (T.panes.has(target) ? longerSide(target) : panes.length % 2 ? "right" : "bottom"));
-  }
+    g.root = insertAt(g.root, target, sid, where.side);
+  } else { g.minimized.push(sid); return; }
   g.focus = sid;
   g.zoom = null;
 }
@@ -143,8 +145,10 @@ function addPane(sid, where = {}) {
 // Make the layout match the sessions: prune the gone ones, place new ones, tidy groups.
 function reconcile() {
   const seen = new Set();
+  const keep = sid => session(sid) && !seen.has(sid) && (seen.add(sid), true);
   for (const g of T.layout.groups) {
-    g.root = prune(g.root, sid => session(sid) && !seen.has(sid) && (seen.add(sid), true));
+    g.root = prune(g.root, keep);
+    g.minimized = g.minimized.filter(keep);
   }
   for (const s of T.list) if (!seen.has(s.id)) { addPane(s.id); seen.add(s.id); }
   fixup();
@@ -153,19 +157,24 @@ function reconcile() {
 function fixup() {
   const L = T.layout;
   if (!L.groups.some(g => g.id === L.current)) L.current = L.groups.length ? L.groups[0].id : null;
-  L.groups = L.groups.filter(g => g.root || g.id === L.current);
+  L.groups = L.groups.filter(g => g.root || g.minimized.length || g.id === L.current);
   if (!L.groups.length) { const g = newGroup(); L.groups.push(g); L.current = g.id; }
   if (!L.groups.some(g => g.id === L.current)) L.current = L.groups[0].id;
   for (const g of L.groups) {
     const panes = panesOf(g.root);
-    if (!panes.includes(g.focus)) g.focus = panes[0] || null;
-    if (!panes.includes(g.zoom) || panes.length < 2) g.zoom = null;
+    g.minimized = [...new Set(g.minimized)].filter(sid => session(sid) && !panes.includes(sid));
+    if (!g.root && g.minimized.length) g.root = { type: "pane", sid: g.minimized.shift() }; // never leave a group showing nothing
+    const shown = panesOf(g.root);
+    if (!shown.includes(g.focus)) g.focus = shown[0] || null;
+    if (!shown.includes(g.zoom) || shown.length < 2) g.zoom = null;
   }
 }
 
 function removeFromLayout(sid) {
   const g = groupOf(sid);
-  if (g) g.root = prune(g.root, s => s !== sid);
+  if (!g) return;
+  g.root = prune(g.root, s => s !== sid);
+  g.minimized = g.minimized.filter(s => s !== sid);
 }
 
 // ---- sessions list --------------------------------------------------------------------
@@ -194,7 +203,7 @@ function renderList() {
   const items = [], shown = new Set(visibleSids()), cur = curGroup();
   const multi = T.layout.groups.length > 1;
   for (const g of T.layout.groups) {
-    const panes = panesOf(g.root);
+    const panes = [...panesOf(g.root), ...g.minimized];
     if (multi && panes.length) items.push(el("li", { class: "term-group-head" }, g.name));
     for (const sid of panes) {
       const s = session(sid);
@@ -207,7 +216,7 @@ function renderList() {
         el("span", { class: "p-name" }, s.title),
         el("button", { class: "ghost small term-x", type: "button", title: "Close", "aria-label": `Close ${s.title}`,
           onclick: e => { e.stopPropagation(); closeSession(sid); } }, "×")),
-      el("div", { class: "p-sub" }, s.alive ? `${s.cols}×${s.rows}` : `exited${s.exit_code !== null ? ` (${s.exit_code})` : ""}`)));
+      el("div", { class: "p-sub" }, `${g.minimized.includes(sid) ? "minimized · " : ""}${s.alive ? `${s.cols}×${s.rows}` : `exited${s.exit_code !== null ? ` (${s.exit_code})` : ""}`}`)));
     }
   }
   $("#term-list").replaceChildren(...(items.length ? items : [el("li", { class: "muted small term-none" }, "No terminals yet.")]));
@@ -234,8 +243,9 @@ function termFor(s) {
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.loadAddon(new WebLinksAddon.WebLinksAddon());
-  term.open(host);
-  t = { id: s.id, term, fit, host, offset: 0, sent: "", pending: "", timer: null, exited: false, rz: null };
+  // Opened later by ensureOpen, once the host is visible: xterm measures the character cell on
+  // open, and inside the hidden parking area that measurement comes out as zero.
+  t = { id: s.id, term, fit, host, offset: 0, sent: "", pending: "", timer: null, exited: false, rz: null, opened: false };
   term.onData(data => queueInput(t, data));
   term.attachCustomKeyEventHandler(e => keyHandler(t, e));
   host.addEventListener("focusin", () => setFocus(s.id));
@@ -266,7 +276,7 @@ function keyHandler(t, e) {
     if (step !== null) { e.preventDefault(); setFont(step === 0 ? 13 : T.font + step); return false; }
   }
   const key = e.key.toLowerCase();
-  if (key === "c" && t.term.hasSelection()) {
+  if (key === "c" && t.opened && t.term.hasSelection()) {
     navigator.clipboard.writeText(t.term.getSelection()).catch(() => {});
     t.term.clearSelection();
     return false;
@@ -281,6 +291,7 @@ function shortcut(t, e) {
     case "KeyE": splitPane(t.id, "bottom"); return true;
     case "KeyW": closeSession(t.id); return true;
     case "KeyZ": toggleZoom(t.id); return true;
+    case "KeyM": minimizePane(t.id); return true;
     case "KeyT": addGroup(); return true;
     case "PageUp": case "PageDown": {
       const i = T.layout.groups.indexOf(g), n = T.layout.groups.length;
@@ -309,8 +320,16 @@ async function flushInput(t) {
 // Fit a terminal to its pane. Hidden or zero-size hosts are skipped (a fit there would shrink the
 // shell to nothing); the resulting size is sent to the shell after a short quiet period, so
 // dragging a divider doesn't flood the PTY with resizes.
+function ensureOpen(t) {
+  if (t.opened || !t.host.isConnected || !t.host.offsetParent || !t.host.clientWidth) return;
+  t.term.open(t.host);
+  t.opened = true;
+}
+
 function fitNow(t) {
   if (!t || !t.host.isConnected || !t.host.offsetParent || !t.host.clientWidth || !t.host.clientHeight) return;
+  ensureOpen(t);
+  if (!t.opened) return;
   try { t.fit.fit(); } catch { return; }
   if (`${t.term.cols}x${t.term.rows}` === t.sent || t.exited) return;
   clearTimeout(t.rz);
@@ -329,7 +348,7 @@ function fitAll(refresh = false) {
     const t = T.terms.get(sid);
     if (!t) continue;
     fitNow(t);
-    if (refresh && t.host.offsetParent) t.term.refresh(0, t.term.rows - 1);
+    if (refresh && t.opened && t.host.offsetParent) t.term.refresh(0, t.term.rows - 1);
   }
 }
 
@@ -418,6 +437,7 @@ function refresh(focus = false) {
   saveLayout();
   renderTabs();
   renderLayout(focus);
+  renderDock();
   renderList();
   if (T.active) syncStream();
 }
@@ -457,9 +477,17 @@ function renderLayout(focus = false) {
   stage.replaceChildren(...(rootEl ? [rootEl] : []));
   updatePanes();
   requestAnimationFrame(() => {
+    // A terminal opened by an older layout may have measured its character cell while hidden.
+    for (const sid of place) {
+      const t = T.terms.get(sid);
+      if (t && t.opened && t.host.offsetParent) {
+        let dims; try { dims = t.fit.proposeDimensions(); } catch { /* not measurable yet */ }
+        if (!dims) t.term.options.fontSize = T.font; // makes xterm measure the cell again
+      }
+    }
     fitAll(true);
     const f = T.terms.get(g && g.focus);
-    if (focus && f && T.active) f.term.focus();
+    if (focus && f && f.opened && T.active) f.term.focus();
   });
 }
 
@@ -488,6 +516,7 @@ function buildPane(sid, place, g) {
     el("span", { class: "term-pane-btns" },
       btn("◫", "Split right (Ctrl+Shift+D)", () => splitPane(sid, "right")),
       btn("⬓", "Split down (Ctrl+Shift+E)", () => splitPane(sid, "bottom")),
+      btn("▁", "Minimize to the dock (Ctrl+Shift+M)", () => minimizePane(sid)),
       zoom,
       btn("⋯", "More", e => paneMenu(e.currentTarget, sid)),
       btn("×", "Close this terminal (Ctrl+Shift+W)", () => closeSession(sid))));
@@ -530,6 +559,7 @@ function updatePanes() {
     p.state.textContent = s.alive ? "" : `exited${s.exit_code !== null ? ` (${s.exit_code})` : ""}`;
     p.root.classList.toggle("focused", !!g && g.focus === sid);
   }
+  renderDock();
 }
 
 function gutter(node, i, box) {
@@ -542,10 +572,19 @@ function gutter(node, i, box) {
     const row = node.dir === "row", kids = [...box.children].filter(c => !c.classList.contains("term-gutter"));
     const room = (row ? box.clientWidth : box.clientHeight) - 6 * (kids.length - 1);
     const start = row ? e.clientX : e.clientY, a = node.sizes[i], b = node.sizes[i + 1];
+    // Smallest fraction each side may shrink to: MIN_COLS x MIN_ROWS of text, measured from its terminal.
+    const minFor = child => {
+      const t = T.terms.get(panesOf(child)[0]);
+      const px = !t || !t.opened || !t.term.cols ? 0
+        : row ? MIN_COLS * (t.host.clientWidth / t.term.cols) + 10 : MIN_ROWS * (t.host.clientHeight / t.term.rows) + 40;
+      return Math.max(MIN_FRACTION, px / room);
+    };
+    let loA = minFor(node.children[i]), loB = minFor(node.children[i + 1]);
+    if (loA + loB > a + b) loA = loB = MIN_FRACTION;
     let raf = 0;
     const move = ev => {
       const d = ((row ? ev.clientX : ev.clientY) - start) / room;
-      node.sizes[i] = clamp(a + d, MIN_FRACTION, a + b - MIN_FRACTION);
+      node.sizes[i] = clamp(a + d, Math.min(loA, a), a + b - Math.min(loB, b));
       node.sizes[i + 1] = a + b - node.sizes[i];
       kids[i].style.flex = `${node.sizes[i]} 1 0`;
       kids[i + 1].style.flex = `${node.sizes[i + 1]} 1 0`;
@@ -587,7 +626,20 @@ function showDrop(root, zone) {
 
 function clearDrops() {
   for (const d of document.querySelectorAll("#term-view .term-drop")) d.remove();
-  for (const d of document.querySelectorAll("#term-view .term-tab.drop")) d.classList.remove("drop");
+  for (const d of document.querySelectorAll("#term-view .term-tab.drop, #term-dock.drop")) d.classList.remove("drop");
+}
+
+// Whether `target` can be split on `side` and still leave both halves readable (and the group
+// under its cap); says why not when it can't.
+function splitRefused(target, side, src = null) {
+  const g = groupOf(target), ref = T.terms.get(target);
+  if (g && panesOf(g.root).filter(x => x !== src).length >= MAX_PANES) { toast(`At most ${MAX_PANES} panes fit in a group — minimize one or use a new group (Ctrl+Shift+T)`, true); return true; }
+  const { cols, rows } = splitSize(ref, side);
+  if (cols < MIN_COLS || rows < MIN_ROWS) {
+    toast("Not enough room to split — minimize a pane or use a new group (Ctrl+Shift+T)", true);
+    return true;
+  }
+  return false;
 }
 
 function movePane(src, target, zone) {
@@ -595,17 +647,18 @@ function movePane(src, target, zone) {
   if (zone === "center") {
     const ga = groupOf(src), gb = groupOf(target);
     const a = ga && findPane(ga.root, src), b = gb && findPane(gb.root, target);
-    if (!a || !b) return;
-    a.sid = target;
+    const slot = ga ? ga.minimized.indexOf(src) : -1; // a minimized source trades places with the target
+    if (!b || (!a && slot < 0)) return;
+    if (a) a.sid = target; else ga.minimized[slot] = target;
     b.sid = src;
     if (ga.zoom === src) ga.zoom = target;
     if (ga !== gb && ga.focus === src) ga.focus = target;
     gb.focus = src;
     T.layout.current = gb.id;
   } else {
-    removeFromLayout(src);
     const g = groupOf(target);
-    if (!g) return;
+    if (!g || splitRefused(target, zone, src)) return;
+    removeFromLayout(src);
     g.root = insertAt(g.root, target, src, zone);
     g.focus = src;
     g.zoom = null;
@@ -618,13 +671,67 @@ function moveToGroup(sid, groupId) {
   const to = T.layout.groups.find(g => g.id === groupId);
   if (!to || groupOf(sid) === to) return;
   removeFromLayout(sid);
-  if (to.root) {
-    const panes = panesOf(to.root), target = panes.includes(to.focus) ? to.focus : panes[0];
-    to.root = insertAt(to.root, target, sid, longerSide(target));
-  } else to.root = { type: "pane", sid };
+  if (!to.root) to.root = { type: "pane", sid };
+  else {
+    const panes = panesOf(to.root), target = panes.includes(to.focus) ? to.focus : panes[0], side = longerSide(target);
+    const { cols, rows } = splitSize(T.terms.get(target), side);
+    if (panes.length >= MAX_PANES || cols < MIN_COLS || rows < MIN_ROWS) { to.minimized.push(sid); refresh(); return; } // no room: dock it
+    to.root = insertAt(to.root, target, sid, side);
+  }
   to.focus = sid;
   to.zoom = null;
   refresh();
+}
+
+// ---- minimize to the dock ----------------------------------------------------------------------
+function minimizePane(sid) {
+  const g = groupOf(sid);
+  if (!g || g.minimized.includes(sid)) return;
+  if (panesOf(g.root).length < 2) { toast("A group's only pane can't be minimized"); return; }
+  g.root = prune(g.root, x => x !== sid);
+  g.minimized.push(sid);
+  if (g.zoom === sid) g.zoom = null;
+  if (g.focus === sid) g.focus = panesOf(g.root)[0];
+  refresh(true);
+}
+
+function restorePane(sid) {
+  const g = groupOf(sid);
+  if (!g || !g.minimized.includes(sid)) return;
+  g.minimized = g.minimized.filter(x => x !== sid);
+  const panes = panesOf(g.root), at = panes.includes(g.focus) ? g.focus : panes[0];
+  if (!at) g.root = { type: "pane", sid };
+  else {
+    const side = longerSide(at), { cols, rows } = splitSize(T.terms.get(at), side);
+    if (panes.length < MAX_PANES && cols >= MIN_COLS && rows >= MIN_ROWS) g.root = insertAt(g.root, at, sid, side);
+    else { // no room beside it: trade places with the focused pane
+      findPane(g.root, at).sid = sid;
+      g.minimized.push(at);
+    }
+  }
+  g.focus = sid;
+  g.zoom = null;
+  T.layout.current = g.id;
+  refresh(true);
+}
+
+function renderDock() {
+  const dock = $("#term-dock"), g = curGroup();
+  const sids = g && T.list.length ? g.minimized.filter(session) : [];
+  dock.hidden = !sids.length;
+  dock.replaceChildren(...sids.map(sid => {
+    const s = session(sid);
+    const chip = el("div", { class: "term-dock-chip", draggable: "true", title: `${s.title} — click to restore` },
+      el("button", { type: "button", class: "term-dock-open", onclick: () => restorePane(sid) },
+        el("span", { class: "term-swatch", style: `background:${s.color || "var(--muted)"}` }),
+        el("span", { class: "term-dock-title" }, s.title),
+        s.alive ? "" : el("span", { class: "muted small" }, "exited")),
+      el("button", { type: "button", class: "term-tab-x", title: "Close this terminal", "aria-label": `Close ${s.title}`,
+        onclick: () => closeSession(sid) }, "×"));
+    chip.addEventListener("dragstart", e => { T.drag = sid; e.dataTransfer.setData("text/plain", sid); e.dataTransfer.effectAllowed = "move"; });
+    chip.addEventListener("dragend", () => { T.drag = null; clearDrops(); });
+    return chip;
+  }));
 }
 
 // ---- focus and navigation ----------------------------------------------------------------------
@@ -641,9 +748,10 @@ function focusSession(sid) {
   const g = groupOf(sid);
   if (!g) return;
   T.layout.current = g.id;
+  if (!T.active) PG.show("terminals");
+  if (g.minimized.includes(sid)) { restorePane(sid); return; }
   g.focus = sid;
   if (g.zoom && g.zoom !== sid) g.zoom = sid;
-  if (!T.active) PG.show("terminals");
   refresh(true);
 }
 
@@ -672,7 +780,7 @@ function renameGroup(g) {
 }
 
 async function closeGroup(g) {
-  const sids = panesOf(g.root).filter(session);
+  const sids = [...panesOf(g.root), ...g.minimized].filter(session);
   if (sids.some(sid => session(sid).alive) && !confirm(`End ${sids.length} terminal(s) in "${g.name}"?`)) return;
   try {
     for (const sid of sids) { T.list = (await api("DELETE", `/api/terminals/sessions/${sid}`)).sessions; dropTerm(sid); }
@@ -713,7 +821,7 @@ function moveFocus(sid, dir) {
   updatePanes();
   renderList();
   const t = T.terms.get(best);
-  if (t) t.term.focus();
+  if (t && t.opened) t.term.focus();
 }
 
 // ---- pane actions --------------------------------------------------------------------------------
@@ -756,6 +864,7 @@ async function restartSession(old) {
     const data = await api("POST", `/api/terminals/sessions/${old}/restart`);
     const g = groupOf(old), fresh = data.session.id;
     if (g) (function walk(n) { if (n.type === "pane") { if (n.sid === old) n.sid = fresh; } else n.children.forEach(walk); })(g.root);
+    if (g) g.minimized = g.minimized.map(x => (x === old ? fresh : x));
     if (g && g.focus === old) g.focus = fresh;
     if (g && g.zoom === old) g.zoom = fresh;
     dropTerm(old);
@@ -766,19 +875,42 @@ async function restartSession(old) {
 
 function splitPane(sid, side) {
   const s = session(sid);
+  if (splitRefused(sid, side)) return;
   newSession(s ? s.project : $("#term-new-project").value, { target: sid, side });
+}
+
+// Cells that fit the stage, going by the character cell of an on-screen terminal.
+function stageSize(ref) {
+  const stage = $("#term-stage");
+  if (!ref || !ref.opened || !ref.term.cols || !ref.host.clientWidth || !stage.clientWidth) return { cols: 120, rows: 32 };
+  return { cols: Math.max(20, Math.floor(stage.clientWidth / (ref.host.clientWidth / ref.term.cols)) - 2),
+    rows: Math.max(5, Math.floor(stage.clientHeight / (ref.host.clientHeight / ref.term.rows)) - 2) };
 }
 
 async function newSession(projectId, where = {}) {
   const ref = T.terms.get(where.target) || T.terms.get(curGroup()?.focus);
+  // Start the shell at its pane's size, so its first prompt isn't drawn for a wider screen.
+  let size;
+  if (where.side) {
+    const { cols, rows } = splitSize(ref, where.side);
+    size = { cols: Math.max(20, cols), rows: Math.max(5, rows) };
+  } else size = stageSize(ref);
   try {
-    const data = await api("POST", "/api/terminals/sessions", { project: projectId || "",
-      cols: ref ? ref.term.cols : 120, rows: ref ? ref.term.rows : 32 });
+    const data = await api("POST", "/api/terminals/sessions", { project: projectId || "", ...size });
     T.list = data.sessions;
     updateBadge();
     if (!T.active) PG.show("terminals");
     const id = data.session.id;
-    if (!groupOf(id)) addPane(id, { ...where, switch: true });
+    if (groupOf(id)) removeFromLayout(id); // a poll may have docked it already
+    if (!where.side && !where.group) { // a plain new terminal gets the full stage: an empty group, or a new one
+      const cur = curGroup();
+      if (cur && cur.root) {
+        const ng = newGroup();
+        T.layout.groups.push(ng);
+        where = { ...where, group: ng.id };
+      }
+    }
+    addPane(id, where);
     const g = groupOf(id);
     if (g) { T.layout.current = g.id; g.focus = id; }
     refresh(true);
@@ -829,6 +961,10 @@ PG.register({
     new MutationObserver(() => { for (const t of T.terms.values()) t.term.options.theme = theme(); })
       .observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
     document.addEventListener("keydown", e => { if (e.key === "Escape") closeMenu(); });
+    const dock = $("#term-dock");
+    dock.addEventListener("dragover", e => { if (T.drag) { e.preventDefault(); dock.classList.add("drop"); } });
+    dock.addEventListener("dragleave", e => { if (!dock.contains(e.relatedTarget)) dock.classList.remove("drop"); });
+    dock.addEventListener("drop", e => { e.preventDefault(); dock.classList.remove("drop"); const sid = T.drag; T.drag = null; if (sid) minimizePane(sid); });
     renderTabs();
     loadSessions();
   },
@@ -837,7 +973,7 @@ PG.register({
     loadProjects();
     loadSessions().then(() => { // lays out the panes and opens the stream
       const g = curGroup(), t = g && T.terms.get(g.focus);
-      if (t && T.active) t.term.focus();
+      if (t && t.opened && T.active) t.term.focus();
     });
     clearInterval(T.poll);
     T.poll = setInterval(() => { if (!document.hidden) loadSessions(); }, 10000);

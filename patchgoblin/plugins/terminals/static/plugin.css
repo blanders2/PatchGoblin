@@ -50,7 +50,7 @@
   border-bottom: 1px solid var(--line); flex-shrink: 0; user-select: none; }
 .term-pane-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; min-width: 0; }
 .term-pane-btns { margin-left: auto; display: flex; gap: 2px; flex-shrink: 0; }
-.term-pane-btns button { padding: 0 6px; font-size: 12px; line-height: 1.5; }
+.term-pane-btns button { min-width: 22px; padding: 0 6px; font-size: 12px; line-height: 1.5; }
 .term-swatch { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
 .term-slot { flex: 1; min-height: 0; position: relative; }
 .term-host { position: absolute; inset: 4px; }
@@ -62,3 +62,14 @@
   border: 1px solid var(--line); border-radius: 6px; padding: 3px; box-shadow: 0 4px 14px #0005; }
 .term-menu button { text-align: left; font-size: 12.5px; padding: 3px 12px; }
 .term-empty { margin: auto; text-align: center; max-width: 34em; }
+.term-dock { display: flex; flex-wrap: wrap; gap: 4px; padding-top: 6px; border-top: 1px solid var(--line); flex-shrink: 0;
+  max-height: 5.5em; overflow-y: auto; }
+.term-dock.drop { outline: 2px dashed var(--accent); outline-offset: -2px; }
+.term-dock-chip { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 6px; background: var(--panel);
+  font-size: 12.5px; cursor: grab; }
+.term-dock-chip:hover { border-color: var(--accent); }
+.term-dock-chip button { background: none; border: 0; color: inherit; padding: 3px 8px; cursor: pointer; font: inherit;
+  display: flex; align-items: center; gap: 6px; }
+.term-dock-chip .term-tab-x { padding: 3px 6px 3px 0; opacity: .6; }
+.term-dock-chip .term-tab-x:hover { opacity: 1; }
+.term-dock-title { max-width: 18em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

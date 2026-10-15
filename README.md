@@ -562,13 +562,19 @@ A built-in plugin with real shells inside the page, drawn with [xterm.js](https:
   resize, and the shells redraw at the new size. Drag a pane's header onto another pane's edge to
   move it there (the middle swaps the two), or onto a group tab to move it to that group. Groups
   are the tabs along the top: **+** adds one, double-click a name to rename it, **×** closes it
-  and its terminals. New terminals open beside the focused pane (along its longer side), or in a
-  new group once a group has 4 panes. The layout is remembered per browser, and terminals the
-  server has that aren't in it are added automatically.
-- **Pane buttons:** split, zoom, **⋯** (**Rename**, **Pop out** into Windows Terminal,
+  and its terminals. Only **Split** divides a pane, and it's refused (with a message) when the
+  halves would be under about 40×8 characters or the group already has 4 panes; dividers stop at
+  the same minimum. **+ New** and a project's Terminal button open a new full-size group when the
+  current one is in use. The layout is remembered per browser, and terminals the server has that
+  aren't in it (say, opened in another browser tab) go to the dock instead of splitting.
+- **Minimize:** a pane's **▁** button (or Ctrl+Shift+M) moves it to a dock under the panes, and
+  the others take its space. Click its chip to restore it (its scrollback and any output it
+  missed are still there), drag the chip to a pane edge or group tab to place it, or drag a pane
+  header onto the dock to minimize it. Minimized panes are remembered per browser.
+- **Pane buttons:** minimize, split, zoom, **⋯** (**Rename**, **Pop out** into Windows Terminal,
   **Restart**) and close.
 - **Shortcuts** (Ctrl+Shift so shell keys are untouched): `D` split right, `E` split down, `W`
-  close, arrows move focus, `Z` zoom, `T` new group, `PageUp`/`PageDown` switch group. Ctrl+`=`,
+  close, arrows move focus, `Z` zoom, `M` minimize, `T` new group, `PageUp`/`PageDown` switch group. Ctrl+`=`,
   Ctrl+`-` and Ctrl+`0` change the font size. Some browsers reserve a few of these (e.g. `W`, `T`).
 - **Limit:** up to 12 shells can run at once.
 
