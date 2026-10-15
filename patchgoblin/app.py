@@ -966,6 +966,26 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
                          "os": request.args.get("os"), "windows": request.args.get("windows") == "1"})
         return jsonify(keys=sshtools.list_local_keys() if host is None else sshtools.list_remote_keys(host))
 
+    @app.post("/api/ssh/network")
+    def ssh_network():
+        """Scan every saved server's authorized_keys once (only when asked: no polling)."""
+        servers = sshtools.clean_servers(settings.get()["ssh_servers"])
+        scans = {}
+        if servers:
+            pool = ThreadPoolExecutor(max_workers=min(8, len(servers)))
+            futures = {s["id"]: pool.submit(sshtools.scan_server, ssh_host(
+                {"target": s["target"], "port": s["port"], "os": s["os"]})) for s in servers}
+            deadline = time.monotonic() + 90
+            for sid, future in futures.items():
+                try:
+                    scans[sid] = future.result(timeout=max(1, deadline - time.monotonic()))
+                except Exception as exc:  # timeout or an unexpected failure: show it on the node
+                    scans[sid] = {"files": [], "own_keys": [], "admin": False, "os": "",
+                                  "error": str(exc) or "The scan timed out."}
+            pool.shutdown(wait=False, cancel_futures=True)
+        return jsonify(**sshtools.build_network(sshtools.list_local_keys(), servers, scans),
+                       generated=time.strftime("%Y-%m-%d %H:%M:%S"))
+
     @app.post("/api/ssh/keys/generate")
     def ssh_generate():
         data = body()

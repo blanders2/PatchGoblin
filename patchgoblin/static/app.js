@@ -2127,7 +2127,7 @@ function setupGlobalKeys() {
 // project UI (body.mode-ssh, see app.css): nothing is closed, reset or reselected, and the
 // polling of tasks and reachability keeps updating the hidden DOM.
 
-const SSH_TOOLS = { servers: "Servers", keys: "Keys", install: "Install keys", tunnels: "Tunnels" };
+const SSH_TOOLS = { servers: "Servers", keys: "Keys", install: "Install keys", network: "Network", tunnels: "Tunnels" };
 const ssh = {
   servers: [], // saved servers [{id, name, target, port, os}] from /api/ssh/servers
   suggestions: [], // [{target, port, source, ssh_os?}]: project hosts and ssh-config aliases not saved yet
@@ -2139,6 +2139,8 @@ const ssh = {
   timer: null,
   confirmed: new Set(), // tunnel ids whose 0.0.0.0 bind was confirmed this session
   highlight: null,
+  network: null, // last /api/ssh/network result, kept in memory only
+  networkBusy: false,
 };
 
 const sshSourceValue = t => `${t.target}\t${t.port || ""}\t${t.os || t.ssh_os || ""}`;
@@ -2298,6 +2300,138 @@ async function openSshTool(tool) {
   if (tool === "keys") loadSshKeys();
   if (tool === "install") loadInstallKeys();
   if (tool === "tunnels") renderTunnelPanel();
+  if (tool === "network") loadNetwork();
+}
+
+// ---- network diagram: one scan per open/refresh, a one-time radial layout, no animation ----
+
+function svgEl(tag, attrs = {}, ...children) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else if (v !== undefined && v !== null && v !== false) node.setAttribute(k, v === true ? "" : v);
+  }
+  for (const child of children.flat()) {
+    if (child !== null && child !== undefined && child !== false) node.append(child);
+  }
+  return node;
+}
+
+async function loadNetwork() {
+  if (ssh.networkBusy) return;
+  ssh.networkBusy = true;
+  const busy = $("#ssh-network-busy");
+  if (ssh.network) renderNetwork();
+  busy.textContent = `Scanning ${ssh.servers.length} server${ssh.servers.length === 1 ? "" : "s"}…`;
+  busy.hidden = false;
+  $("#ssh-network-refresh").disabled = true;
+  try {
+    ssh.network = await api("POST", "/api/ssh/network");
+    renderNetwork();
+    const failed = ssh.network.nodes.filter(n => n.error && n.error !== "not scanned");
+    if (failed.length) toast(`Could not scan ${failed.map(n => n.name).join(", ")}`, true);
+  } catch (e) { toast(e.message, true); }
+  finally {
+    ssh.networkBusy = false;
+    busy.hidden = true;
+    $("#ssh-network-refresh").disabled = false;
+  }
+}
+
+function renderNetwork() {
+  const data = ssh.network, svg = $("#ssh-network-svg"), detail = $("#ssh-network-detail");
+  svg.replaceChildren();
+  $("#ssh-network-stamp").textContent = data ? `Generated at ${data.generated}` : "";
+  if (!data) return;
+  const W = 800, H = 560, cx = W / 2, cy = H / 2, R = 24, byId = new Map(data.nodes.map(n => [n.id, n]));
+  const servers = data.nodes.filter(n => n.kind === "server");
+  const ring = Math.min(170, 90 + servers.length * 14);
+  servers.forEach((n, i) => {
+    const a = -Math.PI / 2 + (2 * Math.PI * i) / servers.length;
+    n.x = cx + ring * Math.cos(a); n.y = cy + ring * Math.sin(a); n.angle = a;
+  });
+  const local = byId.get("local"); local.x = cx; local.y = cy;
+  const kids = new Map(); // server id -> external nodes pointing at it
+  for (const n of data.nodes.filter(n => n.kind === "external")) {
+    const edge = data.edges.find(e => e.from === n.id), target = edge && byId.get(edge.to);
+    if (!target || target.x === undefined) { n.angle = 0; n.x = W - 40; n.y = 40; continue; }
+    kids.set(target.id, [...(kids.get(target.id) || []), n]);
+  }
+  for (const [sid, list] of kids) {
+    const base = byId.get(sid), spread = 0.34;
+    list.forEach((n, i) => {
+      const a = base.angle + (i - (list.length - 1) / 2) * spread, r = Math.min(255, ring + 85 + (i % 2) * 22);
+      n.x = cx + r * Math.cos(a) * 1.35; n.y = cy + r * Math.sin(a);
+      n.x = Math.max(60, Math.min(W - 60, n.x)); n.y = Math.max(30, Math.min(H - 30, n.y));
+    });
+  }
+  const short = (s, n = 18) => s.length > n ? s.slice(0, n - 1) + "…" : s;
+  const marker = (id, cls) => svgEl("marker", { id, viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" },
+    svgEl("path", { d: "M0,0 L10,5 L0,10 z", class: cls }));
+  svg.append(svgEl("defs", {}, marker("net-arrow", "net-head"), marker("net-arrow-admin", "net-head admin")));
+
+  const edgeEls = data.edges.map((e, i) => {
+    const a = byId.get(e.from), b = byId.get(e.to);
+    const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1, ux = dx / len, uy = dy / len;
+    const bend = Math.min(60, len * 0.18);
+    const sx = a.x + ux * R, sy = a.y + uy * R, ex = b.x - ux * (R + 4), ey = b.y - uy * (R + 4);
+    const qx = (sx + ex) / 2 - uy * bend, qy = (sy + ey) / 2 + ux * bend;
+    const label = `${a.name} → ${b.name}: ${e.keys.length} key${e.keys.length === 1 ? "" : "s"}${e.guessed ? " (guessed)" : ""}`;
+    const path = svgEl("path", {
+      d: `M${sx.toFixed(1)},${sy.toFixed(1)} Q${qx.toFixed(1)},${qy.toFixed(1)} ${ex.toFixed(1)},${ey.toFixed(1)}`,
+      class: `net-edge${e.guessed ? " guess" : ""}${e.admin_file ? " admin" : ""}`,
+      "stroke-width": Math.min(5, 1.4 + e.keys.length * 0.7), "marker-end": `url(#net-arrow${e.admin_file ? "-admin" : ""})`,
+    });
+    const hit = svgEl("path", { d: path.getAttribute("d"), class: "net-hit", onclick: () => showEdge(e), onmouseenter: () => focus(null, e), onmouseleave: () => focus() },
+      svgEl("title", {}, label));
+    return { e, path, group: svgEl("g", {}, path, hit) };
+  });
+  svg.append(svgEl("g", {}, ...edgeEls.map(x => x.group)));
+
+  const nodeEls = data.nodes.map(n => {
+    const cls = `net-node ${n.kind}${n.error && n.error !== "not scanned" ? " error" : ""}`;
+    const glyph = n.kind === "local" ? "▣" : n.kind === "external" ? "?" : n.os === "windows" ? "⊞" : "▤";
+    const g = svgEl("g", { class: cls, tabindex: 0, role: "button", "aria-label": n.name, transform: `translate(${n.x.toFixed(1)},${n.y.toFixed(1)})`,
+        onclick: () => showNode(n), onkeydown: ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); showNode(n); } },
+        onmouseenter: () => focus(n), onmouseleave: () => focus(), onfocus: () => focus(n), onblur: () => focus() },
+      svgEl("title", {}, n.kind === "external" ? `${n.name}\n${n.fingerprint}` : n.error ? `${n.name}\n${n.error}` : n.name),
+      svgEl("circle", { r: n.kind === "external" ? R - 6 : R }),
+      svgEl("text", { class: "glyph", y: 5, "text-anchor": "middle" }, glyph),
+      svgEl("text", { class: "label", y: R + 14, "text-anchor": "middle" }, short(n.name)));
+    return { n, g };
+  });
+  svg.append(svgEl("g", {}, ...nodeEls.map(x => x.g)));
+
+  function focus(node, edge) {
+    const hot = new Set(), hotEdges = new Set();
+    if (node) data.edges.forEach(e => { if (e.from === node.id || e.to === node.id) { hotEdges.add(e); hot.add(e.from); hot.add(e.to); } });
+    if (edge) { hotEdges.add(edge); hot.add(edge.from); hot.add(edge.to); }
+    const on = node || edge;
+    for (const x of edgeEls) { x.path.classList.toggle("dim", !!on && !hotEdges.has(x.e)); x.path.classList.toggle("hot", hotEdges.has(x.e)); }
+    for (const x of nodeEls) x.g.classList.toggle("dim", !!on && !hot.has(x.n.id));
+  }
+
+  const keyRows = e => e.keys.map(k => el("li", {}, `${k.type} ${k.fingerprint}`, k.comment ? ` · ${k.comment}` : "", ` · ${k.file}`,
+    k.options ? el("div", { class: "muted" }, `options: ${k.options}`) : null));
+  function showEdge(e) {
+    const a = byId.get(e.from), b = byId.get(e.to);
+    detail.replaceChildren(el("strong", {}, `${a.name} → ${b.name}`), e.guessed ? " (guessed from the key comment)" : "", el("ul", {}, keyRows(e)));
+  }
+  function showNode(n) {
+    const out = data.edges.filter(e => e.from === n.id), inn = data.edges.filter(e => e.to === n.id);
+    detail.replaceChildren(el("strong", {}, n.name), n.target ? ` (${n.target})` : "",
+      n.fingerprint ? el("div", {}, n.fingerprint) : null,
+      n.error ? el("div", { class: "error" }, n.error) : null,
+      ...(n.files || []).map(f => el("div", { class: "muted" }, `${f.path}${f.readable ? "" : " — not readable"}${f.note ? ` (${f.note})` : ""}`)),
+      inn.length ? el("div", {}, `Can log in here: ${inn.map(e => byId.get(e.from).name).join(", ")}`) : null,
+      out.length ? el("div", {}, `Can log in to: ${out.map(e => byId.get(e.to).name).join(", ")}`) : null);
+  }
+
+  $("#ssh-network-rows").replaceChildren(...(data.edges.length ? data.edges.map(e => el("tr", { onclick: () => showEdge(e) },
+    el("td", {}, byId.get(e.from).name), el("td", {}, byId.get(e.to).name),
+    el("td", {}, e.keys.map(k => k.comment || k.fingerprint.slice(0, 19)).join(", ")),
+    el("td", {}, e.guessed ? "guessed" : e.admin_file ? "admin file" : "matched")))
+    : [el("tr", {}, el("td", { colspan: 4, class: "muted" }, "No authorized keys found."))]));
 }
 
 async function copyText(text, done) {
@@ -2524,6 +2658,7 @@ function setupSshTools() {
   }
   $("#ssh-key-source").onchange = loadSshKeys;
   $("#ssh-keys-refresh").onclick = loadSshKeys;
+  $("#ssh-network-refresh").onclick = loadNetwork;
   $("#ssh-generate-form").onsubmit = generateKey;
   $("#ssh-install-source").onchange = loadInstallKeys;
   $("#ssh-add-dest").onclick = addInstallDest;

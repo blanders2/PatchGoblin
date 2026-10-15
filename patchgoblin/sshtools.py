@@ -8,6 +8,7 @@ are plain ``ssh -N -L/-R`` processes that stop when PatchGoblin exits.
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import re
 import shlex
@@ -163,6 +164,11 @@ _POSIX_INSTALL = (
     '{ printf \'%s\\n\' "$k" >> ~/.ssh/authorized_keys; echo "ADD $k"; }; done; '
     "chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys")
 
+# PowerShell: prints ADMIN when the login account is an Administrator.
+_PS_IS_ADMIN = (
+    "if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent())"
+    ".IsInRole('Administrators')) { 'ADMIN' }")
+
 # PowerShell: expects $keys (an array of lines) to be defined before it.
 _PS_INSTALL_BODY = (
     "$d=Join-Path $env:USERPROFILE '.ssh'; New-Item -ItemType Directory -Force -Path $d | Out-Null; "
@@ -174,9 +180,7 @@ _PS_INSTALL_BODY = (
     "if ($have -contains $k) { \"SKIP $b\" } else { \"ADD $b\"; $new+=$k; $have+=$k } }; "
     "if ($new.Count) { if ($text -and -not $text.EndsWith(\"`n\")) { $text+=\"`n\" }; "
     "$text+=(($new -join \"`n\")+\"`n\"); "
-    "[IO.File]::WriteAllText($f,$text,[Text.UTF8Encoding]::new($false)) }; "
-    "if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent())"
-    ".IsInRole('Administrators')) { 'ADMIN' }")
+    "[IO.File]::WriteAllText($f,$text,[Text.UTF8Encoding]::new($false)) }; " + _PS_IS_ADMIN)
 
 _PS_STDIN_KEYS = (
     "$m=New-Object IO.MemoryStream; [Console]::OpenStandardInput().CopyTo($m); "
@@ -251,6 +255,183 @@ def install_keys_interactive(target: str, port: Optional[int], pubkeys, windows:
     return {"added": [], "skipped": [], "note":
             "A terminal window opened: enter the password there. Run the install again with key login "
             "to check the result."}
+
+
+# ---- network map ---------------------------------------------------------------------
+# Reads authorized_keys files (public keys only) to work out which machine's key can log in where.
+
+KEY_TYPE_TOKEN = re.compile(r"^(ssh-|ecdsa-|sk-)\S+$")
+WIN_ADMIN_KEYS = "C:\\ProgramData\\ssh\\administrators_authorized_keys"
+
+
+def blob_fingerprint(b64: str) -> str:
+    """``SHA256:…`` of a base64 key blob, the same text ``ssh-keygen -l`` prints."""
+    digest = hashlib.sha256(base64.b64decode(b64, validate=True)).digest()
+    return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
+
+
+def _tokens(line: str) -> list[tuple[int, int]]:
+    """(start, end) of each whitespace-separated token; whitespace inside "quotes" doesn't split."""
+    out, start, quoted = [], None, False
+    for i, ch in enumerate(line):
+        if ch == '"':
+            quoted = not quoted
+        if ch in " \t" and not quoted:
+            if start is not None:
+                out.append((start, i))
+                start = None
+        elif start is None:
+            start = i
+    if start is not None:
+        out.append((start, len(line)))
+    return out
+
+
+def parse_authorized_keys(text: str) -> tuple[list[dict], int]:
+    """``(entries, bad)`` for an authorized_keys file. Entries are
+    ``{type, fingerprint, comment, options}``; the key body is not kept."""
+    entries, bad = [], 0
+    for raw in (text or "").lstrip("\ufeff").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        toks = _tokens(line)
+        at = next((i for i, (s, e) in enumerate(toks) if KEY_TYPE_TOKEN.match(line[s:e])), None)
+        if at is None or at + 1 >= len(toks):
+            bad += 1
+            continue
+        s, e = toks[at + 1]
+        try:
+            fp = blob_fingerprint(line[s:e])
+        except ValueError:
+            bad += 1
+            continue
+        entries.append({"type": line[toks[at][0]:toks[at][1]], "fingerprint": fp,
+                        "comment": line[e:].strip(), "options": line[:toks[at][0]].strip()})
+    return entries, bad
+
+
+def _key_fp(key: dict) -> str:
+    parts = (key.get("text") or "").split()
+    if len(parts) > 1:
+        try:
+            return blob_fingerprint(parts[1])
+        except ValueError:
+            pass
+    return key.get("fingerprint") or ""
+
+
+def scan_server(host) -> dict:
+    """One saved server's authorized_keys files and its own public keys. Never raises for
+    host trouble: that lands in ``error``."""
+    result = {"files": [], "own_keys": [], "admin": False, "os": getattr(host, "os", ""), "error": ""}
+    try:
+        windows = isinstance(host, WindowsSSHHost)
+        if windows:
+            res = host._exec(_PS_IS_ADMIN, timeout=60)
+            result["admin"] = res.ok and "ADMIN" in res.stdout
+        folder = host.join(host.home(), ".ssh")
+        specs = [(host.join(folder, "authorized_keys"), "user")]
+        if windows:
+            if result["admin"]:
+                specs.append((WIN_ADMIN_KEYS, "admin"))
+        else:
+            specs.append((host.join(folder, "authorized_keys2"), "user2"))
+        for path, kind in specs:
+            info = {"path": path, "kind": kind, "readable": False, "entries": [], "note": ""}
+            try:
+                text = host.read_text(path)
+            except HostError:
+                if kind != "admin":
+                    raise
+                text, info["note"] = None, "not readable"
+            except UnicodeError:
+                text, info["note"] = None, "not readable (unsupported encoding)"
+            if text is None:
+                info["note"] = info["note"] or "not found"
+                if kind == "user2":
+                    continue
+            else:
+                info["readable"] = True
+                info["entries"], bad = parse_authorized_keys(text)
+                if bad:
+                    info["note"] = f"{bad} line(s) could not be read"
+            if kind == "user" and result["admin"]:
+                info["note"] = (info["note"] + "; " if info["note"] else "") + "ignored by sshd for administrators"
+            result["files"].append(info)
+        for key in list_remote_keys(host):
+            result["own_keys"].append({"name": key["name"], "type": key["type"], "comment": key["comment"],
+                                       "fingerprint": _key_fp(key)})
+    except HostError as exc:  # includes AuthError
+        result["error"] = str(exc)
+    return result
+
+
+def _host_part(value: str) -> str:
+    value = value.rsplit("@", 1)[-1].strip().lower()
+    if value.startswith("[") and "]" in value:
+        return value[1:value.index("]")]
+    return value.split(":")[0]
+
+
+def build_network(local_keys: list, servers: list, scans: dict) -> dict:
+    """Nodes and who-can-log-in-where edges from this computer's keys, the saved servers and
+    their scans (``{server id: scan_server result}``)."""
+    nodes = [{"id": "local", "kind": "local", "name": "This computer"}]
+    owners: dict[str, list] = {}
+
+    def own(fp, node_id):
+        if fp and node_id not in owners.setdefault(fp, []):
+            owners[fp].append(node_id)
+
+    for key in local_keys:
+        own(_key_fp(key), "local")
+    for server in servers:
+        scan = scans.get(server["id"]) or {}
+        nodes.append({"id": server["id"], "kind": "server", "name": server["name"], "target": server["target"],
+                      "os": scan.get("os") or (server.get("os") if server.get("os") != "auto" else ""),
+                      "error": scan.get("error") or ("" if server["id"] in scans else "not scanned"),
+                      "admin": bool(scan.get("admin")),
+                      "files": [{k: f[k] for k in ("path", "kind", "readable", "note")}
+                                for f in scan.get("files", [])]})
+        for key in scan.get("own_keys", []):
+            own(key.get("fingerprint"), server["id"])
+    names = {}
+    for server in servers:
+        for label in (server["name"], _host_part(server["target"])):
+            names.setdefault(label.lower(), server["id"])
+
+    edges: dict[tuple, dict] = {}
+    ext: dict[str, dict] = {}
+
+    def add(src, dst, key, guessed=False):
+        edge = edges.setdefault((src, dst, guessed), {"from": src, "to": dst, "keys": [], "guessed": guessed,
+                                                       "admin_file": False})
+        if not any(k["fingerprint"] == key["fingerprint"] and k["file"] == key["file"] for k in edge["keys"]):
+            edge["keys"].append(key)
+        edge["admin_file"] = edge["admin_file"] or key["file_kind"] == "admin"
+
+    for server in servers:
+        for info in (scans.get(server["id"]) or {}).get("files", []):
+            for entry in info["entries"]:
+                key = {"fingerprint": entry["fingerprint"], "type": entry["type"], "comment": entry["comment"],
+                       "file": info["path"], "file_kind": info["kind"], "options": entry["options"]}
+                sources = [o for o in owners.get(entry["fingerprint"], []) if o != server["id"]]
+                if sources:
+                    for src in sources:
+                        add(src, server["id"], key)
+                    continue
+                if entry["fingerprint"] in owners:  # only this server's own key: a self-login, not a link
+                    continue
+                guess = names.get(_host_part(entry["comment"].split()[0]) if "@" in entry["comment"] else "")
+                if guess and guess != server["id"]:
+                    add(guess, server["id"], key, guessed=True)
+                    continue
+                node = ext.setdefault(entry["fingerprint"], {
+                    "id": "ext:" + entry["fingerprint"], "kind": "external",
+                    "name": entry["comment"] or entry["fingerprint"][:19], "fingerprint": entry["fingerprint"]})
+                add(node["id"], server["id"], key)
+    return {"nodes": nodes + list(ext.values()), "edges": list(edges.values())}
 
 
 # ---- targets -------------------------------------------------------------------------

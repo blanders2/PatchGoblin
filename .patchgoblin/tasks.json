@@ -1,6 +1,6 @@
 {
   "version": 7,
-  "next_id": 56,
+  "next_id": 57,
   "tasks": [
     {
       "id": 1,
@@ -3159,21 +3159,21 @@
     },
     {
       "id": 54,
-      "title": "Add an epic network diagram to ssh tools that show all known connections to servers I add to my list looking at authorized_keys or whatever windows uses for admin. do not auto generate continuously, generate when I open or hit a button to refresh",
+      "title": "Add an on-demand SSH network diagram built from authorized_keys",
       "description": "",
-      "plan": "",
-      "status": "unplanned",
+      "plan": "Add a **Network** tool to the SSH tools sidebar. It draws an SVG diagram of who can log in where across the servers saved in the Servers list. A new backend function scans each saved server once. On POSIX hosts it reads `~/.ssh/authorized_keys` and `authorized_keys2`. On Windows hosts it reads `%USERPROFILE%\\.ssh\\authorized_keys`, plus `C:\\ProgramData\\ssh\\administrators_authorized_keys` when the account is an Administrator. It also lists each server's own public keys (`~/.ssh/*.pub`, the same data `list_remote_keys` already returns) and this computer's local keys. Matching key fingerprints turns this into \"A's key is authorized on B\" edges. The scan is a single `POST /api/ssh/network` request that probes servers in parallel. It runs only when the Network tool is opened or its Refresh button is pressed: no timers or polling. The frontend lays the graph out once, with no running animation. This computer sits in the centre, saved servers form a ring around it, and keys whose owner is unknown sit on an outer ring. Edges are curved and arrowed, and hovering or clicking highlights them and shows details. Only public key material is ever read, which keeps the module's rule that private keys are never opened.\n\n## Steps\n\n1. **`patchgoblin/sshtools.py`: parsing and fingerprints** (new section `# ---- network map`):\n   - `blob_fingerprint(b64: str) -> str`: returns `\"SHA256:\" + base64(sha256(blob)).rstrip(\"=\")`, which matches `ssh-keygen -l` output. It is pure Python, so a scan never spawns one `ssh-keygen` per key.\n   - `parse_authorized_keys(text: str) -> list[dict]`: skips blanks and `#` comments. It splits off an optional options prefix (e.g. `from=\"10.0.0.0/8\",command=\"x y\"`), respecting quotes, and finds the key-type token (`ssh-*`, `ecdsa-*`, `sk-*`). It returns `{type, fingerprint, comment, options}` for each line. Lines that don't parse go into a `bad` count, not an exception. The key body itself is not returned.\n2. **`patchgoblin/sshtools.py`: `scan_server(host) -> dict`**:\n   - **POSIX hosts:** use `host.read_text` on `~/.ssh/authorized_keys` and `~/.ssh/authorized_keys2`.\n   - **`WindowsSSHHost`:** run a small `host._exec` PowerShell script that prints `ADMIN` when the account is an Administrator (reuse the `IsInRole('Administrators')` snippet from `_PS_INSTALL_BODY` as a shared constant). Then `read_text` the user file and, if admin, the ProgramData file. Mark the user file as \"ignored by sshd\" in that case, because the existing `ADMIN_NOTE` explains sshd doesn't read it for admins.\n   - **Own keys:** call `list_remote_keys(host)` and record each key's fingerprint, so the server can be the source of edges.\n   - **Return value:** `{files: [{path, kind, readable, entries, note}], own_keys: [...], admin, error}`. If a `HostError` or `AuthError` is caught, it is stored in `error` and nothing is raised.\n3. **`patchgoblin/sshtools.py`: `build_network(local_keys, servers, scans) -> dict`** (pure function, easy to test):\n   - **Nodes:** `local` (This computer), one node per saved server (with id, name, target, os and an `error` flag), and one `ext:<fingerprint>` node for each authorized key whose owner isn't known (labelled by its comment, e.g. `alice@laptop`).\n   - **Owners:** an index from fingerprint to owner node(s), built from local keys and every server's `own_keys`.\n   - **Edges:** `{from, to, keys: [{fingerprint, type, comment, file, options}], admin_file: bool}`, combining all keys between the same pair into one edge.\n   - **Guessed edges:** if an unknown key's comment host part (after `@`) matches a saved server's name or target host, add a dashed edge from that server marked `guessed: true` instead of creating a separate external node.\n4. **`patchgoblin/app.py`: `POST /api/ssh/network`**, next to the other SSH routes:\n   - Load `clean_servers(settings.get()[\"ssh_servers\"])` and build each host with `ssh_host({...})` using the server's saved `os`.\n   - Run `scan_server` for all servers in a `ThreadPoolExecutor` (same pattern as the parallel probes near line 407), with a per-server timeout.\n   - Include `list_local_keys()` and return `build_network(...)` plus a `generated` timestamp.\n   - It is a POST so it goes through the existing header check and is clearly an action, not something to poll. Store nothing.\n5. **`patchgoblin/templates/index.html`**:\n   - Add `<li data-tool=\"network\" tabindex=\"0\">Network</li>` to `#ssh-nav`.\n   - Add `#ssh-network-panel.ssh-panel` containing:\n     - a toolbar with `#ssh-network-refresh` (\"\u21bb Refresh\"), a \"Generated at \u2026\" stamp and a legend (solid = matched key, dashed = guessed, admin file badge, error node);\n     - `<svg id=\"ssh-network-svg\">`;\n     - a details box `#ssh-network-detail`;\n     - a compact `ssh-table` of edges as an accessible text version.\n6. **`patchgoblin/static/app.js`**:\n   - Add `network: \"Network\"` to `SSH_TOOLS`, plus `ssh.network` (last result) and `ssh.networkBusy`.\n   - `openSshTool`: if `tool === \"network\"`, call `loadNetwork()`, which shows the last result straight away (if any) and starts a fresh scan. Ignore the open if a scan is already in progress (`networkBusy`).\n   - `loadNetwork()`: POST, store the result and call `renderNetwork()`. Show a \"Scanning N servers\u2026\" overlay, and report server failures with a toast and on the node.\n   - `renderNetwork()`:\n     - **Layout:** a one-time radial layout with `local` in the centre, servers evenly spaced on the inner ring, and external nodes on the outer ring next to their target.\n     - **Edges:** quadratic-curve `<path>`s with an arrowhead `<marker>`, stroke width growing with key count, dashed when guessed, and a different colour for edges that come from the admin file.\n     - **Nodes:** `<g>` elements with a circle, an OS glyph and a label.\n     - **Interaction:** hover or focus dims everything except the node's own edges. Clicking a node or edge fills `#ssh-network-detail` with its keys (type, fingerprint, comment, file, options) and any scan errors or notes.\n     - **Rendering helpers:** build everything with `document.createElementNS`, using a small `svgEl` helper that mirrors `el`. Use `textContent` only, because comments come from remote files.\n   - Use the `viewBox` so the diagram scales. There is no `setInterval` anywhere for the diagram.\n   - `setupSshTools`: connect `#ssh-network-refresh` to `loadNetwork`.\n7. **`patchgoblin/static/app.css`**:\n   - Styles for `.ssh-network` (SVG sized to the panel, existing theme CSS variables for node, edge and error colours so light and dark themes both work).\n   - `.dim` and `.hot` states for hover highlighting.\n   - Detail box and legend, kept compact to match task #55.\n8. **`README.md`**: one short paragraph in the SSH tools section on what Network reads, that it scans only when opened or refreshed, and the Windows administrator file caveat.\n\n## Verification\n\n- Add unit tests to `SshToolsTests` in `tests/test_patchgoblin.py`:\n  - **`blob_fingerprint`:** matches `hashlib`-derived `SHA256:` output for a fixed key.\n  - **`parse_authorized_keys`:**\n    - an options prefix with a quoted comma or space;\n    - `sk-` and `ecdsa-` keys;\n    - comments and blank lines;\n    - CRLF line endings;\n    - lines that don't parse, counted in `bad`.\n  - **`scan_server`:**\n    - with a fake POSIX host, it reads only the `authorized_keys` paths and `*.pub` files (never a private key name);\n    - with a fake Windows host and `ADMIN` returned, it includes the ProgramData file and flags the user file as ignored;\n    - a `HostError` ends up in `error` instead of being raised.\n  - **`build_network`:**\n    - a local key on server A gives `local\u2192A`;\n    - A's own key on B gives `A\u2192B`;\n    - an unknown key creates an `ext:` node;\n    - a comment host that matches a server gives a guessed edge;\n    - several keys between the same pair are merged into one edge;\n    - a failed server still appears as a node with `error`.\n  - **Route `POST /api/ssh/network`:** with `scan_server` and `list_local_keys` mocked, it returns nodes and edges, and needs the usual header. A route test also confirms `GET /api/ssh/servers` never calls `scan_server`, i.e. no automatic scanning.\n- Run `python -m pytest tests -q`.\n- Manual check with `/run`:\n  - Save one Linux and one Windows server, open SSH tools \u2192 Network, and confirm the diagram renders and hover and detail work.\n  - Confirm that switching to Keys and back starts exactly one new scan, and that the browser network tab shows no repeated requests while the tool is idle.\n  - Check both themes.\n\n## Assumptions\n\n- Only servers saved in the Servers list are scanned. Project hosts and suggestions are not included unless the user saves them.\n- Each scan reads the default authorized_keys locations. Custom `AuthorizedKeysFile` settings in `sshd_config` are not followed.\n- On Windows, the ProgramData admin file is read only when the login account is an Administrator. If it can't be read, the file is shown as \"not readable\" rather than treated as an error.\n- Key ownership comes from fingerprints of `*.pub` files on this computer and on each saved server. A key without a `.pub` on any known machine appears as an external node labelled by its comment.\n- The scan needs working key login. Servers that fail authentication appear in red with the error, and there is no password fallback.\n- \"Generate when I open\" means every time the Network tool is opened (including the initial page load when it was the last tool used) and on Refresh. Results are kept only in browser memory, not saved.\n- The layout is hand-written SVG (radial and deterministic) with no new JS dependency, consistent with the project having no vendored frontend libraries.\n\n## Risks\n\n- **Slow or offline hosts:** scanning many servers can take about 20 s per offline host. Use parallel scanning with a per-host timeout and an overlay that shows the scan is running, and never block other SSH tools.\n- **Windows encoding:** Windows `administrators_authorized_keys` files are often UTF-16 or have a BOM. Rely on `WindowsSSHHost.read_text`'s encoding handling, and test a BOM/CRLF sample.\n- **Untrusted remote text:** comments and options come from remote files. Render them only with `textContent` and SVG text nodes, never `innerHTML`.\n- **Options parsing:** a naive split on spaces will misparse lines whose `command=\"...\"` contains spaces. Parse quotes properly.\n- **Guessed edges:** comment heuristics can be wrong. Keep them visibly marked (dashed and labelled \"guessed\") so they aren't mistaken for confirmed access.\n- **Large networks:** with many nodes the radial layout gets crowded. Cap the outer-ring labels (shortened, with full text in a tooltip) and keep the edge table as the readable fallback.\n- **Server OS setting:** a server saved with `os: auto` triggers OS detection on each scan. Make sure `ssh_host` / `host_for` handles that the same way the Keys tool does.\n\n## Questions for you\n\nNone.",
+      "status": "review",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-15T00:12:01+00:00",
-      "updated_at": "2026-10-15T00:14:20+00:00",
-      "queued_at": null,
-      "started_at": null,
-      "finished_at": null,
-      "output": "",
+      "updated_at": "2026-10-15T00:39:15+00:00",
+      "queued_at": "2026-10-15T00:33:47+00:00",
+      "started_at": "2026-10-15T00:33:47+00:00",
+      "finished_at": "2026-10-15T00:39:15+00:00",
+      "output": "The full-suite run finished. It used the test file from before my fix, so that one error is the Windows-host test failure I'd already fixed. The log shows 261 tests with 1 error and 9 skipped. The \"disk went away\" lines are output from existing tests that simulate a disk failure on purpose. I re-ran `SshToolsTests` after the fix and all 34 passed. I did not re-run the full suite after the fix.",
       "error": "",
       "commit": "",
       "changes": [],
@@ -3191,8 +3191,33 @@
         {
           "at": "2026-10-15T00:14:20+00:00",
           "event": "Edited title"
+        },
+        {
+          "at": "2026-10-15T00:32:16+00:00",
+          "event": "AI planning started"
+        },
+        {
+          "at": "2026-10-15T00:33:47+00:00",
+          "event": "Title rewritten by AI (was: Add an epic network diagram to ssh tools that show all known connections to servers I add to my list looking at authorized_keys or whatever windows uses for admin. do not auto generate continuously, generate when I open or hit a button to refresh)"
+        },
+        {
+          "at": "2026-10-15T00:33:47+00:00",
+          "event": "AI plan ready"
+        },
+        {
+          "at": "2026-10-15T00:33:47+00:00",
+          "event": "Auto-queued"
+        },
+        {
+          "at": "2026-10-15T00:33:47+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-10-15T00:39:15+00:00",
+          "event": "AI run finished; awaiting review"
         }
-      ]
+      ],
+      "prev_status": "unplanned"
     },
     {
       "id": 55,
@@ -3206,13 +3231,13 @@
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-15T00:18:36+00:00",
-      "updated_at": "2026-10-15T00:26:50+00:00",
+      "updated_at": "2026-10-15T00:26:51+00:00",
       "queued_at": "2026-10-15T00:22:42+00:00",
       "started_at": "2026-10-15T00:22:42+00:00",
       "finished_at": "2026-10-15T00:26:50+00:00",
       "output": "I made the SSH tools view denser. The tests pass (245 passed, 9 skipped, using `uv run --with pytest`), but I haven't started the app or looked at it in a browser. Nothing has been checked visually.\n\nI didn't test the light/dark/midnight/sepia themes, the Edit/Save/Delete, key, install and tunnel flows, the sidebar highlight, or the narrow-screen layout. Those checks from the plan still need doing.\n\n- **CSS (`patchgoblin/static/app.css`):**\n  - All the new rules are scoped to `#ssh-tools-view` and `#sidebar-ssh`, so Projects is untouched.\n  - Fieldsets are now flat sections with a ruled legend, controls are smaller, rows pack tighter, and the view is 900px wide.\n  - Tables use a fixed layout with single-line ellipsised cells and a narrow right-aligned actions column. The `ssh output` `<details>` can still wrap.\n  - The `.w-port`, `.w-host` and `.w-name` input widths are in, and they grow below 900px.\n  - The sidebar list items and tunnel rows are tighter.\n- **Template (`patchgoblin/templates/index.html`):**\n  - I added `<colgroup>` widths to the tables and the `w-*` classes to the inputs.\n  - The Save/Cancel and Generate buttons now sit at the end of the last form row.\n  - The tunnel form is two rows, and the Direction options read `Local (-L)` / `Remote (-R)` with the full text in each `title`.\n  - \"Take keys from\" is a `label.inline`, and \"+ Add destination\" and \"Use password\" share a row.\n- **Script (`patchgoblin/static/app.js`):**\n  - The host, fingerprint, comment, tunnel name, forward and via cells now carry `title` attributes.\n  - The install key checkboxes show the fingerprint as an ellipsised mono span.\n\nNo IDs, field names or API calls changed.\n\nThe sidebar tunnel rows may end up at the `5px 8px` padding rather than the `4px 8px` the plan asked for. `#sidebar-ssh .project-list li` is more specific than `#ssh-tunnel-list li`. I'd confirm the exact padding by eye once the app is running.",
       "error": "",
-      "commit": "",
+      "commit": "cf0fecad118c8f6096688c0fea2e0c6e4a3053d3",
       "changes": [],
       "summary": "",
       "checkin_pending": false,
@@ -3248,6 +3273,60 @@
         {
           "at": "2026-10-15T00:26:50+00:00",
           "event": "AI run finished; awaiting review"
+        },
+        {
+          "at": "2026-10-15T00:26:51+00:00",
+          "event": "Committed cf0fecad11"
+        }
+      ],
+      "prev_status": "unplanned"
+    },
+    {
+      "id": 56,
+      "title": "Stop SSH table action buttons overlapping the OS and adjacent columns",
+      "description": "",
+      "plan": "The overlap comes from how the SSH tables are sized. They use `table-layout: fixed` (`patchgoblin/static/app.css:551`), so each column's width comes only from its `<col>`, and the cell contents are ignored. The action column is declared as `<col style=\"width:1%\">`. CSS then sets `overflow: visible` on the last cell (`app.css:556`), and the `.actions` flex row is `nowrap` with `justify-content: flex-end` (`app.css:557`). So the Edit/Delete buttons don't fit in the tiny column and spill left over the OS cell. The fix is to give each table's action column a real width that fits its buttons, instead of 1%. The Saved servers table needs the fix. The Tunnels table (Start/Stop + Edit + Delete) has the same bug, and so do the Keys and Suggestions tables whenever the column next to the buttons has text, so all four get the same fix.\n\n1. In `patchgoblin/templates/index.html`, change the last `<col>` of each `.ssh-table` colgroup from `width:1%` to a fixed width that fits its buttons:\n   - Saved servers (line 164): Edit + Delete \u2192 roughly `width:8.5em`.\n   - Suggestions (line 172): Add \u2192 roughly `width:3.5em`.\n   - Keys (line 207): the copy button(s) rendered near `app.js:2322`. Measure them and size the column to fit.\n   - Tunnels (line 255): toggle + Edit + Delete \u2192 roughly `width:12em`.\n   Use `em` so the widths scale with the 12px button font. Check the actual widths in the browser and adjust.\n2. In `patchgoblin/static/app.css:556`, drop `width: 1%` from the `.ssh-table th:last-child, td:last-child` rule so the colgroup alone controls the width. Keep `max-width: none` and `text-align: right`. Change `overflow: visible` to `overflow: hidden`, so a column that is still too narrow clips its buttons instead of covering the next column. That way a future sizing mistake shows up clearly rather than as overlap.\n3. Optionally, shrink the Saved servers OS column (`width:16%`) a little so the Host column keeps its space at narrow widths. \"Linux/macOS\" and \"Auto-detect\" should still ellipsize cleanly thanks to the existing `text-overflow: ellipsis`.\n4. No JS changes are needed: `renderServerPanel` and `renderTunnelPanel` in `app.js` keep the same markup.\n\n**Verification**\n- Run the app (`/run`) and open SSH tools. Under Servers, add servers with OS set to Auto-detect, Linux/macOS and Windows. The OS text should end before the Edit button at both a wide and a narrow window width.\n- Check the Tunnels table in both running and stopped states (the toggle label may change width), plus the Keys and Suggestions tables. No buttons should overlap neighbouring cells or wrap onto two lines.\n- Check that the empty-state rows (`colspan`) still render correctly.\n- Run the existing test suite (e.g. `pytest`) as a sanity check. This is a CSS/HTML-only change, so no new tests.\n\n## Assumptions\n- I'm fixing all four SSH tables, not only the Servers table, because they share the same flawed 1%-width pattern.\n- I'm using fixed `em` widths in the colgroup rather than switching to `table-layout: auto`. Auto layout would undo the compact layout from task #55.\n- Clipping (`overflow: hidden`) is a better failure mode than overlap if a column ends up too narrow.\n\n## Risks\n- The tunnel toggle's label may differ in width between states (e.g. \"Start\" vs \"Stop\"). Size the column for the wider label.\n- At very narrow viewports, fixed action columns take space from the percentage and auto columns. Make sure the Host and Fingerprint columns still get usable space.\n- If anything else depends on the `width: 1%` rule in `app.css:556`, the colgroup values must now be correct for each table. Grep found only these four tables using `.ssh-table`.\n\n## Questions for you\nNone.",
+      "status": "queued",
+      "provider": "",
+      "plan_model": "",
+      "code_model": "",
+      "plan_trust": "",
+      "paused": false,
+      "created_at": "2026-10-15T00:33:16+00:00",
+      "updated_at": "2026-10-15T00:34:01+00:00",
+      "queued_at": "2026-10-15T00:34:01+00:00",
+      "started_at": null,
+      "finished_at": null,
+      "output": "[2026-10-15T00:33:19+00:00] plan with claude / opus in C:\\src\\PatchGoblin\n$ claude -p --output-format stream-json --verbose --allowedTools Read,Glob,Grep --disallowedTools Edit,Write,NotebookEdit,Bash --model opus\n\u00b7 Started: model claude-opus-5-5, in C:\\src\\PatchGoblin\n\u2192 Searching `ssh-server|sshServer|ssh-srv`\n\u2192 Searching `\\bos\\b|\\.os|-os`\n\u2192 Reading patchgoblin/static/app.js\n\u2192 Searching `ssh`\n\u2192 Reading patchgoblin/templates/index.html\n\u2192 Searching `ssh-table|ssh-panel|\\.actions`\n\u2192 Searching `colgroup`\n\u2192 Searching `\"small ghost[^\"]*\"[^)]*\\)[^,]*, \"[^\"]+\"`\nI found the cause in the CSS. Now I'm checking the tunnel table's action buttons so the fix covers that table too.\n\u2192 Reading patchgoblin/static/app.js\nTitle: Stop SSH table action buttons overlapping the OS and adjacent columns\n\nThe overlap comes from how the SSH tables are sized. They use `table-layout: fixed` (`patchgoblin/static/app.css:551`), so each column's width comes only from its `<col>`, and the cell contents are ignored. The action column is declared as `<col style=\"width:1%\">`. CSS then sets `overflow: visible` on the last cell (`app.css:556`), and the `.actions` flex row is `nowrap` with `justify-content: flex-end` (`app.css:557`). So the Edit/Delete buttons don't fit in the tiny column and spill left over the OS cell. The fix is to give each table's action column a real width that fits its buttons, instead of 1%. The Saved servers table needs the fix. The Tunnels table (Start/Stop + Edit + Delete) has the same bug, and so do the Keys and Suggestions tables whenever the column next to the buttons has text, so all four get the same fix.\n\n1. In `patchgoblin/templates/index.html`, change the last `<col>` of each `.ssh-table` colgroup from `width:1%` to a fixed width that fits its buttons:\n   - Saved servers (line 164): Edit + Delete \u2192 roughly `width:8.5em`.\n   - Suggestions (line 172): Add \u2192 roughly `width:3.5em`.\n   - Keys (line 207): the copy button(s) rendered near `app.js:2322`. Measure them and size the column to fit.\n   - Tunnels (line 255): toggle + Edit + Delete \u2192 roughly `width:12em`.\n   Use `em` so the widths scale with the 12px button font. Check the actual widths in the browser and adjust.\n2. In `patchgoblin/static/app.css:556`, drop `width: 1%` from the `.ssh-table th:last-child, td:last-child` rule so the colgroup alone controls the width. Keep `max-width: none` and `text-align: right`. Change `overflow: visible` to `overflow: hidden`, so a column that is still too narrow clips its buttons instead of covering the next column. That way a future sizing mistake shows up clearly rather than as overlap.\n3. Optionally, shrink the Saved servers OS column (`width:16%`) a little so the Host column keeps its space at narrow widths. \"Linux/macOS\" and \"Auto-detect\" should still ellipsize cleanly thanks to the existing `text-overflow: ellipsis`.\n4. No JS changes are needed: `renderServerPanel` and `renderTunnelPanel` in `app.js` keep the same markup.\n\n**Verification**\n- Run the app (`/run`) and open SSH tools. Under Servers, add servers with OS set to Auto-detect, Linux/macOS and Windows. The OS text should end before the Edit button at both a wide and a narrow window width.\n- Check the Tunnels table in both running and stopped states (the toggle label may change width), plus the Keys and Suggestions tables. No buttons should overlap neighbouring cells or wrap onto two lines.\n- Check that the empty-state rows (`colspan`) still render correctly.\n- Run the existing test suite (e.g. `pytest`) as a sanity check. This is a CSS/HTML-only change, so no new tests.\n\n## Assumptions\n- I'm fixing all four SSH tables, not only the Servers table, because they share the same flawed 1%-width pattern.\n- I'm using fixed `em` widths in the colgroup rather than switching to `table-layout: auto`. Auto layout would undo the compact layout from task #55.\n- Clipping (`overflow: hidden`) is a better failure mode than overlap if a column ends up too narrow.\n\n## Risks\n- The tunnel toggle's label may differ in width between states (e.g. \"Start\" vs \"Stop\"). Size the column for the wider label.\n- At very narrow viewports, fixed action columns take space from the percentage and auto columns. Make sure the Host and Fingerprint columns still get usable space.\n- If anything else depends on the `width: 1%` rule in `app.css:556`, the colgroup values must now be correct for each table. Grep found only these four tables using `.ssh-table`.\n\n## Questions for you\nNone.\n\u00b7 Finished: 39s, 10 turns, $0.26\n",
+      "error": "",
+      "commit": "",
+      "changes": [],
+      "summary": "",
+      "checkin_pending": false,
+      "checkin": "",
+      "review_feedback": "",
+      "approval_note": "",
+      "approval_commit": "",
+      "history": [
+        {
+          "at": "2026-10-15T00:33:16+00:00",
+          "event": "Created"
+        },
+        {
+          "at": "2026-10-15T00:33:19+00:00",
+          "event": "AI planning started"
+        },
+        {
+          "at": "2026-10-15T00:34:01+00:00",
+          "event": "Title rewritten by AI (was: under SSH tools, the os field overlaps with edit button)"
+        },
+        {
+          "at": "2026-10-15T00:34:01+00:00",
+          "event": "AI plan ready"
+        },
+        {
+          "at": "2026-10-15T00:34:01+00:00",
+          "event": "Auto-queued"
         }
       ],
       "prev_status": "unplanned"

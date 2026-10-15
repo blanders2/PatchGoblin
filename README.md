@@ -412,6 +412,12 @@ you're on **Projects**, a badge on the **SSH tools** switch counts the tunnels s
   The host must already accept your login by key. For a password-only host, tick
   **Use password (opens terminal)**: a terminal window opens running `ssh`, you type the
   password there, and PatchGoblin never sees it.
+- **Network** draws who can log in where across your saved servers. It reads each server's
+  `authorized_keys` (and `authorized_keys2`) plus the `*.pub` files on every machine, and
+  matches key fingerprints. Dashed arrows are guesses from a key's comment (`user@host`).
+  It scans only when you open it or press **Refresh**, never in the background, and needs
+  working key login. On a Windows host whose account is an Administrator it reads
+  `C:\ProgramData\ssh\administrators_authorized_keys` instead of the user file (which sshd ignores).
 - **Tunnels** saves and runs `ssh -N -L` / `-R` port forwards, with a live status dot in
   the sidebar. Tunnels never start by themselves, and they stop when PatchGoblin quits.
 

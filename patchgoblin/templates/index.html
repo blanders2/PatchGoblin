@@ -68,6 +68,7 @@
         <li data-tool="servers" tabindex="0">Servers</li>
         <li data-tool="keys" tabindex="0">Keys</li>
         <li data-tool="install" tabindex="0">Install keys</li>
+        <li data-tool="network" tabindex="0">Network</li>
         <li data-tool="tunnels" tabindex="0">Tunnels</li>
       </ul>
       <ul id="ssh-tunnel-list" class="project-list ssh-tunnel-list"></ul>
@@ -246,6 +247,29 @@
           <p class="muted small">Without it, the host must already accept your key login. With it, a terminal window opens running ssh so you can type the password there; PatchGoblin never sees it.</p>
         </fieldset>
         <div class="actions"><button type="button" id="ssh-install-btn">Install keys</button></div>
+      </div>
+
+      <div id="ssh-network-panel" class="ssh-panel ssh-network" hidden>
+        <div class="net-bar">
+          <button type="button" id="ssh-network-refresh">↻ Refresh</button>
+          <span id="ssh-network-stamp" class="muted small"></span>
+          <span class="net-legend small muted">
+            <span><i class="lg lg-solid"></i>matched key</span>
+            <span><i class="lg lg-guess"></i>guessed</span>
+            <span><i class="lg lg-admin"></i>admin file</span>
+            <span><i class="lg lg-error"></i>unreachable</span>
+          </span>
+        </div>
+        <div class="net-stage">
+          <svg id="ssh-network-svg" viewBox="0 0 800 560" role="img" aria-label="Which machines can log in where"></svg>
+          <div id="ssh-network-busy" class="net-busy" hidden></div>
+        </div>
+        <div id="ssh-network-detail" class="net-detail small muted">Hover a machine or arrow, click for details.</div>
+        <table class="ssh-table">
+          <colgroup><col style="width:22%"><col style="width:22%"><col><col style="width:10%"></colgroup>
+          <thead><tr><th>From</th><th>To</th><th>Keys</th><th>Kind</th></tr></thead>
+          <tbody id="ssh-network-rows"></tbody>
+        </table>
       </div>
 
       <div id="ssh-tunnels-panel" class="ssh-panel" hidden>

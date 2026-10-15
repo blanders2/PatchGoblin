@@ -3403,6 +3403,139 @@ class SshToolsTests(AppTestCase):
         self.assertEqual(data["servers"], [self.SERVER])
         self.assertNotIn("box", [s["target"] for s in data["suggestions"]])
 
+    # ---- network map
+    @staticmethod
+    def _blob(seed: bytes) -> str:
+        return base64.b64encode(b"\x00\x00\x00\x0bssh-ed25519" + seed.ljust(32, b"x")).decode()
+
+    def _line(self, seed, comment="", options="", kind="ssh-ed25519"):
+        return f"{options} {kind} {self._blob(seed)} {comment}".strip()
+
+    def test_blob_fingerprint(self):
+        import hashlib
+        blob = self._blob(b"a")
+        want = "SHA256:" + base64.b64encode(hashlib.sha256(base64.b64decode(blob)).digest()).decode().rstrip("=")
+        self.assertEqual(sshtools.blob_fingerprint(blob), want)
+
+    def test_parse_authorized_keys(self):
+        text = "\r\n".join([
+            "# comment", "",
+            self._line(b"a", "alice@laptop", 'from="10.0.0.0/8,1.2.3.4",command="echo a b"'),
+            self._line(b"b", "", kind="sk-ssh-ed25519@openssh.com"),
+            self._line(b"c", "x y", kind="ecdsa-sha2-nistp256"),
+            "garbage line", "ssh-ed25519 !!notbase64", ""])
+        entries, bad = sshtools.parse_authorized_keys("\ufeff" + text)
+        self.assertEqual(bad, 2)
+        self.assertEqual([e["type"] for e in entries], ["ssh-ed25519", "sk-ssh-ed25519@openssh.com", "ecdsa-sha2-nistp256"])
+        self.assertEqual(entries[0]["options"], 'from="10.0.0.0/8,1.2.3.4",command="echo a b"')
+        self.assertEqual(entries[0]["comment"], "alice@laptop")
+        self.assertEqual(entries[2]["comment"], "x y")
+        self.assertNotIn(self._blob(b"a"), json.dumps(entries))
+
+    class _FakeHost:
+        os = "posix"
+
+        def __init__(self, files, error=None, pub=None):
+            self.files, self.error, self.pub, self.read = files, error, pub or {}, []
+
+        def join(self, *parts):
+            return "/".join(parts)
+
+        def home(self):
+            if self.error:
+                raise HostError(self.error)
+            return "/home/u"
+
+        def list_dir(self, path):
+            return list(self.pub)
+
+        def read_text(self, path):
+            self.read.append(path)
+            return self.pub[path.rsplit("/", 1)[1]] if path.endswith(".pub") else self.files.get(path)
+
+    def test_scan_server_posix_reads_no_private_keys(self):
+        pub = "ssh-ed25519 " + self._blob(b"o") + " me@srv"
+        host = self._FakeHost({"/home/u/.ssh/authorized_keys": self._line(b"a", "alice@laptop")},
+                              pub={"id_ed25519.pub": pub})
+        with mock.patch.object(sshtools, "_fingerprint", return_value="x"):
+            scan = sshtools.scan_server(host)
+        self.assertEqual(scan["error"], "")
+        self.assertEqual(sorted(host.read), ["/home/u/.ssh/authorized_keys", "/home/u/.ssh/authorized_keys2",
+                                             "/home/u/.ssh/id_ed25519.pub"])
+        self.assertEqual([f["kind"] for f in scan["files"]], ["user"])
+        self.assertEqual(scan["own_keys"][0]["fingerprint"], sshtools.blob_fingerprint(self._blob(b"o")))
+
+    def test_scan_server_windows_admin_and_errors(self):
+        host = SshToolsTests._FakeHost.__new__(SshToolsTests._FakeHost)
+        host.__class__ = type("W", (SshToolsTests._FakeHost, WindowsSSHHost), {})
+        host.files = {"C:\\ProgramData\\ssh\\administrators_authorized_keys": "\ufeff" + self._line(b"a", "a@b"),
+                      "/home/u/.ssh/authorized_keys": self._line(b"z")}
+        host.pub, host.read, host.error = {}, [], None
+        host._exec = lambda script, **kw: Result(0, "ADMIN\r\n", "")
+        scan = sshtools.scan_server(host)
+        kinds = {f["kind"]: f for f in scan["files"]}
+        self.assertTrue(scan["admin"])
+        self.assertIn("ignored by sshd", kinds["user"]["note"])
+        self.assertEqual(len(kinds["admin"]["entries"]), 1)
+        broken = self._FakeHost({}, error="Connection refused")
+        scan = sshtools.scan_server(broken)
+        self.assertIn("refused", scan["error"])
+
+    SRV = [{"id": "a", "name": "alpha", "target": "me@alpha.lan", "port": None, "os": "posix"},
+           {"id": "b", "name": "beta", "target": "me@beta.lan", "port": None, "os": "windows"}]
+
+    @staticmethod
+    def _scan(files=(), own=(), **kw):
+        return {"files": list(files), "own_keys": list(own), "admin": False, "os": "posix", "error": "", **kw}
+
+    def _file(self, kind, *seeds_comments):
+        return {"path": f"/{kind}", "kind": kind, "readable": True, "note": "",
+                "entries": sshtools.parse_authorized_keys("\n".join(self._line(s, c) for s, c in seeds_comments))[0]}
+
+    def test_build_network(self):
+        local = [{"text": "ssh-ed25519 " + self._blob(b"L") + " me", "fingerprint": ""}]
+        own_a = [{"name": "k", "type": "ssh-ed25519", "comment": "", "fingerprint": sshtools.blob_fingerprint(self._blob(b"A"))}]
+        scans = {
+            "a": self._scan([self._file("user", (b"L", "me"), (b"M", "x@laptop"), (b"N", "n@laptop"))], own_a),
+            "b": self._scan([self._file("user", (b"A", "a"), (b"L", "me"), (b"Q", "q@alpha.lan"), (b"E", "ext@elsewhere"))]),
+        }
+        net = sshtools.build_network(local, self.SRV, scans)
+        edges = {(e["from"], e["to"], e["guessed"]): e for e in net["edges"]}
+        self.assertIn(("local", "a", False), edges)
+        self.assertIn(("a", "b", False), edges)
+        self.assertEqual(len(edges[("local", "b", False)]["keys"]), 1)
+        self.assertIn(("a", "b", True), edges)  # q@alpha.lan matches the server
+        ext = [n for n in net["nodes"] if n["kind"] == "external"]
+        self.assertEqual(sorted(n["name"] for n in ext), ["ext@elsewhere", "n@laptop", "x@laptop"])
+        self.assertTrue(all(e["to"] in ("a", "b") for e in net["edges"]))
+
+    def test_build_network_merges_and_flags_errors(self):
+        own_a = [{"fingerprint": sshtools.blob_fingerprint(self._blob(b"A"))},
+                 {"fingerprint": sshtools.blob_fingerprint(self._blob(b"B"))}]
+        scans = {"a": self._scan(own=own_a),
+                 "b": {**self._scan([self._file("user", (b"A", ""), (b"B", ""))]), "error": ""}}
+        net = sshtools.build_network([], self.SRV, scans)
+        self.assertEqual(len(net["edges"]), 1)
+        self.assertEqual(len(net["edges"][0]["keys"]), 2)
+        net = sshtools.build_network([], self.SRV, {"a": self._scan(error="Permission denied"), "b": self._scan()})
+        node = {n["id"]: n for n in net["nodes"]}["a"]
+        self.assertEqual(node["error"], "Permission denied")
+
+    def test_network_route(self):
+        self.app.config["SETTINGS"].save_servers(sshtools.clean_servers([self.SERVER]))
+        scan = {"files": [], "own_keys": [], "admin": False, "os": "posix", "error": ""}
+        with mock.patch.object(sshtools, "scan_server", return_value=scan) as scanner, \
+                mock.patch.object(sshtools, "list_local_keys", return_value=[]):
+            self.assertEqual(self.client.post("/api/ssh/network").status_code, 403)
+            self.assertEqual(scanner.call_count, 0)
+            self.client.get("/api/ssh/servers")
+            self.assertEqual(scanner.call_count, 0)
+            data = self.client.post("/api/ssh/network", headers=H).get_json()
+        self.assertEqual(scanner.call_count, 1)
+        self.assertEqual([n["id"] for n in data["nodes"]], ["local", "box"])
+        self.assertEqual(data["edges"], [])
+        self.assertIn("generated", data)
+
     # ---- tunnels
     SPEC = {"id": "web", "name": "Web", "target": "me@box", "port": None, "direction": "local",
             "bind": "127.0.0.1", "listen_port": 8080, "dest_host": "localhost", "dest_port": 80}
