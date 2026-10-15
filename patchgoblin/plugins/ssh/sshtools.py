@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import os
 import re
 import shlex
+import socket
 import sys
 import threading
 import time
@@ -461,7 +463,41 @@ def validate_server(spec) -> dict:
     os_name = spec.get("os") or "auto"
     if os_name not in SERVER_OSES:
         raise ValueError("The server OS must be auto, posix or windows.")
-    return {"id": sid, "name": name or target, "target": target, "port": ssh_port, "os": os_name}
+    wol_address = str(spec.get("wol_address") or "").strip()
+    if wol_address:
+        try:
+            ipaddress.IPv4Address(wol_address)
+        except ValueError:
+            raise ValueError("The wake-up address must be an IPv4 address such as 192.168.1.255.") from None
+    return {"id": sid, "name": name or target, "target": target, "port": ssh_port, "os": os_name,
+            "mac": normalize_mac(spec.get("mac")), "wol_address": wol_address}
+
+
+# ---- wake-on-lan ---------------------------------------------------------------------
+
+def normalize_mac(value) -> str:
+    """A MAC address in lowercase colon form, "" when empty, or ValueError."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    digits = re.sub(r"[:.\-]", "", text).lower()
+    if not re.fullmatch(r"[0-9a-f]{12}", digits):
+        raise ValueError("A MAC address is 12 hex digits, e.g. aa:bb:cc:dd:ee:ff.")
+    return ":".join(digits[i:i + 2] for i in range(0, 12, 2))
+
+
+def magic_packet(mac: str) -> bytes:
+    return b"\xff" * 6 + bytes.fromhex(mac.replace(":", "")) * 16
+
+
+def send_wol(mac: str, address: str = "", port: int = 9) -> None:
+    """Broadcast a wake-on-LAN magic packet from this computer."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.sendto(magic_packet(mac), (address or "255.255.255.255", port))
+    except OSError as exc:
+        raise HostError(f"Could not send the wake-up packet: {exc}") from None
 
 
 def _server_key(target, port) -> tuple:

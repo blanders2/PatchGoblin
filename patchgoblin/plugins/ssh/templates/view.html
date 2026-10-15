@@ -6,7 +6,7 @@
     <fieldset>
       <legend>Saved servers</legend>
       <table class="ssh-table">
-        <colgroup><col style="width:20%"><col><col style="width:12%"><col style="width:14%"><col style="width:9.5em"></colgroup>
+        <colgroup><col style="width:20%"><col><col style="width:12%"><col style="width:14%"><col style="width:13em"></colgroup>
         <thead><tr><th>Name</th><th>Host</th><th>Port</th><th>OS</th><th></th></tr></thead>
         <tbody id="ssh-server-rows"></tbody>
       </table>
@@ -31,11 +31,14 @@
           <label>OS
             <select name="os"><option value="auto">Auto-detect</option><option value="posix">Linux/macOS</option><option value="windows">Windows</option></select>
           </label>
+          <label>MAC address (wake-on-LAN) <input class="w-host" name="mac" autocomplete="off" placeholder="aa:bb:cc:dd:ee:ff"></label>
+          <label>Wake-up address <input class="w-host" name="wol_address" autocomplete="off" placeholder="255.255.255.255"></label>
           <div class="actions">
             <button type="submit">Save server</button>
             <button type="button" class="ghost" id="ssh-server-cancel" hidden>Cancel edit</button>
           </div>
         </div>
+        <p class="muted small">The wake-up packet is sent from this computer, so the server must be on the same LAN, or the wake-up address must be its subnet's broadcast address (e.g. <code>192.168.1.255</code>). It does not cross routers or VPNs.</p>
         <div id="ssh-server-error" class="error" hidden></div>
       </fieldset>
     </form>

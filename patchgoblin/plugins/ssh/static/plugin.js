@@ -8,7 +8,7 @@ const SSH_TOOLS = { servers: "Servers", keys: "Keys", install: "Install keys", n
 const ssh = {
   active: false, // whether the plugin is the one shown
   tool: "keys", // the open tool, a SSH_TOOLS key
-  servers: [], // saved servers [{id, name, target, port, os}] from /api/ssh/servers
+  servers: [], // saved servers [{id, name, target, port, os, mac, wol_address}] from /api/ssh/servers
   suggestions: [], // [{target, port, source, ssh_os?}]: project hosts and ssh-config aliases not saved yet
   loaded: false,
   keys: [], // keys listed in the Keys panel
@@ -81,6 +81,8 @@ function renderServerPanel() {
   $("#ssh-server-rows").replaceChildren(...(ssh.servers.length ? ssh.servers.map(s => el("tr", {},
     el("td", {}, s.name), el("td", { class: "mono", title: s.target }, s.target), el("td", {}, s.port || ""), el("td", {}, OS_LABELS[s.os] || s.os),
     el("td", {}, el("div", { class: "actions" },
+      ...(s.mac ? [el("button", { class: "small ghost", type: "button", title: `Send a wake-on-LAN packet to ${s.mac}`,
+        onclick: () => wakeServer(s) }, "Wake")] : []),
       el("button", { class: "small ghost", type: "button", onclick: () => editServer(s) }, "Edit"),
       el("button", { class: "small ghost danger", type: "button", onclick: () => deleteServer(s) }, "Delete")))))
     : [el("tr", {}, el("td", { colspan: 5, class: "muted" }, "No saved servers yet."))]));
@@ -90,7 +92,14 @@ function renderServerPanel() {
     : [el("tr", {}, el("td", { colspan: 4, class: "muted" }, "No suggestions."))]));
 }
 
-const serverSpec = s => ({ id: s.id, name: s.name, target: s.target, port: s.port, os: s.os });
+const serverSpec = s => ({ id: s.id, name: s.name, target: s.target, port: s.port, os: s.os, mac: s.mac, wol_address: s.wol_address });
+
+async function wakeServer(s) {
+  try {
+    await api("POST", `/api/ssh/servers/${encodeURIComponent(s.id)}/wake`);
+    toast(`Wake-up packet sent to ${s.name}`);
+  } catch (e) { toast(e.message, true); }
+}
 
 async function saveServers(list) {
   const data = await api("PUT", "/api/ssh/servers", { servers: list });
@@ -112,7 +121,7 @@ function resetServerForm() {
 
 function editServer(s) {
   const f = $("#ssh-server-form");
-  for (const k of ["id", "name", "target", "port", "os"]) f.elements[k].value = s[k] ?? "";
+  for (const k of ["id", "name", "target", "port", "os", "mac", "wol_address"]) f.elements[k].value = s[k] ?? "";
   $("#ssh-server-form-title").textContent = `Edit ${s.name}`;
   $("#ssh-server-cancel").hidden = false;
   showError($("#ssh-server-error"), "");
@@ -140,7 +149,8 @@ async function submitServer(e) {
   e.preventDefault();
   const f = e.target;
   const spec = { id: f.elements.id.value, name: f.elements.name.value.trim(), target: f.elements.target.value.trim(),
-    port: f.elements.port.value ? Number(f.elements.port.value) : null, os: f.elements.os.value };
+    port: f.elements.port.value ? Number(f.elements.port.value) : null, os: f.elements.os.value,
+    mac: f.elements.mac.value.trim(), wol_address: f.elements.wol_address.value.trim() };
   const list = ssh.servers.map(serverSpec);
   const at = list.findIndex(s => s.id === spec.id);
   if (at >= 0) list[at] = spec; else list.push(spec);

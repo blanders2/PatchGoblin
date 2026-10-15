@@ -3479,10 +3479,40 @@ class SshToolsTests(AppTestCase):
         self.assertEqual([s["target"] for s in sshtools.server_suggestions(registry, saved)], ["alpha", "beta"])
         self.assertEqual(len(sshtools.server_suggestions(registry, [{"target": "ME@BOX", "port": 22}])), 4)
 
-    SERVER = {"id": "box", "name": "Box", "target": "me@box", "port": 2200, "os": "windows"}
+    SERVER = {"id": "box", "name": "Box", "target": "me@box", "port": 2200, "os": "windows",
+              "mac": "", "wol_address": ""}
+
+    def test_magic_packet(self):
+        packet = sshtools.magic_packet("aa:bb:cc:dd:ee:ff")
+        self.assertEqual(len(packet), 102)
+        self.assertEqual(packet[:6], b"\xff" * 6)
+        self.assertEqual(packet[6:], bytes.fromhex("aabbccddeeff") * 16)
+
+    def test_wake_route(self):
+        url = "/api/ssh/servers/box/wake"
+        mac = "aa:bb:cc:dd:ee:ff"
+        self.client.put("/api/ssh/servers", headers=H, json={"servers": [self.SERVER]})
+        with mock.patch.object(sshtools.socket, "socket") as sock_cls:
+            sock = sock_cls.return_value.__enter__.return_value
+            self.assertEqual(self.client.post("/api/ssh/servers/nope/wake", headers=H).status_code, 404)
+            self.assertEqual(self.client.post(url).status_code, 403)
+            self.assertEqual(self.client.post(url, headers=H).status_code, 400)  # no MAC saved
+            sock.sendto.assert_not_called()
+            self.client.put("/api/ssh/servers", headers=H, json={"servers": [{**self.SERVER, "mac": mac}]})
+            self.assertEqual(self.client.post(url, headers=H).status_code, 200)
+            sock.setsockopt.assert_called_with(sshtools.socket.SOL_SOCKET, sshtools.socket.SO_BROADCAST, 1)
+            sock.sendto.assert_called_with(sshtools.magic_packet(mac), ("255.255.255.255", 9))
+            self.client.put("/api/ssh/servers", headers=H,
+                            json={"servers": [{**self.SERVER, "mac": mac, "wol_address": "192.168.1.255"}]})
+            self.assertEqual(self.client.post(url, headers=H).status_code, 200)
+            sock.sendto.assert_called_with(sshtools.magic_packet(mac), ("192.168.1.255", 9))
 
     def test_validate_server_rules(self):
         self.assertEqual(sshtools.validate_server(self.SERVER), self.SERVER)
+        self.assertEqual(sshtools.validate_server({**self.SERVER, "mac": "AA-BB-CC-DD-EE-FF"})["mac"], "aa:bb:cc:dd:ee:ff")
+        for change in ({"mac": "zz"}, {"wol_address": "nope"}):
+            with self.assertRaises(ValueError, msg=change):
+                sshtools.validate_server({**self.SERVER, **change})
         out = sshtools.validate_server({"id": "a", "target": "me@box"})
         self.assertEqual((out["name"], out["os"], out["port"]), ("me@box", "auto", None))
         for change in ({"target": "-oProxyCommand=x"}, {"port": 99999}, {"os": "beos"}, {"name": "a\nb"}, {"id": "Bad Id"}):

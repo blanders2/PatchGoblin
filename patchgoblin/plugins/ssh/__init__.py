@@ -60,6 +60,20 @@ class SshPlugin(Plugin):
             servers = self.servers()
             return {"servers": servers, "suggestions": sshtools.server_suggestions(self.ctx.registry, servers)}
 
+        def saved_server(sid: str) -> dict:
+            for server in self.servers():
+                if server["id"] == sid:
+                    return server
+            abort(404)
+
+        @bp.post("/servers/<sid>/wake")
+        def wake_server(sid):
+            server = saved_server(sid)
+            if not server["mac"]:
+                raise ValueError("Add the server's MAC address to wake it.")
+            sshtools.send_wol(server["mac"], server["wol_address"])
+            return jsonify(ok=True, mac=server["mac"], address=server["wol_address"] or "255.255.255.255")
+
         @bp.get("/servers")
         def get_servers():
             return jsonify(servers_view())
