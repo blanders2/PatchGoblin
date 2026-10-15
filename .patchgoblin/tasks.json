@@ -3051,22 +3051,22 @@
     },
     {
       "id": 52,
-      "title": "add a reset option to the tray icon that restarts the tray process",
+      "title": "Add a Restart item to the tray menu that relaunches the tray process",
       "description": "",
-      "plan": "",
-      "status": "unplanned",
+      "plan": "Add a **Restart** item to the tray icon's right-click menu. It shuts the server down the same way Quit does, then starts a new detached copy of `tray.pyw` with the same interpreter, arguments and environment, and exits. The new copy is started with a `--restarted` flag. Normally a second launch sees the port in use and only opens the browser. With the flag, it first waits a few seconds for the old server to release the port, then starts as usual. If AI jobs are running (planning, a task run or a chat), Windows shows a Yes/No dialog first, because restarting interrupts them. The existing `Engine.reconcile` already marks interrupted tasks on startup (\"Planning was interrupted (PatchGoblin restarted)\" / \"Run interrupted\").\n\n## Steps\n\n1. **`tray.pyw` \u2013 parse the restart flag.** In `main()`, set `restarted = \"--restarted\" in sys.argv[1:]`. If it is set, call a new helper `wait_for_port_free(timeout=10.0)` before the `already_running()` check. The helper polls `already_running()` every 0.25 s until it returns False or the timeout passes. If the port is still busy after the timeout, fall through to the existing behaviour (open the browser and return), so there are never two servers.\n2. **`tray.pyw` \u2013 add `relaunch()`.** Build `[sys.executable, os.path.abspath(__file__), \"--restarted\"]` and start it with `subprocess.Popen` using `stdin/stdout/stderr=DEVNULL`, `close_fds=True` and `cwd=os.path.dirname(os.path.abspath(__file__))`. On Windows, also pass `creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW`. Elsewhere, pass `start_new_session=True`. This is the same split as `hosts._spawn`, but `tray.pyw` doesn't import `patchgoblin` at module level, so keep it local rather than reusing the private helper. The environment is inherited, so `PATCHGOBLIN_PORT` and `PATCHGOBLIN_DATA` carry over.\n3. **`tray.pyw` \u2013 add `confirm(message) -> bool`.** It sits next to `fail()`. On Windows it calls `ctypes.windll.user32.MessageBoxW(None, message, \"PatchGoblin\", 0x4 | 0x30 | 0x40000)` (Yes/No, warning icon, topmost) and returns `result == 6` (IDYES). On other platforms it returns True.\n4. **`tray.pyw` \u2013 add the menu item in `main()`.**\n   - Add a `restart = False` flag. Add `restart_app(icon, item)`, which:\n     - gets `engine = app.config[\"ENGINE\"]`;\n     - if `engine.jobs` is non-empty or any `c.job` in `engine.chats.values()` is set, asks `confirm(\"Restarting will interrupt running AI jobs. Restart anyway?\")` and returns if the answer is No;\n     - otherwise sets the flag (via `nonlocal`) and calls `icon.stop()`.\n   - Add the item `pystray.MenuItem(\"Restart\", restart_app)` between \"Open PatchGoblin\" and \"Quit\".\n5. **`tray.pyw` \u2013 shutdown path.** After `icon.run()` returns, log \"PatchGoblin restarting from the tray\" or the existing \"stopped\" message, depending on the flag. Run `server.close()` and `app.config[\"TUNNELS\"].stop_all()` as now. Then, if `restart`, call `relaunch()` and log any `OSError` with `logging.exception`. On error, also call `fail(f\"PatchGoblin could not restart: {e}\")` so the user knows the tray icon is gone.\n6. **`tray.pyw` docstring and `README.md` (the \"Tray icon\" paragraph, lines 25\u201330).** Mention the **Restart** menu item: it stops the server and starts it again, for example to pick up code or settings changes, and interrupts running AI jobs after asking first.\n\n## Verification\n\n- `uv run python -m py_compile tray.pyw`, then `uv run pytest` to make sure nothing else is affected (there are no tray tests, and `.pyw` isn't easily imported by pytest).\n- **Manual check on Windows:**\n  - Start with `.venv\\Scripts\\pythonw.exe tray.pyw`, right-click the icon and choose **Restart**. The icon should disappear and come back within a few seconds, `http://127.0.0.1:5050` should load again, and no console window should flash.\n  - `data\\patchgoblin.log` should show \"restarting from the tray\" followed by a new \"PatchGoblin running at \u2026\" line.\n  - Repeat while a task is planning. The Yes/No dialog should appear. **No** leaves everything running. **Yes** restarts, and the task shows \"Planning interrupted\".\n  - Repeat with an SSH tunnel open. It should be stopped and must not block the new process.\n  - Run with `PATCHGOBLIN_PORT=5051` and confirm the restarted process uses 5051.\n  - Restart several times in a row to check there's no port race.\n\n## Assumptions\n\n- The menu label is \"Restart\" rather than \"Reset\", because restarting is what it does. It goes between \"Open PatchGoblin\" and \"Quit\".\n- The new process doesn't open the browser after a restart. Any browser tab that's already open reconnects through its normal polling.\n- Restarting runs the same cleanup as Quit (`server.close()`, `TUNNELS.stop_all()`), so SSH tunnels are closed and not restored.\n- The confirmation dialog only appears when AI jobs are active, and only on Windows (the existing `fail()` is also Windows-only). Other platforms restart without asking.\n- The relaunch uses `sys.executable`, so a `pythonw.exe` launch stays console-free. `CREATE_NO_WINDOW` covers the case where it was launched with `python.exe` through `uv run`.\n\n## Risks\n\n- **Port handoff race:** the new process may start before the old one has fully released the socket. `--restarted` together with `wait_for_port_free` covers this. Don't drop the flag, or the new process will just open the browser and exit, leaving no server.\n- **Orphaned AI CLI processes:** child processes started by running jobs (via `hosts.py` `Popen`) may outlive the old process, just as they do on Quit. Their work is marked interrupted when the new process reconciles. Check whether stray `claude`/agent processes stay alive, and if they do, consider ending jobs explicitly before relaunching.\n- **Calling `MessageBoxW` from inside the pystray menu callback** blocks the tray's message loop while the dialog is open. That's acceptable, but don't call `icon.stop()` before the dialog returns.\n- **Daemon worker threads** are killed when the process exits. Any `TaskStore` write that's in progress at that moment carries the same risk Quit already has; restarting doesn't make it worse.\n- **Detached launch flags:** `DETACHED_PROCESS` and `CREATE_NO_WINDOW` are both console-related, and Windows can ignore or reject some combinations depending on the Python version. If `Popen` raises, fall back to `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP`.\n\n## Questions for you\n\nNone.",
+      "status": "review",
       "provider": "",
       "plan_model": "",
       "code_model": "",
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-15T00:00:46+00:00",
-      "updated_at": "2026-10-15T00:01:07+00:00",
-      "queued_at": null,
-      "started_at": null,
-      "finished_at": null,
-      "output": "",
-      "error": "Planning was interrupted (PatchGoblin restarted).",
+      "updated_at": "2026-10-15T00:55:04+00:00",
+      "queued_at": "2026-10-15T00:54:26+00:00",
+      "started_at": "2026-10-15T00:54:26+00:00",
+      "finished_at": "2026-10-15T00:55:04+00:00",
+      "output": "I added a **Restart** item to the tray menu, between \"Open PatchGoblin\" and \"Quit\". I only checked that `tray.pyw` compiles. Restart itself is untested, and I couldn't run the test suite.\n\nVerification:\n- `uv run python -m py_compile tray.pyw` passes.\n- `pytest` isn't installed in the venv (`uv run pytest` and `python -m pytest` both fail), so I ran no tests. There are no tray tests anyway.\n- I haven't run any of the manual Windows checks from the plan (icon coming back, the Yes/No dialog, port handoff, SSH tunnel, `PATCHGOBLIN_PORT`).\n\nWhat changed in `tray.pyw`:\n- **Restart handler:** It asks for confirmation first if AI jobs are running (`engine.jobs` non-empty or any chat with a job). Choosing No leaves everything running.\n- **Shutdown:** After the tray stops, it does the same cleanup as Quit (`server.close()`, `TUNNELS.stop_all()`). It then calls `relaunch()`, which starts a detached copy of `tray.pyw` with `--restarted`, using the same interpreter and environment.\n- **`--restarted` handling:** `main()` calls `wait_for_port_free()` first, which waits up to 10 seconds for the old server to release the port. If the port is still busy after that, it falls back to opening the browser.\n- **`confirm()`:** A Windows-only Yes/No dialog, like `fail()`. Other platforms skip the dialog and restart.\n- **Relaunch errors:** If the relaunch fails with `OSError`, it logs the error and calls `fail(...)`.\n- **Windows fallback:** If the first detached launch raises on Windows, `relaunch()` retries without `DETACHED_PROCESS`.\n\nI also added a sentence about Restart to the `tray.pyw` docstring and the README \"Tray icon\" paragraph.\n\nThe orphaned-AI-process risk from the plan is also unchecked: whether `claude` or agent child processes stay alive after a restart.",
+      "error": "",
       "commit": "",
       "changes": [],
       "summary": "",
@@ -3087,6 +3087,30 @@
         {
           "at": "2026-10-15T00:01:07+00:00",
           "event": "Planning interrupted"
+        },
+        {
+          "at": "2026-10-15T00:53:26+00:00",
+          "event": "AI planning started"
+        },
+        {
+          "at": "2026-10-15T00:54:26+00:00",
+          "event": "Title rewritten by AI (was: add a reset option to the tray icon that restarts the tray process)"
+        },
+        {
+          "at": "2026-10-15T00:54:26+00:00",
+          "event": "AI plan ready"
+        },
+        {
+          "at": "2026-10-15T00:54:26+00:00",
+          "event": "Auto-queued"
+        },
+        {
+          "at": "2026-10-15T00:54:26+00:00",
+          "event": "AI run started"
+        },
+        {
+          "at": "2026-10-15T00:55:04+00:00",
+          "event": "AI run finished; awaiting review"
         }
       ],
       "prev_status": "unplanned"
@@ -3297,13 +3321,13 @@
       "plan_trust": "",
       "paused": false,
       "created_at": "2026-10-15T00:33:16+00:00",
-      "updated_at": "2026-10-15T00:39:41+00:00",
+      "updated_at": "2026-10-15T00:39:42+00:00",
       "queued_at": "2026-10-15T00:34:01+00:00",
       "started_at": "2026-10-15T00:39:16+00:00",
       "finished_at": "2026-10-15T00:39:41+00:00",
       "output": "I changed the action column widths in all four SSH tables so the buttons no longer spill over the neighbouring columns. I haven't run it in a browser, and the test suite didn't run because pytest isn't installed here.\n\n- **Column widths (`templates/index.html`):** each action column's `width:1%` is now a fixed `em` width sized by estimate from the button text and padding.\n\n  | Table | Buttons | New width |\n  |---|---|---|\n  | Saved servers | Edit + Delete | `9.5em` |\n  | Suggestions | Add | `4.5em` |\n  | Keys | Copy | `5em` |\n  | Tunnels | \u25b6/\u25a0 toggle + Edit + Delete | `12em` |\n\n  The Tunnels toggle is a one-character icon, so its two states don't change the width. I also shrank the Saved servers OS column from 16% to 14% so Host keeps its space.\n- **Last-cell rule (`static/app.css`, now line 588):** I dropped `width: 1%` and changed `overflow: visible` to `overflow: hidden`. If a column is ever too narrow, the buttons now clip instead of covering the next column.\n- **Not touched:** the `colspan` empty-state rows and the network table, which has no action column. No JS changes.\n\nThe task plan's line numbers were out of date, so I located the lines by search. The widths still need checking in the running app at wide and narrow window sizes.",
       "error": "",
-      "commit": "",
+      "commit": "321bb50355f01adcaa8cf0e9d3b90ce163ab7d11",
       "changes": [],
       "summary": "",
       "checkin_pending": false,
@@ -3339,6 +3363,10 @@
         {
           "at": "2026-10-15T00:39:41+00:00",
           "event": "AI run finished; awaiting review"
+        },
+        {
+          "at": "2026-10-15T00:39:42+00:00",
+          "event": "Committed 321bb50355"
         }
       ],
       "prev_status": "unplanned"

@@ -25,7 +25,9 @@ Then open <http://127.0.0.1:5050>. Set `PATCHGOBLIN_PORT` to change the port and
 **Tray icon.** To keep PatchGoblin running in the background instead, run `uv run tray.pyw`
 (or point a shortcut at `.venv\Scripts\pythonw.exe tray.pyw`, for example in your Startup
 folder). It runs without a console window and adds a goblin icon to the system tray. Click it
-to open PatchGoblin in your browser, or right-click and choose **Quit** to stop the server. The
+to open PatchGoblin in your browser, or right-click and choose **Quit** to stop the server.
+**Restart** stops the server and starts it again, for example to pick up code or settings
+changes; it interrupts running AI jobs, after asking first. The
 log goes to `patchgoblin.log` in the data directory. If PatchGoblin is already running on the
 port, launching it again just opens the browser.
 

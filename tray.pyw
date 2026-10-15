@@ -1,7 +1,7 @@
 """Run PatchGoblin in the background with a system tray icon.
 
-Click the icon (or choose Open PatchGoblin) to open the app in your browser; Quit stops
-the server. Started as .pyw so Windows runs it without a console window; the server log
+Click the icon (or choose Open PatchGoblin) to open the app in your browser; Restart stops
+the server and starts it again (after asking, if AI jobs are running); Quit stops the server. Started as .pyw so Windows runs it without a console window; the server log
 goes to patchgoblin.log in the data directory. PATCHGOBLIN_PORT / PATCHGOBLIN_DATA apply
 as for run.py. If PatchGoblin is already running on the port, this just opens it.
 """
@@ -9,8 +9,10 @@ import logging
 import logging.handlers
 import os
 import socket
+import subprocess
 import sys
 import threading
+import time
 import webbrowser
 
 PORT = int(os.environ.get("PATCHGOBLIN_PORT", "5050"))
@@ -34,12 +36,48 @@ def already_running() -> bool:
         return s.connect_ex(("127.0.0.1", PORT)) == 0
 
 
+def wait_for_port_free(timeout: float = 10.0) -> None:
+    """After a restart, give the old server time to release the port."""
+    deadline = time.monotonic() + timeout
+    while already_running() and time.monotonic() < deadline:
+        time.sleep(0.25)
+
+
+def relaunch() -> None:
+    """Start a new detached copy of this script with the same interpreter and environment."""
+    script = os.path.abspath(__file__)
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                                   | subprocess.CREATE_NO_WINDOW)
+    else:
+        kwargs["start_new_session"] = True
+    cmd = [sys.executable, script, "--restarted"]
+    common = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                  close_fds=True, cwd=os.path.dirname(script))
+    try:
+        subprocess.Popen(cmd, **common, **kwargs)
+    except OSError:
+        if os.name != "nt":
+            raise
+        subprocess.Popen(cmd, **common, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+                         | subprocess.CREATE_NO_WINDOW)
+
+
 def fail(message: str) -> None:
     logging.error(message)
     if os.name == "nt":
         import ctypes
         ctypes.windll.user32.MessageBoxW(None, message, "PatchGoblin", 0x10)
     sys.exit(1)
+
+
+def confirm(message: str) -> bool:
+    """Yes/No warning dialog (Windows only; elsewhere assume yes)."""
+    if os.name != "nt":
+        return True
+    import ctypes
+    return ctypes.windll.user32.MessageBoxW(None, message, "PatchGoblin", 0x4 | 0x30 | 0x40000) == 6
 
 
 def make_icon_image():
@@ -57,6 +95,8 @@ def make_icon_image():
 
 def main() -> None:
     setup_logging()
+    if "--restarted" in sys.argv[1:]:
+        wait_for_port_free()
     if already_running():
         webbrowser.open(URL)
         return
@@ -80,14 +120,31 @@ def main() -> None:
     def quit_app(icon, item):
         icon.stop()
 
+    def restart_app(icon, item):
+        nonlocal restart
+        engine = app.config["ENGINE"]
+        busy = bool(engine.jobs) or any(c.job is not None for c in list(engine.chats.values()))
+        if busy and not confirm("Restarting will interrupt running AI jobs. Restart anyway?"):
+            return
+        restart = True
+        icon.stop()
+
+    restart = False
     icon = pystray.Icon("PatchGoblin", make_icon_image(), f"PatchGoblin ({URL})", menu=pystray.Menu(
         pystray.MenuItem("Open PatchGoblin", open_app, default=True),
+        pystray.MenuItem("Restart", restart_app),
         pystray.MenuItem("Quit", quit_app),
     ))
-    icon.run()  # blocks on the main thread until Quit
-    logging.info("PatchGoblin stopped from the tray")
+    icon.run()  # blocks on the main thread until Quit or Restart
+    logging.info("PatchGoblin restarting from the tray" if restart else "PatchGoblin stopped from the tray")
     server.close()
     app.config["TUNNELS"].stop_all()
+    if restart:
+        try:
+            relaunch()
+        except OSError as e:
+            logging.exception("PatchGoblin could not restart")
+            fail(f"PatchGoblin could not restart: {e}")
 
 
 if __name__ == "__main__":
