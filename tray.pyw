@@ -138,7 +138,7 @@ def main() -> None:
     icon.run()  # blocks on the main thread until Quit or Restart
     logging.info("PatchGoblin restarting from the tray" if restart else "PatchGoblin stopped from the tray")
     server.close()
-    app.config["TUNNELS"].stop_all()
+    app.config["PLUGINS"].stop_all()  # e.g. SSH tools stops its tunnels
     if restart:
         try:
             relaunch()

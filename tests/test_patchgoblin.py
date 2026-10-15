@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from patchgoblin import create_app  # noqa: E402
 from patchgoblin import hosts as hosts_mod  # noqa: E402
-from patchgoblin import sshtools  # noqa: E402
+from patchgoblin.plugins.ssh import sshtools  # noqa: E402
 from patchgoblin.engine import Job  # noqa: E402
 from patchgoblin.hosts import (HostError, LocalHost, Result, SSHHost, WindowsSSHHost, detect_ssh_os,  # noqa: E402
                                host_for, probe, terminal_command, vscode_command)
@@ -3229,7 +3229,7 @@ class SshToolsTests(AppTestCase):
         self.write(folder, "id_ed25519.pub", self.PUB + "\n")
         self.write(folder, "id_ed25519", "-----BEGIN OPENSSH PRIVATE KEY-----\n" + self.SECRET + "\n")
         self.write(folder, "junk.pub", "not a key\n")
-        with mock.patch("patchgoblin.sshtools.communicate",
+        with mock.patch("patchgoblin.plugins.ssh.sshtools.communicate",
                         return_value=Result(0, "256 SHA256:abc test@box (ED25519)\n", "")) as run:
             keys = sshtools.list_local_keys()
         self.assertEqual([k["name"] for k in keys], ["id_ed25519"])
@@ -3245,7 +3245,7 @@ class SshToolsTests(AppTestCase):
         host.join.side_effect = lambda *p: "/".join(p)
         host.list_dir.return_value = ["authorized_keys", "id_rsa", "id_rsa.pub", "orphan.pub"]
         host.read_text.side_effect = lambda path: self.PUB2 + "\n" if path.endswith("id_rsa.pub") else "garbage"
-        with mock.patch("patchgoblin.sshtools.communicate", return_value=Result(0, "3072 SHA256:zz c (RSA)\n", "")):
+        with mock.patch("patchgoblin.plugins.ssh.sshtools.communicate", return_value=Result(0, "3072 SHA256:zz c (RSA)\n", "")):
             keys = sshtools.list_remote_keys(host)
         self.assertEqual([c.args[0] for c in host.read_text.call_args_list],
                          ["/home/me/.ssh/id_rsa.pub", "/home/me/.ssh/orphan.pub"])
@@ -3262,13 +3262,13 @@ class SshToolsTests(AppTestCase):
             self.write(os.path.dirname(path), os.path.basename(path) + ".pub", self.PUB + "\n")
             return Result(0, "256 SHA256:new c (ED25519)\n", "")
 
-        with mock.patch("patchgoblin.sshtools.communicate", side_effect=fake) as run:
+        with mock.patch("patchgoblin.plugins.ssh.sshtools.communicate", side_effect=fake) as run:
             key = sshtools.generate_key("mykey", "rsa", "me", "pw")
         argv = run.call_args_list[0][0][0]
         self.assertEqual(argv, ["ssh-keygen", "-t", "rsa", "-b", "4096", "-f", os.path.join(folder, "mykey"),
                                 "-C", "me", "-N", "pw", "-q"])
         self.assertEqual(key["text"], self.PUB)
-        with mock.patch("patchgoblin.sshtools.communicate") as run:
+        with mock.patch("patchgoblin.plugins.ssh.sshtools.communicate") as run:
             for bad in ("mykey", "../x", "-o", "a b", ".hidden", ""):
                 with self.assertRaises(ValueError):
                     sshtools.generate_key(bad)
@@ -3283,7 +3283,7 @@ class SshToolsTests(AppTestCase):
         host.list_dir.return_value = []
         host.run.return_value = Result(0, "", "")
         host.read_text.return_value = self.PUB + "\n"
-        with mock.patch("patchgoblin.sshtools.communicate", return_value=Result(0, "256 SHA256:r c\n", "")):
+        with mock.patch("patchgoblin.plugins.ssh.sshtools.communicate", return_value=Result(0, "256 SHA256:r c\n", "")):
             key = sshtools.generate_key("k", "ed25519", host=host)
         self.assertEqual(host.run.call_args[0][0][:3], ["ssh-keygen", "-t", "ed25519"])
         self.assertEqual(host.run.call_args[1]["cwd"], "/home/me")
@@ -3330,7 +3330,7 @@ class SshToolsTests(AppTestCase):
                 sshtools.install_keys(SSHHost("me@box"), [self.PUB])
 
     def test_install_keys_interactive_argv_and_cap(self):
-        with mock.patch("patchgoblin.sshtools.run_in_terminal") as term:
+        with mock.patch("patchgoblin.plugins.ssh.sshtools.run_in_terminal") as term:
             sshtools.install_keys_interactive("me@box", 2222, [self.PUB])
             argv = term.call_args[0][0]
             self.assertEqual(argv[:5], ["ssh", "-t", "-p", "2222", "me@box"])
@@ -3396,7 +3396,7 @@ class SshToolsTests(AppTestCase):
         self.client.post("/api/projects", headers=H, json={"location": "ssh", "ssh_target": "me@box", "path": "/x"})
         data = self.client.get("/api/ssh/servers").get_json()
         self.assertEqual(data["servers"], [])
-        self.assertEqual(self.app.config["SETTINGS"].get()["ssh_servers"], [])
+        self.assertEqual(self.app.config["SETTINGS"].plugin_data("ssh").get("servers", []), [])
         self.assertEqual(self.client.put("/api/ssh/servers", json={"servers": []}).status_code, 403)
         self.assertEqual(self.client.put("/api/ssh/servers", headers=H, json={"servers": [{**self.SERVER, "os": "x"}]}).status_code, 400)
         data = self.client.put("/api/ssh/servers", headers=H, json={"servers": [self.SERVER]}).get_json()
@@ -3522,7 +3522,7 @@ class SshToolsTests(AppTestCase):
         self.assertEqual(node["error"], "Permission denied")
 
     def test_network_route(self):
-        self.app.config["SETTINGS"].save_servers(sshtools.clean_servers([self.SERVER]))
+        self.app.config["SETTINGS"].save_plugin_data("ssh", {"servers": sshtools.clean_servers([self.SERVER])})
         scan = {"files": [], "own_keys": [], "admin": False, "os": "posix", "error": ""}
         with mock.patch.object(sshtools, "scan_server", return_value=scan) as scanner, \
                 mock.patch.object(sshtools, "list_local_keys", return_value=[]):
@@ -3566,7 +3566,7 @@ class SshToolsTests(AppTestCase):
     def test_tunnel_exiting_immediately_raises_with_stderr(self):
         manager = sshtools.TunnelManager()
         code = "import sys; sys.stderr.write('bind: Address already in use\\n'); sys.exit(255)"
-        with mock.patch("patchgoblin.sshtools.tunnel_argv", return_value=[sys.executable, "-c", code]):
+        with mock.patch("patchgoblin.plugins.ssh.sshtools.tunnel_argv", return_value=[sys.executable, "-c", code]):
             with self.assertRaisesRegex(HostError, "Address already in use"):
                 manager.start(self.SPEC)
         self.assertEqual(manager.running_count(), 0)
@@ -3575,7 +3575,7 @@ class SshToolsTests(AppTestCase):
     def test_tunnel_start_stop_all_and_count(self):
         manager = sshtools.TunnelManager()
         code = "import time; time.sleep(60)"
-        with mock.patch("patchgoblin.sshtools.tunnel_argv", return_value=[sys.executable, "-c", code]), \
+        with mock.patch("patchgoblin.plugins.ssh.sshtools.tunnel_argv", return_value=[sys.executable, "-c", code]), \
                 mock.patch.object(sshtools, "STARTUP_WAIT", 0.3):
             manager.start(self.SPEC)
             self.addCleanup(manager.stop_all)
@@ -3592,7 +3592,7 @@ class SshToolsTests(AppTestCase):
         self.client.put("/api/ssh/tunnels", headers=H, json={"tunnels": [self.SPEC]})
         res = self.client.put("/api/settings", headers=H, json={"git": {"gitignore": "x"}})
         self.assertEqual(res.status_code, 200)
-        self.assertEqual([t["id"] for t in self.app.config["SETTINGS"].get()["ssh_tunnels"]], ["web"])
+        self.assertEqual([t["id"] for t in self.app.config["SETTINGS"].plugin_data("ssh")["tunnels"]], ["web"])
 
     def test_routes_require_header_and_list_tunnels(self):
         self.assertEqual(self.client.post("/api/ssh/install", json={}).status_code, 403)
@@ -3607,9 +3607,9 @@ class SshToolsTests(AppTestCase):
 
     def test_running_tunnel_cannot_be_changed(self):
         self.client.put("/api/ssh/tunnels", headers=H, json={"tunnels": [self.SPEC]})
-        manager = self.app.config["TUNNELS"]
+        manager = self.app.config["PLUGINS"].plugin("ssh").tunnels
         code = "import time; time.sleep(60)"
-        with mock.patch("patchgoblin.sshtools.tunnel_argv", return_value=[sys.executable, "-c", code]), \
+        with mock.patch("patchgoblin.plugins.ssh.sshtools.tunnel_argv", return_value=[sys.executable, "-c", code]), \
                 mock.patch.object(sshtools, "STARTUP_WAIT", 0.3):
             self.addCleanup(manager.stop_all)
             res = self.client.post("/api/ssh/tunnels/web/start", headers=H)
@@ -3625,7 +3625,7 @@ class SshToolsTests(AppTestCase):
                 raise sshtools.AuthError("SSH login to bad@box failed: Permission denied")
             return {"added": keys, "skipped": [], "note": ""}
 
-        with mock.patch("patchgoblin.sshtools.install_keys", side_effect=fake_install):
+        with mock.patch("patchgoblin.plugins.ssh.sshtools.install_keys", side_effect=fake_install):
             res = self.client.post("/api/ssh/install", headers=H, json={
                 "keys": [self.PUB], "targets": [{"target": "bad@box", "windows": False}, {"target": "-x"},
                                                 {"target": "good@box", "port": 22}]})
@@ -3641,11 +3641,152 @@ class SshToolsTests(AppTestCase):
         folder = self.fake_home()
         self.write(folder, "id_ed25519.pub", self.PUB + "\n")
         self.write(folder, "id_ed25519", "-----BEGIN OPENSSH PRIVATE KEY-----\n" + self.SECRET + "\n")
-        with mock.patch("patchgoblin.sshtools.communicate", return_value=Result(0, "256 SHA256:abc c\n", "")):
+        with mock.patch("patchgoblin.plugins.ssh.sshtools.communicate", return_value=Result(0, "256 SHA256:abc c\n", "")):
             res = self.client.get("/api/ssh/keys?source=local")
         self.assertEqual(res.status_code, 200)
         self.assertNotIn(self.SECRET, res.get_data(as_text=True))
         self.assertNotIn("PRIVATE KEY", res.get_data(as_text=True))
+
+
+DEMO_PLUGIN = '''
+from flask import jsonify
+from patchgoblin.pluginkit import Plugin
+from .helper import GREETING
+
+
+class Demo(Plugin):
+    id = "demo"
+    name = "Demo tool"
+    description = "A test plugin."
+    order = 5
+    events = []
+
+    def routes(self, bp):
+        @bp.get("/hello")
+        def hello():
+            return jsonify(greeting=GREETING, saved=self.ctx.load())
+
+        @bp.put("/hello")
+        def save():
+            return jsonify(saved=self.ctx.save({"n": 1}))
+
+    def start(self):
+        Demo.events.append("start")
+
+    def stop(self):
+        Demo.events.append("stop")
+
+
+PLUGIN = Demo
+'''
+
+
+class PluginTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data = os.path.join(self.tmp.name, "data")
+
+    def app(self):
+        app = create_app(self.data, start_engine=False)
+        self.addCleanup(app.config["PLUGINS"].stop_all)
+        return app, app.config["PLUGINS"], app.test_client()
+
+    def drop_plugin(self, name, init, files=None):
+        folder = os.path.join(self.data, "plugins", name)
+        for rel, text in {"__init__.py": init, **(files or {})}.items():
+            write_file(os.path.join(folder, rel), text)
+        return folder
+
+    def test_ssh_is_a_builtin_plugin(self):
+        _, _, client = self.app()
+        data = client.get("/api/plugins").get_json()
+        ssh = next(p for p in data["plugins"] if p["id"] == "ssh")
+        self.assertEqual((ssh["builtin"], ssh["enabled"], ssh["error"]), (True, True, ""))
+        self.assertEqual(data["user_dir"], os.path.join(self.data, "plugins"))
+        page = client.get("/").get_data(as_text=True)
+        self.assertIn('data-view="ssh"', page)
+        self.assertIn('id="ssh-tools-view"', page)
+        self.assertIn("/plugins/ssh/plugin.js?v=", page)
+        with client.get("/plugins/ssh/plugin.css") as res:
+            self.assertEqual(res.status_code, 200)
+
+    def test_disable_and_enable(self):
+        app, plugins, client = self.app()
+        self.assertEqual(client.put("/api/plugins/ssh", json={"enabled": False}).status_code, 403)
+        self.assertEqual(client.put("/api/plugins/ssh", headers=H, json={"enabled": "no"}).status_code, 400)
+        self.assertEqual(client.put("/api/plugins/nope", headers=H, json={"enabled": False}).status_code, 404)
+        with mock.patch.object(plugins.plugin("ssh").tunnels, "stop_all") as stop_all:
+            res = client.put("/api/plugins/ssh", headers=H, json={"enabled": False})
+        stop_all.assert_called_once()
+        self.assertFalse(next(p for p in res.get_json()["plugins"] if p["id"] == "ssh")["enabled"])
+        self.assertEqual(client.get("/api/ssh/servers").status_code, 404)
+        self.assertEqual(client.get("/plugins/ssh/plugin.js").status_code, 404)
+        self.assertNotIn('data-view="ssh"', client.get("/").get_data(as_text=True))
+        # The choice is saved: a restart keeps it off.
+        _, _, client2 = self.app()
+        self.assertEqual(client2.get("/api/ssh/servers").status_code, 404)
+        client.put("/api/plugins/ssh", headers=H, json={"enabled": True})
+        self.assertEqual(client.get("/api/ssh/servers").status_code, 200)
+        self.assertIn('data-view="ssh"', client.get("/").get_data(as_text=True))
+
+    def test_drop_in_plugin(self):
+        self.drop_plugin("demo", DEMO_PLUGIN, {
+            "helper.py": 'GREETING = "hi"\n',
+            "templates/sidebar.html": '<p id="demo-side">side</p>',
+            "templates/view.html": '<p id="demo-view">{{ plugins|length }}</p>',
+            "static/plugin.js": 'PG.register({ id: "demo" });',
+        })
+        app, plugins, client = self.app()
+        demo = plugins.plugin("demo")
+        self.assertEqual(type(demo).events, ["start"])
+        self.assertEqual(client.get("/api/demo/hello").get_json(), {"greeting": "hi", "saved": {}})
+        client.put("/api/demo/hello", headers=H)
+        self.assertEqual(client.get("/api/demo/hello").get_json()["saved"], {"n": 1})
+        page = client.get("/").get_data(as_text=True)
+        self.assertIn('id="demo-side"', page)
+        self.assertIn('id="demo-view"', page)
+        self.assertIn("/plugins/demo/plugin.js?v=", page)
+        self.assertNotIn("/plugins/demo/plugin.css", page)
+        self.assertLess(page.index('data-view="demo"'), page.index('data-view="ssh"'))  # lower order comes first
+        with client.get("/plugins/demo/plugin.js") as res:
+            self.assertIn("PG.register", res.get_data(as_text=True))
+        self.assertEqual(client.get("/plugins/demo/../__init__.py").status_code, 404)
+        row = next(p for p in client.get("/api/plugins").get_json()["plugins"] if p["id"] == "demo")
+        self.assertEqual((row["builtin"], row["enabled"], row["name"]), (False, True, "Demo tool"))
+        # Plugin data is the plugin's own: the settings API neither shows nor takes it.
+        self.assertNotIn("plugin_data", client.get("/api/settings").get_json())
+        plugins.stop_all()
+        self.assertEqual(type(demo).events, ["start", "stop"])
+
+    def test_broken_plugins_are_listed_not_fatal(self):
+        self.drop_plugin("crash", "raise RuntimeError('boom')\n")
+        self.drop_plugin("noclass", "X = 1\n")
+        self.drop_plugin("clash", DEMO_PLUGIN.replace('id = "demo"', 'id = "ssh"'), {"helper.py": "GREETING = ''\n"})
+        self.drop_plugin("reserved", DEMO_PLUGIN.replace('id = "demo"', 'id = "projects"'), {"helper.py": "GREETING = ''\n"})
+        _, plugins, client = self.app()
+        rows = {p["path"]: p for p in client.get("/api/plugins").get_json()["plugins"]}
+        errors = {os.path.basename(path): row["error"] for path, row in rows.items() if not row["builtin"]}
+        self.assertIn("boom", errors["crash"])
+        self.assertIn("PLUGIN", errors["noclass"])
+        self.assertIn("already uses", errors["clash"])
+        self.assertIn("Invalid plugin id", errors["reserved"])
+        self.assertTrue(plugins.enabled("ssh"))
+        self.assertEqual(client.get("/api/ssh/servers").status_code, 200)
+        self.assertEqual(client.get("/api/projects").status_code, 200)
+
+    def test_legacy_ssh_settings_move_into_the_plugin(self):
+        os.makedirs(self.data)
+        server = {"id": "box", "name": "Box", "target": "me@box", "port": None, "os": "auto"}
+        with open(os.path.join(self.data, "settings.json"), "w", encoding="utf-8") as fh:
+            json.dump({"ssh_servers": [server], "ssh_tunnels": [], "timeouts": {"run": 5}}, fh)
+        app, _, client = self.app()
+        self.assertEqual(client.get("/api/ssh/servers").get_json()["servers"][0]["target"], "me@box")
+        with open(os.path.join(self.data, "settings.json"), encoding="utf-8") as fh:
+            saved = json.load(fh)
+        self.assertNotIn("ssh_servers", saved)
+        self.assertEqual(saved["plugin_data"]["ssh"]["servers"][0]["id"], "box")
+        self.assertEqual(saved["timeouts"], {"run": 5})
 
 
 if __name__ == "__main__":

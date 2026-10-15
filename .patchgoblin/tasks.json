@@ -3067,7 +3067,7 @@
       "finished_at": "2026-10-15T00:55:04+00:00",
       "output": "I added a **Restart** item to the tray menu, between \"Open PatchGoblin\" and \"Quit\". I only checked that `tray.pyw` compiles. Restart itself is untested, and I couldn't run the test suite.\n\nVerification:\n- `uv run python -m py_compile tray.pyw` passes.\n- `pytest` isn't installed in the venv (`uv run pytest` and `python -m pytest` both fail), so I ran no tests. There are no tray tests anyway.\n- I haven't run any of the manual Windows checks from the plan (icon coming back, the Yes/No dialog, port handoff, SSH tunnel, `PATCHGOBLIN_PORT`).\n\nWhat changed in `tray.pyw`:\n- **Restart handler:** It asks for confirmation first if AI jobs are running (`engine.jobs` non-empty or any chat with a job). Choosing No leaves everything running.\n- **Shutdown:** After the tray stops, it does the same cleanup as Quit (`server.close()`, `TUNNELS.stop_all()`). It then calls `relaunch()`, which starts a detached copy of `tray.pyw` with `--restarted`, using the same interpreter and environment.\n- **`--restarted` handling:** `main()` calls `wait_for_port_free()` first, which waits up to 10 seconds for the old server to release the port. If the port is still busy after that, it falls back to opening the browser.\n- **`confirm()`:** A Windows-only Yes/No dialog, like `fail()`. Other platforms skip the dialog and restart.\n- **Relaunch errors:** If the relaunch fails with `OSError`, it logs the error and calls `fail(...)`.\n- **Windows fallback:** If the first detached launch raises on Windows, `relaunch()` retries without `DETACHED_PROCESS`.\n\nI also added a sentence about Restart to the `tray.pyw` docstring and the README \"Tray icon\" paragraph.\n\nThe orphaned-AI-process risk from the plan is also unchecked: whether `claude` or agent child processes stay alive after a restart.",
       "error": "",
-      "commit": "",
+      "commit": "17199748a8a5cc157b8a04645481eb40cd49fc44",
       "changes": [],
       "summary": "",
       "checkin_pending": false,
@@ -3111,6 +3111,10 @@
         {
           "at": "2026-10-15T00:55:04+00:00",
           "event": "AI run finished; awaiting review"
+        },
+        {
+          "at": "2026-10-15T00:55:04+00:00",
+          "event": "Committed 17199748a8"
         }
       ],
       "prev_status": "unplanned"

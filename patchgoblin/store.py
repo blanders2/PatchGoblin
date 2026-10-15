@@ -90,8 +90,8 @@ DEFAULT_SETTINGS = {
             "plan_must_not_edit": True,  # fail a plan (or chat) that changed files
         },
     },
-    "ssh_servers": [],  # saved SSH servers (see sshtools.clean_servers)
-    "ssh_tunnels": [],  # saved SSH port forwards (see sshtools.clean_tunnels)
+    "plugins": {"disabled": []},  # plugin ids switched off in the Plugins dialog
+    "plugin_data": {},  # plugin id -> that plugin's saved data (see pluginkit.PluginContext)
     "endpoints": [{
         "id": "openai",
         "name": "OpenAI",
@@ -347,10 +347,6 @@ class Settings:
             if isinstance(cfg, dict):
                 models = cfg.get("models") if isinstance(cfg.get("models"), list) else []
                 cfg["models"] = [m for m in models if isinstance(m, str) and m.strip()]
-        if not isinstance(out.get("ssh_tunnels"), list):
-            out["ssh_tunnels"] = []
-        if not isinstance(out.get("ssh_servers"), list):
-            out["ssh_servers"] = []
         if not isinstance(out.get("provider_renames"), dict):
             out["provider_renames"] = {}
         return out
@@ -380,21 +376,46 @@ class Settings:
             self.file.save(data)
             return new
 
-    def save_servers(self, servers: list[dict]) -> list[dict]:
-        """Replace the saved SSH servers."""
-        with self.file.lock:
-            data = self.file.load()
-            data["ssh_servers"] = servers
-            self.file.save(data)
-        return servers
+    def plugin_data(self, pid: str) -> dict:
+        """A plugin's saved data (see pluginkit.PluginContext.load)."""
+        value = (self.file.load().get("plugin_data") or {}).get(pid)
+        return value if isinstance(value, dict) else {}
 
-    def save_tunnels(self, tunnels: list[dict]) -> list[dict]:
-        """Replace the saved SSH tunnels."""
+    def save_plugin_data(self, pid: str, value: dict) -> dict:
+        """Replace a plugin's saved data."""
         with self.file.lock:
             data = self.file.load()
-            data["ssh_tunnels"] = tunnels
+            if not isinstance(data.get("plugin_data"), dict):
+                data["plugin_data"] = {}
+            data["plugin_data"][pid] = value
             self.file.save(data)
-        return tunnels
+        return value
+
+    def adopt_legacy(self, pid: str, keys: dict[str, str]) -> None:
+        """Move top-level settings saved before plugins existed into a plugin's data (once).
+        ``keys`` maps each old top-level key to its key in the plugin's data."""
+        with self.file.lock:
+            data = self.file.load()
+            legacy = {new: data.pop(old) for old, new in keys.items() if old in data}
+            if not legacy:
+                return
+            if not isinstance(data.get("plugin_data"), dict):
+                data["plugin_data"] = {}
+            current = data["plugin_data"].get(pid)
+            data["plugin_data"][pid] = {**legacy, **(current if isinstance(current, dict) else {})}
+            self.file.save(data)
+
+    def disabled_plugins(self) -> set[str]:
+        values = (self.file.load().get("plugins") or {}).get("disabled")
+        return {v for v in values if isinstance(v, str)} if isinstance(values, list) else set()
+
+    def set_plugin_enabled(self, pid: str, on: bool) -> None:
+        with self.file.lock:
+            data = self.file.load()
+            disabled = self.disabled_plugins() - {pid} if on else self.disabled_plugins() | {pid}
+            plugins = data["plugins"] if isinstance(data.get("plugins"), dict) else {}
+            data["plugins"] = {**plugins, "disabled": sorted(disabled)}
+            self.file.save(data)
 
     def save_endpoints(self, endpoints: list[dict]) -> dict:
         """Replace the whole endpoint list (``_merge`` would replace lists anyway)."""

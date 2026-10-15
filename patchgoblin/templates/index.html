@@ -16,6 +16,8 @@
   </script>
   <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  {% for p in plugins %}{% if p.css %}<link rel="stylesheet" href="{{ p.css }}">
+  {% endif %}{% endfor %}
 </head>
 <body data-models="{{ models|tojson|forceescape }}" data-providers="{{ providers|tojson|forceescape }}">
 {% macro secrets_warning(ack_name, id=none, hidden=false) %}
@@ -50,37 +52,48 @@
 </header>
 
 <div class="layout">
-  <aside class="sidebar">
-    <div class="sidebar-modes" role="tablist" aria-label="Sidebar">
-      <button type="button" role="tab" id="mode-projects-btn" aria-selected="true">Projects</button>
-      <button type="button" role="tab" id="mode-ssh-btn" aria-selected="false">SSH tools
-        <span id="ssh-running-badge" class="count" hidden title="Running SSH tunnels"></span></button>
+  {# The activity bar switches the sidebar and the main area between Projects and each enabled plugin.
+     Clicking the selected icon again collapses the sidebar. #}
+  <nav class="activity-bar" aria-label="Tools">
+    <div class="activity-tabs" role="tablist" aria-orientation="vertical" aria-label="Sidebar">
+      <button type="button" role="tab" class="activity-btn" data-view="projects" title="Projects" aria-label="Projects" aria-selected="true" aria-controls="pane-projects">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      </button>
+      {% for p in plugins %}
+      <button type="button" role="tab" class="activity-btn" data-view="{{ p.id }}" title="{{ p.name }}" aria-label="{{ p.name }}" aria-selected="false" aria-controls="pane-{{ p.id }}" tabindex="-1">
+        {% if p.icon %}<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{{ p.icon|safe }}</svg>
+        {% else %}<span class="activity-letter" aria-hidden="true">{{ p.name[:1]|upper }}</span>{% endif %}
+        <span class="activity-badge" hidden></span>
+      </button>
+      {% endfor %}
     </div>
-    <div id="sidebar-projects">
+    <div class="activity-foot">
+      <button type="button" class="activity-btn" id="plugins-btn" title="Plugins" aria-label="Plugins">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6v3a2 2 0 1 0 4 0V3h0a2 2 0 0 1 2 2v4h-3a2 2 0 1 0 0 4h3v6a2 2 0 0 1-2 2h-4v-3a2 2 0 1 0-4 0v3H5a2 2 0 0 1-2-2v-4h3a2 2 0 1 0 0-4H3V5a2 2 0 0 1 2-2z"/></svg>
+      </button>
+      <button type="button" class="activity-btn" id="settings-btn" title="Global settings" aria-label="Global settings">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+    </div>
+  </nav>
+
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-pane" id="pane-projects" data-view="projects" role="tabpanel">
       <div class="sidebar-head">
         <h2>Projects</h2>
         <button class="small" id="add-project-btn">+ Add</button>
       </div>
       <ul id="project-list" class="project-list"></ul>
     </div>
-    <div id="sidebar-ssh" hidden>
-      <ul id="ssh-nav" class="project-list ssh-nav">
-        <li data-tool="servers" tabindex="0">Servers</li>
-        <li data-tool="keys" tabindex="0">Keys</li>
-        <li data-tool="install" tabindex="0">Install keys</li>
-        <li data-tool="network" tabindex="0">Network</li>
-        <li data-tool="tunnels" tabindex="0">Tunnels</li>
-      </ul>
-      <ul id="ssh-tunnel-list" class="project-list ssh-tunnel-list"></ul>
+    {% for p in plugins %}
+    <div class="sidebar-pane" id="pane-{{ p.id }}" data-view="{{ p.id }}" role="tabpanel" hidden>
+      <div class="sidebar-head"><h2>{{ p.name }}</h2></div>
+      {% if p.sidebar %}{% include p.sidebar %}{% endif %}
     </div>
-    <div class="sidebar-foot">
-      <button class="ghost icon-btn" id="settings-btn" title="Global settings" aria-label="Global settings">
-        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="3"/>
-          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-        </svg>
-      </button>
-    </div>
+    {% endfor %}
   </aside>
 
   <main id="main">
@@ -153,167 +166,6 @@
         <div class="column" id="col-{{ col }}" data-col="{{ col }}" role="tabpanel" aria-labelledby="tab-{{ col }}"><div class="cards"></div></div>
         {% endfor %}
       </div>
-    </section>
-
-    <section id="ssh-tools-view" hidden>
-      <h1 id="ssh-title">Keys</h1>
-
-      <div id="ssh-servers-panel" class="ssh-panel" hidden>
-        <fieldset>
-          <legend>Saved servers</legend>
-          <table class="ssh-table">
-            <colgroup><col style="width:20%"><col><col style="width:12%"><col style="width:14%"><col style="width:9.5em"></colgroup>
-            <thead><tr><th>Name</th><th>Host</th><th>Port</th><th>OS</th><th></th></tr></thead>
-            <tbody id="ssh-server-rows"></tbody>
-          </table>
-        </fieldset>
-        <fieldset>
-          <legend>Suggestions</legend>
-          <table class="ssh-table">
-            <colgroup><col><col style="width:12%"><col style="width:30%"><col style="width:4.5em"></colgroup>
-            <thead><tr><th>Host</th><th>Port</th><th>From</th><th></th></tr></thead>
-            <tbody id="ssh-suggestion-rows"></tbody>
-          </table>
-          <p class="muted small">Hosts used by your projects and aliases from <code>~/.ssh/config</code>. Nothing is saved until you press Save on the form below.</p>
-        </fieldset>
-        <form id="ssh-server-form">
-          <fieldset>
-            <legend id="ssh-server-form-title">Add a server</legend>
-            <input type="hidden" name="id">
-            <div class="row">
-              <label>Name <input class="w-host" name="name" autocomplete="off" placeholder="defaults to the host"></label>
-              <label>SSH host <input class="w-host" name="target" required autocomplete="off" placeholder="user@host or alias"></label>
-              <label>SSH port <input class="w-port" name="port" type="number" min="1" max="65535" placeholder="22"></label>
-              <label>OS
-                <select name="os"><option value="auto">Auto-detect</option><option value="posix">Linux/macOS</option><option value="windows">Windows</option></select>
-              </label>
-              <div class="actions">
-                <button type="submit">Save server</button>
-                <button type="button" class="ghost" id="ssh-server-cancel" hidden>Cancel edit</button>
-              </div>
-            </div>
-            <div id="ssh-server-error" class="error" hidden></div>
-          </fieldset>
-        </form>
-      </div>
-
-      <div id="ssh-keys-panel" class="ssh-panel" hidden>
-        <fieldset>
-          <legend>Public keys</legend>
-          <div class="row">
-            <label>Keys on <select id="ssh-key-source"><option value="local">This computer</option></select></label>
-            <button type="button" class="ghost small" id="ssh-keys-refresh">↻ Refresh</button>
-          </div>
-          <table class="ssh-table">
-            <colgroup><col style="width:9%"><col style="width:20%"><col><col style="width:22%"><col style="width:5em"></colgroup>
-            <thead><tr><th>Type</th><th>Name</th><th>Fingerprint</th><th>Comment</th><th></th></tr></thead>
-            <tbody id="ssh-key-rows"></tbody>
-          </table>
-          <p class="muted small">Only public keys are listed or copied. Private keys are never read.</p>
-        </fieldset>
-        <form id="ssh-generate-form">
-          <fieldset>
-            <legend>Generate a key</legend>
-            <div class="row">
-              <label>Name <input class="w-name" name="name" value="id_ed25519" required autocomplete="off"></label>
-              <label>Type
-                <select name="type"><option value="ed25519">ed25519</option><option value="rsa">rsa (4096)</option><option value="ecdsa">ecdsa</option></select>
-              </label>
-              <label>Comment <input class="w-name" name="comment" autocomplete="off"></label>
-              <label>Passphrase <input name="passphrase" type="password" autocomplete="new-password"></label>
-              <label>Create on <select name="source" id="ssh-gen-source"><option value="local">This computer</option></select></label>
-              <div class="actions"><button type="submit">Generate</button></div>
-            </div>
-            <p class="muted small">The passphrase is passed to ssh-keygen on its command line, so it is briefly visible in the process list. Leave it empty for no passphrase.</p>
-          </fieldset>
-        </form>
-      </div>
-
-      <div id="ssh-install-panel" class="ssh-panel" hidden>
-        <fieldset>
-          <legend>1. Choose public keys</legend>
-          <label class="inline">Take keys from <select id="ssh-install-source"><option value="local">This computer</option></select></label>
-          <div id="ssh-install-keys" class="ssh-checks"></div>
-          <p class="muted small"><strong>Only public keys are copied.</strong> Nothing from a private key file is read or sent.</p>
-        </fieldset>
-        <fieldset>
-          <legend>2. Destinations</legend>
-          <datalist id="ssh-targets"></datalist>
-          <div id="ssh-install-dests"></div>
-          <div class="row">
-            <button type="button" class="ghost small" id="ssh-add-dest">+ Add destination</button>
-            <label class="check"><input type="checkbox" id="ssh-interactive"> Use password (opens terminal)</label>
-          </div>
-          <p class="muted small">Without it, the host must already accept your key login. With it, a terminal window opens running ssh so you can type the password there; PatchGoblin never sees it.</p>
-        </fieldset>
-        <div class="actions"><button type="button" id="ssh-install-btn">Install keys</button></div>
-      </div>
-
-      <div id="ssh-network-panel" class="ssh-panel ssh-network" hidden>
-        <div class="net-bar">
-          <button type="button" id="ssh-network-refresh">↻ Refresh</button>
-          <span id="ssh-network-stamp" class="muted small"></span>
-          <span class="net-legend small muted">
-            <span><i class="lg lg-solid"></i>matched key</span>
-            <span><i class="lg lg-guess"></i>guessed</span>
-            <span><i class="lg lg-admin"></i>admin file</span>
-            <span><i class="lg lg-error"></i>unreachable</span>
-          </span>
-        </div>
-        <div class="net-stage">
-          <svg id="ssh-network-svg" viewBox="0 0 800 560" role="img" aria-label="Which machines can log in where"></svg>
-          <div id="ssh-network-busy" class="net-busy" hidden></div>
-        </div>
-        <div id="ssh-network-detail" class="net-detail small muted">Hover a machine or arrow, click for details.</div>
-        <table class="ssh-table">
-          <colgroup><col style="width:22%"><col style="width:22%"><col><col style="width:10%"></colgroup>
-          <thead><tr><th>From</th><th>To</th><th>Keys</th><th>Kind</th></tr></thead>
-          <tbody id="ssh-network-rows"></tbody>
-        </table>
-      </div>
-
-      <div id="ssh-tunnels-panel" class="ssh-panel" hidden>
-        <fieldset>
-          <legend>Saved tunnels</legend>
-          <table class="ssh-table">
-            <colgroup><col style="width:24px"><col style="width:18%"><col><col style="width:24%"><col style="width:12em"></colgroup>
-            <thead><tr><th></th><th>Name</th><th>Forward</th><th>Via</th><th></th></tr></thead>
-            <tbody id="ssh-tunnel-rows"></tbody>
-          </table>
-          <p class="muted small">Tunnels never start by themselves and stop when PatchGoblin quits.</p>
-        </fieldset>
-        <form id="ssh-tunnel-form">
-          <fieldset>
-            <legend id="ssh-tunnel-form-title">Add a tunnel</legend>
-            <input type="hidden" name="id">
-            <div class="row">
-              <label>Name <input class="w-host" name="name" autocomplete="off"></label>
-              <label>SSH host <input class="w-host" name="target" list="ssh-targets" required autocomplete="off" placeholder="user@host or alias"></label>
-              <label>SSH port <input class="w-port" name="port" type="number" min="1" max="65535" placeholder="22"></label>
-            </div>
-            <div class="row">
-              <label>Direction
-                <select name="direction"><option value="local" title="Local (-L): this computer listens">Local (-L)</option><option value="remote" title="Remote (-R): the SSH host listens">Remote (-R)</option></select>
-              </label>
-              <label>Bind
-                <select name="bind"><option value="127.0.0.1">localhost (127.0.0.1)</option><option value="0.0.0.0">all interfaces (0.0.0.0)</option></select>
-              </label>
-              <label>Listen port <input class="w-port" name="listen_port" type="number" min="1" max="65535" required></label>
-              <label>→ Destination host <input class="w-host" name="dest_host" value="localhost" required autocomplete="off"></label>
-              <label>Destination port <input class="w-port" name="dest_port" type="number" min="1" max="65535" required></label>
-              <div class="actions">
-                <button type="submit">Save tunnel</button>
-                <button type="button" class="ghost" id="ssh-tunnel-cancel" hidden>Cancel edit</button>
-              </div>
-            </div>
-            <p id="ssh-bind-warning" class="error" hidden>0.0.0.0 exposes the forwarded port to everyone who can reach this network, with no authentication in front of it.</p>
-            <p id="ssh-remote-note" class="muted small" hidden>For a remote tunnel, binding to 0.0.0.0 only works if the SSH server sets <code>GatewayPorts yes</code> (or <code>clientspecified</code>); otherwise it falls back to loopback.</p>
-            <div id="ssh-tunnel-error" class="error" hidden></div>
-          </fieldset>
-        </form>
-      </div>
-
-      <pre id="ssh-log" class="log mono small" hidden></pre>
     </section>
 
     <section id="project-settings-view" hidden>
@@ -427,6 +279,12 @@
         </div>
       </form>
     </section>
+
+    {% for p in plugins %}{% if p.view %}
+    <section class="plugin-view" id="view-{{ p.id }}" data-view="{{ p.id }}" hidden>
+      {% include p.view %}
+    </section>
+    {% endif %}{% endfor %}
   </main>
 </div>
 
@@ -650,6 +508,18 @@
 </dialog>
 
 <!-- Settings dialog -->
+<dialog id="plugins-dialog" class="wide">
+  <h2>Plugins</h2>
+  <p class="muted small">Plugins are developer tools that get their own icon on the left bar. Switch them on or off
+    here; the page reloads to apply. To add one, drop its folder into <code id="plugins-user-dir"></code> and restart
+    PatchGoblin; to remove one, switch it off or delete its folder.</p>
+  <ul id="plugins-list" class="plugins-list"></ul>
+  <div id="plugins-error" class="error" hidden></div>
+  <div class="actions right">
+    <button type="button" class="ghost" data-close="plugins-dialog">Close</button>
+  </div>
+</dialog>
+
 <dialog id="settings-dialog" class="wide">
   <form id="settings-form" method="dialog">
     <h2>Settings</h2>
@@ -763,5 +633,7 @@
 
 <div id="toast" class="toast" hidden></div>
 <script src="{{ url_for('static', filename='app.js') }}"></script>
+{% for p in plugins %}{% if p.js %}<script src="{{ p.js }}"></script>
+{% endif %}{% endfor %}
 </body>
 </html>

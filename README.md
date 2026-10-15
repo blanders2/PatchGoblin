@@ -393,16 +393,81 @@ versions (a single "OpenAI API" block) become an endpoint with id `openai`.
 - Cancelling a remote run closes the SSH session. Most CLIs exit when that happens, but
   check the host if one doesn't.
 
+## The activity bar and plugins
+
+The narrow icon bar on the far left switches the sidebar and the main area between
+**Projects** and each developer tool (plugin), such as **SSH tools**. Switching only hides the
+project screens. Running tasks, the open drawer or chat and unsaved Project settings all keep
+going, and switching back returns you to exactly where you were. Click the selected icon again
+to collapse the sidebar and click it once more to bring it back. Arrow keys move between the icons. A plugin can show a badge on its
+icon (SSH tools counts running tunnels). The last view is remembered.
+
+**Plugins** (the puzzle icon at the bottom of the bar) lists every plugin found, with a
+switch for each. Turning one off stops it (SSH tools stops its tunnels), removes its icon and
+makes its API answer 404. The page reloads to apply the change. Plugins that fail to load are listed with
+the error and don't affect the rest of PatchGoblin.
+
+Built-in plugins live in `patchgoblin/plugins/`. To add your own, drop its folder into
+`<data dir>/plugins/` (or a folder listed in `PATCHGOBLIN_PLUGINS`, separated by `;` on Windows
+and `:` elsewhere) and restart. To remove it, delete the folder. A plugin folder looks like this:
+
+```
+mytool/
+  __init__.py           PLUGIN = a patchgoblin.pluginkit.Plugin subclass
+  templates/sidebar.html   optional: its sidebar pane
+  templates/view.html      optional: its main view
+  static/plugin.js         optional: loaded on the page
+  static/plugin.css        optional: loaded on the page
+```
+
+```python
+from flask import jsonify
+from patchgoblin.pluginkit import Plugin
+
+class MyTool(Plugin):
+    id = "mytool"            # API at /api/mytool/…, files at /plugins/mytool/…
+    name = "My tool"
+    description = "What it does."
+    icon = '<circle cx="12" cy="12" r="9"/>'  # inner markup of a 24×24 stroke SVG
+    order = 50               # position on the bar
+
+    def routes(self, bp):    # a Flask blueprint mounted at /api/mytool
+        @bp.get("/things")
+        def things():
+            return jsonify(things=self.ctx.load().get("things", []))
+
+    def start(self): ...     # when enabled (at startup or switched on)
+    def stop(self): ...      # when switched off or PatchGoblin quits
+
+PLUGIN = MyTool
+```
+
+`self.ctx` gives the plugin `load()`/`save()` for its own saved data (kept in `settings.json`
+under `plugin_data.<id>`), plus `registry` (the projects), `settings` and `data_dir`. Templates are
+included in the page as `<id>/sidebar.html` and `<id>/view.html`. The page script registers itself
+with the `PG` object that the core page provides:
+
+```js
+PG.register({
+  id: "mytool",
+  setup() { /* once, after the page loads: bind events */ },
+  activate() { /* the plugin was shown */ },
+  deactivate() { /* the plugin was hidden */ },
+});
+```
+
+`PG` also offers the page helpers (`$`, `$$`, `el`, `api`, `toast`, `showError`, `withBusy`,
+`storageGet`/`storageSet`), `PG.setBadge(id, value, title)` and `PG.show(id)`. The core page
+fires `pg:project-dialog-open` and `pg:project-added` events on `document` for plugins that
+want to extend the project screens (SSH tools uses them to suggest saved servers). Keep plugin
+element ids prefixed with the plugin id, because every enabled plugin shares the page.
+
 ## SSH tools
 
-The switch at the top of the sidebar (**Projects | SSH tools**) swaps the sidebar between
-your projects and a set of SSH helpers. Switching only hides the project screens. Running
-tasks, the open drawer or chat and unsaved Project settings all keep going, and switching
-back returns you to exactly where you were. The last mode and tool are remembered. While
-you're on **Projects**, a badge on the **SSH tools** switch counts the tunnels still running.
+A built-in plugin with a set of SSH helpers.
 
-- **Servers** is your own list of SSH hosts (name, host, port, OS), stored in the global
-  settings. The key, install and tunnel pickers list these first. Hosts your projects use and
+- **Servers** is your own list of SSH hosts (name, host, port, OS), stored in the plugin's
+  saved data. The key, install and tunnel pickers list these first. Hosts your projects use and
   `~/.ssh/config` aliases appear as **suggestions**: **Add** only fills the form, and nothing
   is saved until you press **Save server**. Nothing is ever added automatically. In the Add
   project dialog, the SSH target field suggests saved servers and fills in the port.

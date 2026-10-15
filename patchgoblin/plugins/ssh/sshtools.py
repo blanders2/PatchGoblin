@@ -21,7 +21,7 @@ from typing import Optional
 
 import subprocess
 
-from .hosts import (HostError, SSHHost, WindowsSSHHost, _CMD_LIMIT, _ps_quote, background_kwargs,
+from patchgoblin.hosts import (HostError, SSHHost, WindowsSSHHost, _CMD_LIMIT, _ps_quote, background_kwargs,
                     communicate, kill_tree, run_in_terminal)
 
 KEY_NAME = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
