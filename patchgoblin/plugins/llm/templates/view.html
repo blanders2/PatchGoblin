@@ -1,0 +1,209 @@
+{# LLM API console main view. Panels are switched by the sidebar; the bar on top is shared. #}
+<div id="llm-view">
+  <div class="llm-bar">
+    <label>Server <select id="llm-server"></select></label>
+    <label class="llm-grow">Model
+      <span class="llm-inline"><input id="llm-model" list="llm-model-list" autocomplete="off" spellcheck="false" placeholder="model id">
+        <datalist id="llm-model-list"></datalist>
+        <button type="button" class="ghost small" id="llm-models-refresh" title="Reload the model list">↻</button></span></label>
+    <label>API
+      <select id="llm-flavor">
+        <option value="chat">OpenAI chat · /v1/chat/completions</option>
+        <option value="completions">OpenAI completions · /v1/completions</option>
+        <option value="responses">OpenAI responses · /v1/responses</option>
+        <option value="anthropic">Anthropic messages · /v1/messages</option>
+        <option value="ollama">Ollama chat · /api/chat</option>
+        <option value="llamacpp">llama.cpp native · /completion</option>
+      </select></label>
+    <div class="llm-ctx" id="llm-ctx" title="Context window">
+      <div class="llm-ctx-text" id="llm-ctx-text">ctx ?</div>
+      <div class="llm-meter"><div id="llm-ctx-fill"></div></div>
+    </div>
+  </div>
+
+  <!-- Chat -->
+  <div id="llm-chat-panel" class="llm-panel" hidden>
+    <div class="llm-chat">
+      <div class="llm-convo">
+        <details id="llm-system-box">
+          <summary>System prompt <span id="llm-system-flag" class="muted small"></span></summary>
+          <textarea id="llm-system" rows="3" placeholder="You are a helpful assistant."></textarea>
+        </details>
+        <div id="llm-messages" class="llm-messages" aria-live="polite"></div>
+        <div class="llm-compose">
+          <textarea id="llm-input" rows="3" placeholder="Ask something… (Ctrl+Enter sends)"></textarea>
+          <div class="llm-compose-actions">
+            <label class="check"><input type="checkbox" id="llm-stream" checked> Stream</label>
+            <select id="llm-role" title="Role of the message you add" aria-label="Role">
+              <option value="user">user</option><option value="assistant">assistant</option><option value="system">system</option>
+            </select>
+            <button type="button" class="ghost small" id="llm-add" title="Add the message without sending (to build a conversation)">Add</button>
+            <button type="button" class="ghost small" id="llm-count" title="Count prompt tokens with the server's tokenizer">Count tokens</button>
+            <button type="button" class="ghost small" id="llm-clear">Clear chat</button>
+            <button type="button" class="ghost small" id="llm-regen" title="Resend the conversation without the last reply">Regenerate</button>
+            <button type="button" class="danger small" id="llm-stop" hidden>Stop</button>
+            <button type="button" id="llm-send">Send</button>
+          </div>
+        </div>
+      </div>
+      <div class="llm-side">
+        <details open class="llm-box">
+          <summary>Sampling</summary>
+          <div id="llm-params" class="llm-params"></div>
+          <p class="muted small">Blank fields are not sent, so the server's defaults apply.</p>
+        </details>
+        <details open class="llm-box">
+          <summary>Thinking</summary>
+          <div class="llm-params">
+            <label>Thinking <select id="llm-think"><option value="">not sent</option><option value="on">on</option><option value="off">off</option></select></label>
+            <label>Sent as <select id="llm-think-style">
+              <option value="auto">auto (by server kind)</option>
+              <option value="enable_thinking">chat_template_kwargs.enable_thinking (Qwen3, GLM…)</option>
+              <option value="thinking">chat_template_kwargs.thinking (DeepSeek, Hermes 4)</option>
+              <option value="reasoning">reasoning {…} (OpenRouter)</option>
+              <option value="none">reasoning_effort only</option>
+            </select></label>
+            <label>Effort <select id="llm-effort"><option value="">not sent</option><option>minimal</option><option>low</option><option>medium</option><option>high</option></select></label>
+            <label>Budget tokens <input id="llm-budget" type="number" min="0" placeholder="e.g. 4096"></label>
+            <label class="check"><input type="checkbox" id="llm-split-think" checked> Split &lt;think&gt; tags out of the answer</label>
+            <label class="check"><input type="checkbox" id="llm-send-reasoning"> Send earlier reasoning back</label>
+          </div>
+        </details>
+        <details class="llm-box">
+          <summary>Extra body JSON <span id="llm-extra-flag" class="muted small"></span></summary>
+          <textarea id="llm-extra" rows="5" class="mono" spellcheck="false" placeholder='{"tools": [...], "chat_template_kwargs": {...}}'></textarea>
+          <div id="llm-extra-error" class="error small" hidden></div>
+          <p class="muted small">Deep-merged into the request last, so it can add or override anything.</p>
+        </details>
+        <div class="llm-box llm-inspector">
+          <div class="llm-tabs" role="tablist">
+            <button type="button" role="tab" data-tab="request" aria-selected="true">Request</button>
+            <button type="button" role="tab" data-tab="response">Response</button>
+            <button type="button" role="tab" data-tab="stream">Stream</button>
+            <button type="button" role="tab" data-tab="stats">Stats</button>
+            <button type="button" role="tab" data-tab="logprobs">Logprobs</button>
+          </div>
+          <div data-pane="request">
+            <div class="llm-row"><span class="mono small" id="llm-req-url"></span>
+              <label class="check small"><input type="checkbox" id="llm-raw-edit"> Edit raw body</label>
+              <button type="button" class="ghost small" id="llm-copy-curl">Copy curl</button></div>
+            <textarea id="llm-req-body" rows="14" class="mono" spellcheck="false" readonly></textarea>
+            <div id="llm-req-error" class="error small" hidden></div>
+          </div>
+          <div data-pane="response" hidden><pre id="llm-resp-meta" class="log mono small"></pre><pre id="llm-resp-body" class="log mono small"></pre></div>
+          <div data-pane="stream" hidden>
+            <div class="llm-row"><span id="llm-stream-count" class="muted small"></span>
+              <label class="check small"><input type="checkbox" id="llm-stream-follow" checked> Follow</label></div>
+            <pre id="llm-stream-log" class="log mono small llm-stream-log"></pre>
+          </div>
+          <div data-pane="stats" hidden><table class="llm-kv" id="llm-stats"></table></div>
+          <div data-pane="logprobs" hidden>
+            <p class="muted small">Turn on <b>logprobs</b> under Sampling. Tokens are shaded by probability; hover for the alternatives.</p>
+            <div id="llm-logprobs" class="llm-logprobs"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Models -->
+  <div id="llm-models-panel" class="llm-panel" hidden>
+    <div class="llm-row"><button type="button" id="llm-models-load">↻ Reload models</button>
+      <span id="llm-models-note" class="muted small"></span></div>
+    <table class="llm-table">
+      <thead><tr><th>Model</th><th style="width:9em">Context</th><th style="width:7em">Loaded</th><th>Info</th><th style="width:10em"></th></tr></thead>
+      <tbody id="llm-model-rows"></tbody>
+    </table>
+    <pre id="llm-model-info" class="log mono small" hidden></pre>
+  </div>
+
+  <!-- Probe -->
+  <div id="llm-probe-panel" class="llm-panel" hidden>
+    <div class="llm-row"><button type="button" id="llm-probe-run">Probe server</button>
+      <span id="llm-probe-note" class="muted small">GETs about twenty well-known endpoints and guesses the server software.</span></div>
+    <table class="llm-table">
+      <thead><tr><th>Endpoint</th><th style="width:6em">Status</th><th style="width:6em">Time</th><th>Content type</th></tr></thead>
+      <tbody id="llm-probe-rows"></tbody>
+    </table>
+    <pre id="llm-probe-body" class="log mono small" hidden></pre>
+  </div>
+
+  <!-- Raw HTTP -->
+  <div id="llm-http-panel" class="llm-panel" hidden>
+    <form id="llm-http-form" class="llm-row">
+      <select name="method" aria-label="Method">{% for m in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] %}<option>{{ m }}</option>{% endfor %}</select>
+      <input name="path" class="mono llm-grow" list="llm-paths" placeholder="/v1/models" autocomplete="off" spellcheck="false" aria-label="Path" required>
+      <datalist id="llm-paths"></datalist>
+      <button type="submit">Send</button>
+      <button type="button" class="danger" id="llm-http-stop" hidden>Stop</button>
+    </form>
+    <textarea id="llm-http-body" rows="8" class="mono" spellcheck="false" placeholder="Request body (JSON), sent for POST/PUT/PATCH"></textarea>
+    <div class="llm-row"><span id="llm-http-meta" class="muted small"></span>
+      <label class="check small"><input type="checkbox" id="llm-http-pretty" checked> Pretty-print JSON</label></div>
+    <pre id="llm-http-headers" class="log mono small" hidden></pre>
+    <pre id="llm-http-out" class="log mono small llm-tall"></pre>
+  </div>
+
+  <!-- History -->
+  <div id="llm-history-panel" class="llm-panel" hidden>
+    <div class="llm-row"><button type="button" class="ghost small" id="llm-history-reload">↻ Reload</button>
+      <button type="button" class="ghost small danger" id="llm-history-clear">Clear</button>
+      <span class="muted small">The last 100 exchanges, kept in memory until PatchGoblin restarts. Keys are masked.</span></div>
+    <table class="llm-table">
+      <thead><tr><th style="width:9em">When</th><th style="width:8em">Server</th><th>Request</th><th style="width:5em">Status</th><th style="width:9em">TTFB / total</th></tr></thead>
+      <tbody id="llm-history-rows"></tbody>
+    </table>
+    <div id="llm-history-detail" hidden>
+      <div class="llm-row"><strong id="llm-hd-title"></strong>
+        <button type="button" class="ghost small" id="llm-hd-curl">Copy curl</button>
+        <button type="button" class="ghost small" id="llm-hd-copy">Copy response</button>
+        <button type="button" class="ghost small" id="llm-hd-http">Open in Raw HTTP</button></div>
+      <pre id="llm-hd-request" class="log mono small"></pre>
+      <pre id="llm-hd-response" class="log mono small llm-tall"></pre>
+    </div>
+  </div>
+
+  <!-- Servers -->
+  <div id="llm-servers-panel" class="llm-panel" hidden>
+    <table class="llm-table">
+      <thead><tr><th style="width:10em">Name</th><th style="width:9em">Kind</th><th>Base URL</th><th style="width:6em">Key</th><th style="width:9.5em"></th></tr></thead>
+      <tbody id="llm-server-rows"></tbody>
+    </table>
+    <div class="llm-row"><button type="button" class="ghost small" id="llm-scan">Scan this computer</button>
+      <span class="muted small">Looks for LLM servers on the usual local ports (8080, 11434, 8000, 30000, 1234…).</span></div>
+    <table class="llm-table" id="llm-suggest-table" hidden>
+      <thead><tr><th>Suggested</th><th>From</th><th style="width:5em"></th></tr></thead>
+      <tbody id="llm-suggest-rows"></tbody>
+    </table>
+    <form id="llm-server-form" autocomplete="off">
+      <fieldset>
+        <legend id="llm-server-form-title">Add a server</legend>
+        <input type="hidden" name="id"><input type="hidden" name="from_endpoint">
+        <div class="llm-row">
+          <label>Name <input name="name" placeholder="my box"></label>
+          <label>Kind <select name="kind" id="llm-kind"></select></label>
+          <label class="llm-grow">Base URL <input name="base_url" required list="llm-url-presets" placeholder="http://127.0.0.1:8080"></label>
+          <datalist id="llm-url-presets"></datalist>
+        </div>
+        <div class="llm-row">
+          <label>API key <input name="api_key" type="password" placeholder="(none)" autocomplete="new-password"></label>
+          <label class="check small" id="llm-clear-key-label" hidden><input type="checkbox" name="clear_key"> Remove saved key</label>
+          <label>…or env var <input name="api_key_env" placeholder="OPENROUTER_API_KEY"></label>
+          <label>Auth <select name="auth"><option value="bearer">Authorization: Bearer</option><option value="x-api-key">x-api-key</option><option value="none">none</option></select></label>
+          <label>Timeout (s) <input name="timeout" type="number" min="5" max="3600" placeholder="600" class="llm-num"></label>
+          <label class="check"><input type="checkbox" name="verify_tls" checked> Verify TLS</label>
+        </div>
+        <div class="llm-row">
+          <label class="llm-grow">Extra headers <textarea name="headers" rows="2" class="mono" placeholder="HTTP-Referer: https://example.com"></textarea></label>
+          <label>Default model <input name="default_model" placeholder="(first listed)"></label>
+        </div>
+        <div class="llm-row">
+          <span class="muted small">Keys are kept in PatchGoblin's settings file and never sent to the browser.</span>
+          <span class="actions"><button type="button" class="ghost" id="llm-server-cancel" hidden>Cancel edit</button>
+            <button type="submit">Save server</button></span>
+        </div>
+        <div id="llm-server-error" class="error" hidden></div>
+      </fieldset>
+    </form>
+  </div>
+</div>

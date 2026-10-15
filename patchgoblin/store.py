@@ -101,7 +101,11 @@ DEFAULT_SETTINGS = {
     }],
     "timeouts": {"plan": 900, "run": 3600},
     "automation": {"auto_plan": False, "auto_queue": False, "auto_promote": True},
+    # where a project's Terminal button opens shells: "wt" (Windows Terminal, else the platform's
+    # own terminal) or "browser" (the Terminals plugin)
+    "terminal": {"open_in": "wt"},
 }
+TERMINAL_PLACES = ("wt", "browser")
 
 # Automation modes: a global default in Settings, overridden per project by True/False
 # (None or missing inherits). Each maps to the status of the tasks it acts on when turned on.

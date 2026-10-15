@@ -1,0 +1,30 @@
+/* Terminals plugin. Scoped to its sidebar pane (#sidebar-terminals) and view (#term-view). */
+#sidebar-terminals { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+#term-list { flex: 1; min-height: 0; overflow-y: auto; }
+#term-list li { padding: 5px 8px; border-radius: 6px; font-size: 13px; }
+#term-list li:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#term-list .term-none { cursor: default; }
+#term-list .term-none:hover { background: none; }
+.term-dot { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; background: var(--muted); }
+.term-x { margin-left: auto; padding: 0 5px !important; line-height: 1.2; visibility: hidden; }
+#term-list li:hover .term-x, #term-list li.active .term-x, .term-x:focus-visible { visibility: visible; }
+.term-new { display: flex; gap: 6px; padding-top: 8px; margin-top: 6px; border-top: 1px solid var(--line); }
+.term-new select { flex: 1; min-width: 0; width: auto; font-size: 12.5px; padding: 3px 6px; }
+
+/* the view fills the main area; main's own padding stays around it */
+#view-terminals:not([hidden]) { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+#term-view { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 8px; }
+.term-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.term-swatch { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+.term-actions { margin-left: auto; display: flex; gap: 4px; }
+.term-actions button { padding: 2px 9px; font-size: 12.5px; }
+.term-stage { flex: 1; min-height: 240px; position: relative; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); overflow: hidden; }
+.term-stage[hidden] { display: none; }
+.term-host { position: absolute; inset: 6px; }
+.term-host[hidden] { display: none; }
+.term-host .xterm { height: 100%; }
+/* the leftover sliver below the last row shows the viewport, which xterm paints black */
+.term-host .xterm-viewport { background-color: var(--panel) !important; }
+.term-empty { margin: auto; text-align: center; max-width: 34em; }
+.term-empty[hidden] { display: none; }

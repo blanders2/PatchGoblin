@@ -251,7 +251,7 @@ def install_keys_interactive(target: str, port: Optional[int], pubkeys, windows:
     argv = ["ssh", "-t", *(["-p", str(int(port))] if port else []), target, remote]
     if sum(len(a) + 1 for a in argv) > _CMD_LIMIT:
         raise ValueError("Too many keys, install fewer at once.")
-    run_in_terminal(argv, sys.platform)
+    run_in_terminal(argv, sys.platform, title=f"Install keys on {target}")
     return {"added": [], "skipped": [], "note":
             "A terminal window opened: enter the password there. Run the install again with key login "
             "to check the result."}

@@ -55,6 +55,24 @@ each project in the sidebar shows whether its directory can be reached right now
 (green), can't be (red; hover for the reason), or is still being checked (grey). It
 is re-checked every minute and when you return to the tab.
 
+**Terminal.** The project's **Terminal** button switches to the project's terminal, or opens a
+shell in the project directory (over `ssh` for SSH projects) if it doesn't have one yet. The **+**
+next to it always opens another. **Settings → Terminal** chooses where they open:
+- **Windows Terminal** (the default). PatchGoblin finds the project's tab by a tag in the shell's
+  command line (`PATCHGOBLIN_TAB`; SSH tabs pass it as `ssh -o SetEnv=…`, which servers that don't
+  accept it ignore). Windows Terminal can't list its tabs, so the tab is picked by the order the
+  tagged shells were opened. If you've dragged tabs around, or opened other tabs by hand in that
+  window, it can focus the wrong one.
+- **The browser:** the Terminals plugin (see below), which must be turned on.
+
+With Windows Terminal installed, every terminal PatchGoblin opens there is a
+new tab in one window named **PatchGoblin**, created the first time. Each tab is named after the
+project (with the SSH host for remote ones), and the shell can't rename it. Each tab also gets the
+project's own colour, picked from its place in the project list so that neighbouring projects
+look clearly different. A project keeps its colour unless a project above it is removed. Without Windows
+Terminal, a PowerShell window opens with the project name as its title. On macOS and Linux the
+system terminal opens a new window as before.
+
 **Live activity.** While the AI plans, runs or answers in chat, PatchGoblin shows a live feed of
 what it is doing: files it reads and edits, commands it runs, and its own messages, plus a one-line
 "now: …" status on the task card. Claude Code runs with `--output-format stream-json --verbose` to
@@ -461,6 +479,86 @@ PG.register({
 fires `pg:project-dialog-open` and `pg:project-added` events on `document` for plugins that
 want to extend the project screens (SSH tools uses them to suggest saved servers). Keep plugin
 element ids prefixed with the plugin id, because every enabled plugin shares the page.
+
+## LLM API console
+
+A built-in plugin for testing LLM servers and seeing exactly what goes over the wire. Every
+request goes through PatchGoblin, which adds the API key and records the exchange. Keys never
+reach the browser and are masked in everything it shows.
+
+- **Servers** are saved with a kind (llama.cpp, llama-swap, vLLM, SGLang, Ollama, LM Studio,
+  TGI, KoboldCpp, TabbyAPI, Hermes/Nous, OpenAI, OpenRouter, Anthropic or generic
+  OpenAI-compatible), a base URL (a trailing `/v1` is fine), an API key or environment variable,
+  the auth style, extra headers, TLS checking and a timeout. **Scan this computer** looks for
+  servers on the usual local ports. PatchGoblin's own AI endpoints are offered as suggestions,
+  and adding one copies its key on the server side.
+- **Chat** sends a conversation through any of six APIs: OpenAI chat, completions or responses,
+  Anthropic messages, Ollama `/api/chat` or llama.cpp `/completion`. The request body is
+  rebuilt live on the **Request** tab as you change anything. Tick **Edit raw body** to send
+  your own.
+  - **Sampling:** temperature, top-p/k, min-p, max tokens, seed, penalties, stop sequences, Ollama
+    `num_ctx`, logprobs, JSON output and llama.cpp `cache_prompt`. Each one is mapped to the
+    right field name for the chosen API, and a blank field isn't sent.
+  - **Thinking:** a thinking on/off switch, effort and budget, sent the way the server expects:
+    - `chat_template_kwargs.enable_thinking` (Qwen3, GLM) or `chat_template_kwargs.thinking` (DeepSeek, Hermes 4)
+    - OpenRouter's `reasoning` object
+    - `reasoning_effort`
+    - Anthropic's `thinking`
+    - Ollama's `think`
+
+    Reasoning is shown separately from the answer, whether it comes in `reasoning_content`
+    or `reasoning` fields or in `<think>` tags.
+  - **Extra body JSON** is merged in last, for tools or any server-specific option.
+- **Inspector tabs:**
+  - **Response:** status and headers.
+  - **Stream:** every raw stream line with its arrival time.
+  - **Stats:** time to first byte and first token, total time, prompt/completion/reasoning/cached
+    tokens, your measured tokens per second and the server's own timings (llama.cpp `timings`,
+    Ollama durations).
+  - **Logprobs:** tokens shaded by probability.
+  - **Copy curl:** the request as a curl command, with `$LLM_API_KEY` in place of the key.
+- **Context:** the bar on top shows the model's context size and how much of it the last
+  exchange used. The size comes from `/props` (llama.cpp), `/api/show` and `/api/ps`
+  (Ollama), `max_model_len` (vLLM), `/get_server_info` (SGLang), LM Studio's model info or
+  `/v1/models`. Hover over it to see which one answered. **Count tokens** uses the server's
+  tokenizer (`/tokenize`, Anthropic `count_tokens`).
+- **Models** lists every model from `/v1/models`, Ollama `/api/tags` and `/api/ps`, llama-swap
+  `/running` and LM Studio, with context size and whether it's loaded. **Details** shows the raw
+  model info. The model box suggests the same list and picks one for you when it's empty.
+- **Probe** GETs about twenty well-known endpoints (`/health`, `/props`, `/slots`, `/metrics`,
+  `/api/tags`, `/running`, `/get_server_info`…), shows each status, timing and body, and guesses
+  the server software.
+- **Raw HTTP** sends any method, path and body to the server, streaming or not.
+- **History** keeps the last 100 exchanges in memory (never on disk), with masked headers, the
+  full response and timings. It can copy a request as curl or reopen it in Raw HTTP.
+
+The chat, sampling settings and the last server and model are remembered in the browser.
+`tests/fake_llm_server.py` is a small fake llama.cpp/Ollama server. Run it with
+`uv run python tests/fake_llm_server.py 18080` to try the console without a real model.
+
+## Terminals
+
+A built-in plugin with real shells inside the page, drawn with [xterm.js](https://xtermjs.org/)
+(the terminal VS Code uses, bundled so it works offline).
+- **Shell:** PowerShell 7 if it's installed (else Windows PowerShell) in the project folder,
+  `ssh` for SSH projects, or `$SHELL` on macOS and Linux. **+ New** in the sidebar starts one for
+  any project, or a plain shell in your home folder.
+- **Names and colours** match the project's Windows Terminal tab. The sidebar lists every
+  session, and the activity-bar badge counts the running ones.
+- **Scrollback:** each session keeps about 1 MB of output. Switching sessions or reloading the
+  page brings it back, and a shell keeps running while you look elsewhere. Sessions end when
+  PatchGoblin stops.
+- **Keys:** Ctrl+C copies when text is selected and interrupts the running command otherwise.
+  Ctrl+V or right-click pastes.
+- **Header buttons:** **Rename**, **Pop out** (opens the project in Windows Terminal),
+  **Restart** and **Close**.
+- **Limit:** up to 12 shells can run at once.
+
+On Windows the shell runs in a pseudo-console through `pywinpty`, using its WinPTY backend
+because pywinpty's ConPTY backend doesn't pass Ctrl+C on. The page gets output through a
+streamed request and sends keys as small requests, all under the same localhost-only guards as
+the rest of PatchGoblin. Anyone who can use PatchGoblin can already run commands through it,
+and a browser shell doesn't change that.
 
 ## SSH tools
 

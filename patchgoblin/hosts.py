@@ -8,6 +8,8 @@ Remote hosts are driven with the system ``ssh`` client, so keys, agents and
 from __future__ import annotations
 
 import base64
+import colorsys
+import json
 import ntpath
 import os
 import posixpath
@@ -676,17 +678,57 @@ _LINUX_TERMINALS = (
 )
 
 
+# Windows Terminal window that every PatchGoblin terminal opens a tab in (created on first use).
+TERMINAL_WINDOW = "PatchGoblin"
+
+
+def terminal_color(index: int) -> str:
+    """A tab colour for the project at ``index`` in the project list: hues a golden angle
+    apart, so neighbouring projects get clearly different colours and each keeps its own."""
+    r, g, b = colorsys.hls_to_rgb((index * 137.508 % 360) / 360, 0.45, 0.65)
+    return "#{:02x}{:02x}{:02x}".format(round(r * 255), round(g * 255), round(b * 255))
+
+
+# Each project terminal tab's command line carries "PATCHGOBLIN_TAB<sep><project id>", so the
+# tabs that are still open can be found among the running processes (see wt_tabs).
+WT_TAG = "PATCHGOBLIN_TAB"
+_WT_TAG_RE = re.compile(WT_TAG + r"\W{1,3}([A-Za-z0-9_-]+)")
+_TAG_OK = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def windows_shell(which: Callable[[str], Optional[str]] = shutil.which) -> list[str]:
+    """PowerShell 7 when installed, else Windows PowerShell."""
+    return ["pwsh.exe", "-NoLogo"] if which("pwsh") else ["powershell.exe", "-NoLogo"]
+
+
 def _wrap_terminal(inner: Optional[list[str]], cwd_path: Optional[str], platform: str,
-                   which: Callable[[str], Optional[str]]) -> tuple[list[str], Optional[str]]:
+                   which: Callable[[str], Optional[str]], title: str = "",
+                   color: str = "", tag: str = "") -> tuple[list[str], Optional[str]]:
     """Argv and cwd opening a terminal on this computer that runs ``inner`` (or a shell in
-    ``cwd_path`` when ``inner`` is None)."""
+    ``cwd_path`` when ``inner`` is None), named ``title`` and with tab colour ``color``
+    (#rrggbb) where the terminal allows it. In Windows Terminal a local shell is tagged with
+    ``tag`` (callers tag ``inner`` themselves)."""
     cwd = cwd_path if inner is None else None
+    title = " ".join(title.split())  # one line
     if platform == "win32":
         if which("wt"):
-            # Windows Terminal treats ";" as a command separator, so escape it.
+            # A new tab in the one named window, not a new window each time. The title is kept
+            # even when the shell or a remote session sets its own. Windows Terminal treats ";"
+            # as a command separator, so escape it.
+            esc = lambda a: a.replace(";", "\\;")  # noqa: E731
+            argv = ["wt", "-w", TERMINAL_WINDOW, "new-tab"]
+            if title:
+                argv += ["--title", esc(title), "--suppressApplicationTitle"]
+            if re.fullmatch(r"#[0-9a-fA-F]{6}", color or ""):
+                argv += ["--tabColor", color]
+            if inner is None and tag and _TAG_OK.match(tag):
+                shell = [*windows_shell(which), "-NoExit", "-Command", f"${{env:{WT_TAG}}}='{tag}'"]
+                return [*argv, "-d", esc(cwd_path), *shell], None
             if inner is None:
-                return ["wt", "-d", cwd_path.replace(";", "\\;")], None
-            return ["wt", *[a.replace(";", "\\;") for a in inner]], None
+                return [*argv, "-d", esc(cwd_path)], None
+            return [*argv, *[esc(a) for a in inner]], None
+        if inner is None and title:
+            return ["powershell.exe", "-NoExit", "-Command", f"$Host.UI.RawUI.WindowTitle = {_ps_quote(title)}"], cwd
         return inner or ["powershell.exe", "-NoExit"], cwd
     if platform == "darwin":
         if inner is None:
@@ -701,19 +743,63 @@ def _wrap_terminal(inner: Optional[list[str]], cwd_path: Optional[str], platform
 
 
 def terminal_command(host, path: str, platform: str = sys.platform,
-                     which: Callable[[str], Optional[str]] = shutil.which) -> tuple[list[str], Optional[str]]:
-    """Argv and working directory that open a new terminal window on this computer.
+                     which: Callable[[str], Optional[str]] = shutil.which, title: str = "",
+                     color: str = "", tag: str = "") -> tuple[list[str], Optional[str]]:
+    """Argv and working directory that open a terminal on this computer (a tab of the
+    PatchGoblin window in Windows Terminal, tagged with ``tag``: see wt_tabs).
 
     Local projects get a shell in ``path``; SSH projects get a local terminal running
     ssh that lands in ``path`` on the remote host.
     """
-    return _wrap_terminal(host.shell_argv(path) if host.kind == "ssh" else None, path, platform, which)
+    inner = None
+    if host.kind == "ssh":
+        inner = host.shell_argv(path)
+        if tag and _TAG_OK.match(tag) and platform == "win32":
+            # Visible in the local ssh.exe command line; servers that don't AcceptEnv ignore it.
+            inner = [inner[0], "-o", f"SetEnv={WT_TAG}={tag}", *inner[1:]]
+    return _wrap_terminal(inner, path, platform, which, title, color, tag)
+
+
+def terminal_title(project: dict) -> str:
+    """A terminal's name for a project: its name, plus the host for SSH projects."""
+    path = project.get("path") or ""
+    title = project.get("name") or os.path.basename(path.rstrip("/\\")) or path
+    return f"{title} ({project.get('ssh_target')})" if project.get("location") == "ssh" else title
+
+
+def parse_wt_tabs(text: str) -> list[str]:
+    """Project ids from a JSON list of command lines (oldest first), skipping the query itself."""
+    try:
+        lines = json.loads(text or "[]")
+    except ValueError:
+        return []
+    out = []
+    for line in lines if isinstance(lines, list) else [lines]:
+        if isinstance(line, str) and "Get-CimInstance" not in line:
+            m = _WT_TAG_RE.search(line)
+            if m:
+                out.append(m.group(1))
+    return out
+
+
+def wt_tabs() -> list[str]:
+    """The project ids of PatchGoblin's terminal tabs that are still open, in the order they
+    were opened (which is their tab order unless tabs were moved by hand). Windows only;
+    empty when anything goes wrong."""
+    script = ("$p = Get-CimInstance Win32_Process -Filter \"CommandLine LIKE '%" + WT_TAG + "%'\" | "
+              "Where-Object { $_.Name -match '^(pwsh|powershell|ssh)\\.exe$' } | Sort-Object CreationDate; "
+              "ConvertTo-Json -Compress -InputObject @($p | ForEach-Object { $_.CommandLine })")
+    try:
+        result = communicate(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], timeout=20)
+    except Exception:
+        return []
+    return parse_wt_tabs(result.stdout) if result.returncode == 0 else []
 
 
 def run_in_terminal(argv: list[str], platform: str = sys.platform,
-                    which: Callable[[str], Optional[str]] = shutil.which) -> None:
-    """Open a new terminal window on this computer running ``argv`` (e.g. ssh asking for a password)."""
-    cmd, cwd = _wrap_terminal(argv, None, platform, which)
+                    which: Callable[[str], Optional[str]] = shutil.which, title: str = "") -> None:
+    """Open a terminal on this computer running ``argv`` (e.g. ssh asking for a password)."""
+    cmd, cwd = _wrap_terminal(argv, None, platform, which, title)
     try:
         _spawn(cmd, cwd, "CREATE_NEW_CONSOLE")
     except OSError as exc:
@@ -730,14 +816,36 @@ def _local_dir_guard(project: dict) -> tuple:
     return host, path
 
 
-def open_terminal(project: dict) -> None:
-    """Open a terminal window on this computer in the project's directory."""
+def open_terminal(project: dict, color: str = "", new: bool = False, platform: str = sys.platform) -> str:
+    """Open a terminal on this computer in the project's directory, named after the project
+    and with tab colour ``color`` (see terminal_color). In Windows Terminal, the project's
+    tab is focused if it's still open (unless ``new``). Returns "focused" or "opened"."""
     host, path = _local_dir_guard(project)
-    argv, cwd = terminal_command(host, path)
-    try:
-        _spawn(argv, cwd, "CREATE_NEW_CONSOLE")
-    except OSError as exc:
-        raise HostError(f"Could not open a terminal: {exc}") from exc
+    tag = project.get("id") or ""
+    # One look-up-then-open at a time, and a tab opened moments ago counts as open even before its
+    # shell shows up in the process list, so a double-click doesn't open two tabs.
+    with _opening_lock:
+        try:
+            if not new and tag and platform == "win32" and shutil.which("wt"):
+                if time.monotonic() - _just_opened.get(tag, -OPEN_GRACE) < OPEN_GRACE:
+                    return "focused"
+                tabs = wt_tabs()
+                if tag in tabs:
+                    _spawn(["wt", "-w", TERMINAL_WINDOW, "focus-tab", "--target", str(tabs.index(tag))], None,
+                           "CREATE_NEW_CONSOLE")
+                    return "focused"
+            argv, cwd = terminal_command(host, path, platform, title=terminal_title(project), color=color, tag=tag)
+            _spawn(argv, cwd, "CREATE_NEW_CONSOLE")
+        except OSError as exc:
+            raise HostError(f"Could not open a terminal: {exc}") from exc
+        if tag:
+            _just_opened[tag] = time.monotonic()
+    return "opened"
+
+
+OPEN_GRACE = 3.0  # seconds a just-opened tab counts as open
+_opening_lock = threading.Lock()
+_just_opened: dict[str, float] = {}
 
 
 def _spawn(argv: list[str], cwd: Optional[str], windows_flag: str) -> None:

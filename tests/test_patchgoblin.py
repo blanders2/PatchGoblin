@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -139,6 +140,16 @@ class ProjectTests(AppTestCase):
         for bad in ({"gitignore": "x" * (64 * 1024 + 1)}, "nope"):
             res = self.client.put("/api/settings", headers=H, json={"git": bad})
             self.assertEqual(res.status_code, 400)
+
+    def test_terminal_place_setting(self):
+        self.assertEqual(self.client.get("/api/settings").get_json()["terminal"], {"open_in": "wt"})
+        res = self.client.put("/api/settings", headers=H, json={"terminal": {"open_in": "browser"}})
+        self.assertEqual(res.get_json()["terminal"]["open_in"], "browser")
+        self.assertEqual(self.client.get("/api/settings").get_json()["terminal"]["open_in"], "browser")
+        for bad in ({"open_in": "cmd"}, "browser"):
+            res = self.client.put("/api/settings", headers=H, json={"terminal": bad})
+            self.assertEqual(res.status_code, 400)
+        self.assertEqual(self.client.get("/api/settings").get_json()["terminal"]["open_in"], "browser")
 
     def test_existing_gitignore_is_kept(self):
         os.makedirs(self.proj_dir)
@@ -284,14 +295,50 @@ class ProjectTests(AppTestCase):
     def test_open_terminal(self):
         project = self.add_project()
         url = f"/api/projects/{project['id']}/terminal"
-        with mock.patch("patchgoblin.hosts.subprocess.Popen") as popen:
+        with mock.patch("patchgoblin.hosts.wt_tabs", return_value=[]), \
+                mock.patch("patchgoblin.hosts.subprocess.Popen") as popen:
             res = self.client.post(url, headers=H, json={"secrets_ack": True})
         self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertEqual(res.get_json()["action"], "opened")
         self.assertEqual(popen.call_count, 1)
         argv, kwargs = popen.call_args[0][0], popen.call_args[1]
         self.assertTrue(self.proj_dir in argv or kwargs["cwd"] == self.proj_dir, (argv, kwargs))
+        hosts_mod._just_opened.clear()  # else this second click counts as a double-click
+        with mock.patch("patchgoblin.hosts.wt_tabs", return_value=[]), \
+                mock.patch("patchgoblin.hosts.terminal_command", return_value=(["x"], None)) as tc, \
+                mock.patch("patchgoblin.hosts._spawn"):
+            self.client.post(url, headers=H)
+        self.assertEqual(tc.call_args.kwargs["title"], project["name"])  # the tab is named after the project
+        self.assertEqual(tc.call_args.kwargs["color"], hosts_mod.terminal_color(0))  # and coloured by its position
+        self.assertEqual(tc.call_args.kwargs["tag"], project["id"])  # and tagged so it can be found again
         self.assertEqual(self.client.post(url).status_code, 403)
         self.assertEqual(self.client.post("/api/projects/nope/terminal", headers=H).status_code, 404)
+
+    def test_open_terminal_focuses_the_existing_tab(self):
+        os.makedirs(self.proj_dir)
+        project = {"id": "p2", "name": "App", "location": "local", "path": self.proj_dir}
+        with mock.patch("patchgoblin.hosts.shutil.which", side_effect=lambda n: n if n == "wt" else None), \
+                mock.patch("patchgoblin.hosts.wt_tabs", return_value=["p1", "p2"]), \
+                mock.patch("patchgoblin.hosts._spawn") as spawn:
+            self.assertEqual(hosts_mod.open_terminal(project, platform="win32"), "focused")
+            self.assertEqual(spawn.call_args[0][0], ["wt", "-w", "PatchGoblin", "focus-tab", "--target", "1"])
+            self.assertEqual(hosts_mod.open_terminal(project, platform="win32", new=True), "opened")
+            self.assertEqual(spawn.call_args[0][0][:4], ["wt", "-w", "PatchGoblin", "new-tab"])
+            self.assertEqual(hosts_mod.open_terminal({**project, "id": "p3"}, platform="win32"), "opened")
+
+    def test_open_terminal_double_click_opens_one_tab(self):
+        os.makedirs(self.proj_dir)
+        project = {"id": "p4", "name": "App", "location": "local", "path": self.proj_dir}
+        hosts_mod._just_opened.clear()
+        with mock.patch("patchgoblin.hosts.shutil.which", side_effect=lambda n: n if n == "wt" else None), \
+                mock.patch("patchgoblin.hosts.wt_tabs", return_value=[]), \
+                mock.patch("patchgoblin.hosts._spawn") as spawn:
+            self.assertEqual(hosts_mod.open_terminal(project, platform="win32"), "opened")
+            # the new shell isn't in the process list yet, but the tab isn't opened twice
+            self.assertEqual(hosts_mod.open_terminal(project, platform="win32"), "focused")
+            self.assertEqual(spawn.call_count, 1)
+            self.assertEqual(hosts_mod.open_terminal(project, platform="win32", new=True), "opened")  # + still opens
+            self.assertEqual(spawn.call_count, 2)
 
     def test_open_vscode(self):
         project = self.add_project()
@@ -1909,13 +1956,38 @@ class HostTests(unittest.TestCase):
     def test_terminal_commands(self):
         local, ssh = LocalHost(), SSHHost("me@box", 2222)
         have = lambda names: (lambda n: n if n in names else None)  # noqa: E731
+        # Windows Terminal: always a new tab in the one "PatchGoblin" window, named when asked.
         self.assertEqual(terminal_command(local, "C:\\a b", "win32", have({"wt"})),
-                         (["wt", "-d", "C:\\a b"], None))
+                         (["wt", "-w", "PatchGoblin", "new-tab", "-d", "C:\\a b"], None))
+        self.assertEqual(terminal_command(local, "C:\\a;b", "win32", have({"wt"}), title="My; app")[0],
+                         ["wt", "-w", "PatchGoblin", "new-tab", "--title", "My\\; app", "--suppressApplicationTitle",
+                          "-d", "C:\\a\\;b"])
+        self.assertEqual(terminal_command(local, "C:\\a", "win32", have({"wt"}), color="#12ab9f")[0],
+                         ["wt", "-w", "PatchGoblin", "new-tab", "--tabColor", "#12ab9f", "-d", "C:\\a"])
+        self.assertNotIn("--tabColor", terminal_command(local, "C:\\a", "win32", have({"wt"}), color="red;x")[0])
+        colors = [hosts_mod.terminal_color(i) for i in range(12)]
+        self.assertTrue(all(re.fullmatch(r"#[0-9a-f]{6}", c) for c in colors), colors)
+        self.assertEqual(len(set(colors)), 12)
+        self.assertEqual(colors[3], hosts_mod.terminal_color(3))  # a project keeps its colour
+        # Tagged tabs: the local shell sets PATCHGOBLIN_TAB; ssh carries it as SetEnv.
+        argv = terminal_command(local, "C:\\a", "win32", have({"wt", "pwsh"}), tag="p1")[0]
+        self.assertEqual(argv[-6:], ["C:\\a", "pwsh.exe", "-NoLogo", "-NoExit", "-Command", "${env:PATCHGOBLIN_TAB}='p1'"])
+        argv = terminal_command(ssh, "/srv", "win32", have({"wt"}), tag="p2")[0]
+        self.assertEqual(argv[4:7], ["ssh", "-o", "SetEnv=PATCHGOBLIN_TAB=p2"])
+        self.assertEqual(hosts_mod.parse_wt_tabs(json.dumps([
+            "pwsh.exe -NoLogo -NoExit -Command ${env:PATCHGOBLIN_TAB}='p1'",
+            'powershell.exe -NoProfile -Command "$p = Get-CimInstance ... LIKE \'%PATCHGOBLIN_TAB%\'"',
+            "ssh -o SetEnv=PATCHGOBLIN_TAB=p2 -t me@box x", "notepad.exe"])), ["p1", "p2"])
+        self.assertEqual(hosts_mod.parse_wt_tabs('"pwsh -Command ${env:PATCHGOBLIN_TAB}=\'only\'"'), ["only"])
+        self.assertEqual(hosts_mod.parse_wt_tabs("not json"), [])
         self.assertEqual(terminal_command(local, "C:\\a", "win32", have(set())),
                          (["powershell.exe", "-NoExit"], "C:\\a"))
-        argv, cwd = terminal_command(ssh, "/srv/my app", "win32", have({"wt"}))
-        self.assertEqual(argv[:6], ["wt", "ssh", "-t", "-p", "2222", "me@box"])
-        self.assertIn("cd '/srv/my app'", argv[6])
+        self.assertEqual(terminal_command(local, "C:\\a", "win32", have(set()), title="It's")[0],
+                         ["powershell.exe", "-NoExit", "-Command", "$Host.UI.RawUI.WindowTitle = 'It''s'"])
+        argv, cwd = terminal_command(ssh, "/srv/my app", "win32", have({"wt"}), title="App (me@box)")
+        self.assertEqual(argv[:12], ["wt", "-w", "PatchGoblin", "new-tab", "--title", "App (me@box)",
+                                     "--suppressApplicationTitle", "ssh", "-t", "-p", "2222", "me@box"])
+        self.assertIn("cd '/srv/my app'", argv[12])
         self.assertIsNone(cwd)
         self.assertEqual(terminal_command(local, "/a", "darwin", have(set()))[0],
                          ["open", "-a", "Terminal", "/a"])
@@ -3350,6 +3422,9 @@ class SshToolsTests(AppTestCase):
         with mock.patch("patchgoblin.hosts._spawn") as spawn:
             hosts_mod.run_in_terminal(argv, "win32", which=lambda n: None)
             spawn.assert_called_with(argv, None, "CREATE_NEW_CONSOLE")
+            hosts_mod.run_in_terminal(argv, "win32", which=lambda n: n == "wt", title="Install keys")
+            spawn.assert_called_with(["wt", "-w", "PatchGoblin", "new-tab", "--title", "Install keys",
+                                      "--suppressApplicationTitle", *argv], None, "CREATE_NEW_CONSOLE")
             hosts_mod.run_in_terminal(argv, "darwin")
             self.assertEqual(spawn.call_args[0][0][0], "osascript")
             hosts_mod.run_in_terminal(argv, "linux", which=lambda n: n == "xterm")
@@ -3787,6 +3862,274 @@ class PluginTests(unittest.TestCase):
         self.assertNotIn("ssh_servers", saved)
         self.assertEqual(saved["plugin_data"]["ssh"]["servers"][0]["id"], "box")
         self.assertEqual(saved["timeouts"], {"run": 5})
+
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import fake_llm_server  # noqa: E402
+from patchgoblin.plugins.llm import llmapi  # noqa: E402
+
+
+class LlmConsoleTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.app = create_app(os.path.join(self.tmp.name, "data"), start_engine=False)
+        self.addCleanup(self.app.config["PLUGINS"].stop_all)
+        self.client = self.app.test_client()
+        self.fake = fake_llm_server.start(require_key=True)
+        self.addCleanup(self.fake.server_close)
+        self.addCleanup(self.fake.shutdown)
+        self.base = f"http://127.0.0.1:{self.fake.server_address[1]}"
+        fake_llm_server.Handler.requests.clear()
+
+    def add(self, **extra):
+        spec = {"name": "Fake", "kind": "llamacpp", "base_url": self.base + "/v1/", "api_key": fake_llm_server.KEY,
+                "auth": "bearer", **extra}
+        res = self.client.post("/api/llm/servers", headers=H, json={"server": spec})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        return res.get_json()
+
+    def events(self, sid, **req):
+        res = self.client.post(f"/api/llm/servers/{sid}/send", headers=H, json=req)
+        self.assertEqual(res.status_code, 200, res.get_data(as_text=True))
+        return [json.loads(line) for line in res.get_data(as_text=True).splitlines() if line.strip()]
+
+    def test_servers_keep_keys_on_the_server(self):
+        self.assertEqual(self.client.post("/api/llm/servers", json={"server": {}}).status_code, 403)
+        data = self.add()
+        sid = data["saved"]
+        server = data["servers"][0]
+        self.assertEqual(server["base_url"], self.base)  # trailing /v1/ dropped
+        self.assertTrue(server["api_key_saved"])
+        self.assertNotIn("api_key", server)
+        self.assertNotIn(fake_llm_server.KEY, self.client.get("/api/llm/servers").get_data(as_text=True))
+        # Editing with a blank key keeps it; clear_key removes it.
+        self.client.post("/api/llm/servers", headers=H, json={"server": {**server, "name": "Renamed", "api_key": ""}})
+        saved = self.app.config["SETTINGS"].plugin_data("llm")["servers"][0]
+        self.assertEqual((saved["name"], saved["api_key"]), ("Renamed", fake_llm_server.KEY))
+        self.client.post("/api/llm/servers", headers=H, json={"server": {**server, "clear_key": True}})
+        self.assertEqual(self.app.config["SETTINGS"].plugin_data("llm")["servers"][0]["api_key"], "")
+        bad = self.client.post("/api/llm/servers", headers=H, json={"server": {"base_url": "ftp://x"}})
+        self.assertEqual(bad.status_code, 400)
+        self.client.delete(f"/api/llm/servers/{sid}", headers=H)
+        self.assertEqual(self.client.get("/api/llm/servers").get_json()["servers"], [])
+
+    def test_endpoint_suggestions_copy_the_key_server_side(self):
+        self.app.config["SETTINGS"].save_endpoints([{"id": "box", "name": "Box", "base_url": self.base + "/v1",
+                                                     "api_key": fake_llm_server.KEY, "model": "m"}])
+        sugg = self.client.get("/api/llm/servers").get_json()["suggestions"]
+        self.assertEqual([(s["base_url"], s["endpoint"]) for s in sugg], [(self.base, "box")])
+        self.assertNotIn(fake_llm_server.KEY, json.dumps(sugg))
+        self.client.post("/api/llm/servers", headers=H, json={"server": {"base_url": self.base, "from_endpoint": "box"}})
+        self.assertEqual(self.app.config["SETTINGS"].plugin_data("llm")["servers"][0]["api_key"], fake_llm_server.KEY)
+
+    def test_models_context_and_probe(self):
+        sid = self.add()["saved"]
+        models = self.client.post(f"/api/llm/servers/{sid}/models", headers=H).get_json()
+        self.assertEqual([m["id"] for m in models["models"]], ["qwen3-8b", "tiny"])
+        self.assertEqual(models["models"][0]["context_length"], 40960)
+        info = self.client.post(f"/api/llm/servers/{sid}/model-info", headers=H, json={"model": "qwen3-8b"}).get_json()
+        self.assertEqual(info["context_length"], 8192)  # the runtime n_ctx beats the training maximum
+        self.assertIn("/props", info["context_source"])
+        probe = self.client.post(f"/api/llm/servers/{sid}/probe", headers=H).get_json()
+        self.assertEqual(probe["detected"], "llamacpp")
+        self.assertEqual(next(r for r in probe["results"] if r["path"] == "/health")["status"], 200)
+
+    def test_tokenize_skips_servers_that_ignore_messages(self):
+        sid = self.add()["saved"]
+        res = self.client.post(f"/api/llm/servers/{sid}/tokenize", headers=H,
+                               json={"model": "qwen3-8b", "text": "one two three", "messages": [{"role": "user", "content": "x"}]})
+        self.assertEqual(res.get_json()["count"], 3)
+
+    def test_streaming_relay_is_recorded_with_masked_key(self):
+        sid = self.add()["saved"]
+        body = {"model": "qwen3-8b", "messages": [{"role": "user", "content": "hi"}], "stream": True,
+                "stream_options": {"include_usage": True}}
+        evs = self.events(sid, method="POST", path="/v1/chat/completions", body=json.dumps(body), label="qwen3-8b")
+        kinds = [e["event"] for e in evs]
+        self.assertEqual((kinds[0], kinds[1], kinds[-1]), ("request", "response", "done"))
+        self.assertEqual(evs[1]["status"], 200)
+        lines = [e["data"] for e in evs if e["event"] == "line"]
+        self.assertEqual(lines[-1], "data: [DONE]")
+        self.assertTrue(any('"usage"' in line for line in lines))
+        self.assertEqual(evs[0]["headers"]["Authorization"], "Bearer …3456")
+        # The upstream got the real key; nothing sent to the browser has it.
+        sent = fake_llm_server.Handler.requests[-1]
+        self.assertEqual(sent[2]["Authorization"], f"Bearer {fake_llm_server.KEY}")
+        self.assertEqual(json.loads(sent[3]), body)
+        hist = self.client.get("/api/llm/history").get_json()["history"]
+        self.assertEqual((hist[0]["status"], hist[0]["label"]), (200, "qwen3-8b"))
+        item = self.client.get(f"/api/llm/history/{hist[0]['id']}").get_json()
+        self.assertIn("data: [DONE]", item["response"])
+        self.assertNotIn(fake_llm_server.KEY, json.dumps(item))
+        self.client.delete("/api/llm/history", headers=H)
+        self.assertEqual(self.client.get("/api/llm/history").get_json()["history"], [])
+
+    def test_errors_are_passed_through(self):
+        sid = self.add(api_key="wrong-key-0000")["saved"]
+        evs = self.events(sid, method="POST", path="/v1/chat/completions", body="{}")
+        self.assertEqual(evs[1]["status"], 401)
+        self.assertIn("Invalid API key", next(e for e in evs if e["event"] == "body")["data"])
+        bad = self.client.post(f"/api/llm/servers/{sid}/send", headers=H, json={"method": "POST", "path": "nope"})
+        self.assertEqual(bad.status_code, 400)
+        down = self.add(name="Down", base_url="http://127.0.0.1:9")["saved"]
+        evs = self.events(down, method="GET", path="/v1/models")
+        self.assertEqual([e["event"] for e in evs], ["request", "error", "done"])
+
+    def test_ndjson_streams_line_by_line(self):
+        sid = self.add(kind="ollama")["saved"]
+        evs = self.events(sid, method="POST", path="/api/chat",
+                          body=json.dumps({"model": "m", "messages": [{"role": "user", "content": "hi"}]}))
+        lines = [json.loads(e["data"]) for e in evs if e["event"] == "line"]
+        self.assertEqual("".join(x["message"]["content"] for x in lines), "Hello")
+        self.assertTrue(lines[-1]["done"])
+
+    def test_cancel_stops_a_stream(self):
+        self.fake.delay = 0.3
+        sid = self.add()["saved"]
+        plugin = self.app.config["PLUGINS"].plugin("llm")
+        res = self.client.post(f"/api/llm/servers/{sid}/send", headers=H, buffered=False, json={
+            "method": "POST", "path": "/v1/chat/completions",
+            "body": json.dumps({"model": "m", "messages": [{"role": "user", "content": "hi"}], "stream": True})})
+        it = res.response
+        first = json.loads(next(iter(it)))
+        self.assertEqual(self.client.post(f"/api/llm/cancel/{first['id']}", headers=H).get_json(), {"cancelled": True})
+        rest = [json.loads(chunk) for chunk in it]
+        res.close()
+        self.assertIn("cancelled", [e["event"] for e in rest])
+        self.assertTrue(plugin.history[-1]["cancelled"])
+
+    def test_detect_and_find_ctx(self):
+        r = lambda data: {"status": 200, "json": data}  # noqa: E731
+        self.assertEqual(llmapi.detect_kind({"/running": r({"running": []})}), "llama-swap")
+        self.assertEqual(llmapi.detect_kind({"/api/tags": r({"models": []})}), "ollama")
+        self.assertEqual(llmapi.detect_kind({"/v1/models": r({"data": [{"id": "x", "max_model_len": 4096}]})}), "vllm")
+        self.assertEqual(llmapi.detect_kind({"/get_server_info": r({})}), "sglang")
+        self.assertEqual(llmapi.find_ctx({"model_info": {"qwen3.context_length": 40960}}), (40960, "context_length"))
+        self.assertEqual(llmapi.normalize_base("http://h:1/v1/chat/completions"), "http://h:1")
+
+
+from patchgoblin.plugins.terminals import sessions as term_sessions  # noqa: E402
+
+REVERSER = [sys.executable, "-u", "-c", "print('ready'); print(input()[::-1])"]
+
+
+def wait_until(check, timeout=15):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if check():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+class TerminalsTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.app = create_app(os.path.join(self.tmp.name, "data"), start_engine=False)
+        self.addCleanup(self.app.config["PLUGINS"].stop_all)
+        self.client = self.app.test_client()
+        self.plugin = self.app.config["PLUGINS"].plugin("terminals")
+        shell = mock.patch.object(type(self.plugin), "shell_for", lambda _self, project: (REVERSER, None))
+        shell.start()
+        self.addCleanup(shell.stop)
+        self.proj_dir = os.path.join(self.tmp.name, "proj")
+        res = self.client.post("/api/projects", headers=H, json={"path": self.proj_dir, "provider": "claude"})
+        self.project = res.get_json()
+
+    def test_pty_round_trip(self):
+        s = term_sessions.Session(REVERSER, None, "t", cols=90, rows=20)
+        self.addCleanup(s.kill)
+        self.assertTrue(wait_until(lambda: "ready" in s.buf), s.buf)
+        s.resize(120, 40)
+        self.assertEqual((s.cols, s.rows), (120, 40))
+        s.write("olleh\r")
+        self.assertTrue(wait_until(lambda: not s.running), s.buf)
+        self.assertIn("hello", s.buf)
+        self.assertEqual(s.exit_code, 0)
+        text, end, truncated = s.read_since(0)
+        self.assertEqual((end, truncated), (len(s.buf), False))
+        self.assertEqual(s.read_since(end)[0], "")
+        with self.assertRaises(ValueError):
+            s.write("x")
+
+    def test_ctrl_c_interrupts_a_running_command(self):
+        s = term_sessions.Session([sys.executable, "-u", "-c", "import time; print('ready'); time.sleep(60)"], None, "t")
+        self.addCleanup(s.kill)
+        self.assertTrue(wait_until(lambda: "ready" in s.buf), s.buf)
+        s.write("\x03")
+        self.assertTrue(wait_until(lambda: not s.running, timeout=10), "^C didn't stop the command")
+        self.assertIn("KeyboardInterrupt", s.buf)
+
+    def test_scrollback_is_bounded_and_numbered(self):
+        s = term_sessions.Session(REVERSER, None, "t")
+        s.kill()
+        with s.cond:
+            s.buf, s.start = "", 0
+        with mock.patch.object(term_sessions, "SCROLLBACK", 10):
+            s._append("01234567")
+            s._append("89abcdef")
+        self.assertEqual((s.buf, s.start, s.end), ("6789abcdef", 6, 16))
+        text, end, truncated = s.read_since(2)
+        self.assertEqual((text, end, truncated), ("6789abcdef", 16, True))
+        self.assertEqual(s.read_since(12)[0], "cdef")
+
+    def stream(self, sid, since=0):
+        res = self.client.post(f"/api/terminals/sessions/{sid}/stream", headers=H, json={"since": since})
+        return [json.loads(line) for line in res.get_data(as_text=True).splitlines() if line.strip()]
+
+    def test_routes(self):
+        self.assertEqual(self.client.post("/api/terminals/sessions", json={}).status_code, 403)
+        res = self.client.post("/api/terminals/sessions", headers=H, json={"project": self.project["id"], "cols": 90, "rows": 25})
+        self.assertEqual(res.status_code, 201, res.get_json())
+        s = res.get_json()["session"]
+        self.assertEqual((s["title"], s["color"], s["project"], s["cols"]),
+                         (self.project["name"], hosts_mod.terminal_color(0), self.project["id"], 90))
+        session = self.plugin.sessions.get(s["id"])
+        self.assertTrue(wait_until(lambda: "ready" in session.buf))
+        self.assertEqual(self.client.post(f"/api/terminals/sessions/{s['id']}/resize", headers=H,
+                                          json={"cols": 100, "rows": 30}).status_code, 200)
+        self.assertEqual(self.client.post(f"/api/terminals/sessions/{s['id']}/input", headers=H,
+                                          json={"data": 5}).status_code, 400)
+        self.client.post(f"/api/terminals/sessions/{s['id']}/input", headers=H, json={"data": "olleh\r"})
+        self.assertTrue(wait_until(lambda: not session.running))
+        events = self.stream(s["id"])  # the whole scrollback, then the exit
+        self.assertIn("hello", "".join(e.get("d", "") for e in events))
+        self.assertEqual(events[-1], {"event": "exit", "code": 0})
+        tail = self.stream(s["id"], since=events[0]["end"])  # nothing new from the end offset
+        self.assertEqual(("".join(e.get("d", "") for e in tail), tail[-1]["event"]), ("", "exit"))
+        listed = self.client.get("/api/terminals/sessions").get_json()["sessions"]
+        self.assertEqual([(x["id"], x["alive"], x["exit_code"]) for x in listed], [(s["id"], False, 0)])
+        renamed = self.client.post(f"/api/terminals/sessions/{s['id']}/rename", headers=H, json={"title": " New  name "})
+        self.assertEqual(renamed.get_json()["sessions"][0]["title"], "New name")
+        new = self.client.post(f"/api/terminals/sessions/{s['id']}/restart", headers=H).get_json()["session"]
+        self.assertNotEqual(new["id"], s["id"])
+        self.assertEqual(new["title"], "New name")
+        self.assertEqual(self.client.post(f"/api/terminals/sessions/{s['id']}/stream", headers=H).status_code, 404)
+        self.assertEqual(self.client.delete(f"/api/terminals/sessions/{new['id']}", headers=H).get_json(), {"sessions": []})
+        bad = self.client.post("/api/terminals/sessions", headers=H, json={"project": "nope"})
+        self.assertEqual(bad.status_code, 400)
+
+    def test_session_cap_and_plugin_off(self):
+        with mock.patch.object(term_sessions, "MAX_SESSIONS", 1):
+            ok = self.client.post("/api/terminals/sessions", headers=H, json={})
+            self.assertEqual(ok.status_code, 201)
+            self.assertIn("At most 1", self.client.post("/api/terminals/sessions", headers=H, json={}).get_json()["error"])
+        sid = ok.get_json()["session"]["id"]
+        self.client.put("/api/plugins/terminals", headers=H, json={"enabled": False})
+        self.assertEqual(self.plugin.sessions.list(), [])  # switching it off ends the shells
+        self.assertEqual(self.client.get("/api/terminals/sessions").status_code, 404)
+        self.assertEqual(self.client.post(f"/api/terminals/sessions/{sid}/input", headers=H, json={"data": "x"}).status_code, 404)
+
+    def test_vendor_scripts_load_before_the_plugin(self):
+        page = self.client.get("/").get_data(as_text=True)
+        order = [page.index(f"/plugins/terminals/{name}?v=") for name in
+                 ("vendor/xterm.js", "vendor/addon-fit.js", "vendor/addon-web-links.js", "plugin.js")]
+        self.assertEqual(order, sorted(order))
+        self.assertLess(page.index("/plugins/terminals/vendor/xterm.css"), page.index("/plugins/terminals/plugin.css"))
+        with self.client.get("/plugins/terminals/vendor/xterm.js") as res:
+            self.assertEqual(res.status_code, 200)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,13 @@
+{# LLM API console sidebar: the tools, then the saved servers (click one to make it current). #}
+<div id="sidebar-llm">
+  <ul id="llm-nav" class="project-list">
+    <li data-tool="chat" tabindex="0">Chat</li>
+    <li data-tool="models" tabindex="0">Models</li>
+    <li data-tool="probe" tabindex="0">Probe</li>
+    <li data-tool="http" tabindex="0">Raw HTTP</li>
+    <li data-tool="history" tabindex="0">History <span id="llm-history-count" class="muted small"></span></li>
+    <li data-tool="servers" tabindex="0">Servers</li>
+  </ul>
+  <div class="llm-side-head muted small">Servers</div>
+  <ul id="llm-server-list" class="project-list"></ul>
+</div>

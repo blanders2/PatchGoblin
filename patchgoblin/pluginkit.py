@@ -63,6 +63,8 @@ class Plugin:
     description = ""
     icon = ""  # inner markup of a 24x24 stroke SVG (paths, circles…)
     order = 100  # activity-bar position, lowest first
+    scripts: list[str] = []  # extra files under static/ loaded before plugin.js (e.g. vendored libraries)
+    styles: list[str] = []  # extra stylesheets under static/ loaded before plugin.css
 
     def __init__(self, ctx: PluginContext):
         self.ctx = ctx
@@ -250,17 +252,28 @@ class PluginManager:
 
     # ---- views -------------------------------------------------------------------
     def asset_url(self, item: Loaded, kind: str) -> str:
-        name = item.assets[kind]
-        mtime = int(os.path.getmtime(os.path.join(item.static_dir, name)))
-        return f"/plugins/{item.id}/{name}?v={mtime}"
+        return self.file_url(item, item.assets[kind])
+
+    @staticmethod
+    def file_url(item: Loaded, name: str) -> str | None:
+        """URL of a file under the plugin's static/, versioned by its mtime (None if missing)."""
+        path = os.path.join(item.static_dir, name)
+        if not os.path.isfile(path):
+            log.warning("Plugin %s: missing static file %s", item.id, name)
+            return None
+        return f"/plugins/{item.id}/{name}?v={int(os.path.getmtime(path))}"
 
     def page_view(self) -> list[dict]:
         """What index.html needs to show the enabled plugins."""
-        return [{"id": i.id, "name": i.plugin.name or i.id, "icon": i.plugin.icon,
-                 "sidebar": i.templates.get("sidebar"), "view": i.templates.get("view"),
-                 "js": self.asset_url(i, "js") if "js" in i.assets else None,
-                 "css": self.asset_url(i, "css") if "css" in i.assets else None}
-                for i in self.active()]
+        def urls(names, own):
+            out = [self.file_url(i, n) for n in names] + ([self.asset_url(i, own)] if own in i.assets else [])
+            return [u for u in out if u]
+        views = []
+        for i in self.active():
+            views.append({"id": i.id, "name": i.plugin.name or i.id, "icon": i.plugin.icon,
+                          "sidebar": i.templates.get("sidebar"), "view": i.templates.get("view"),
+                          "scripts": urls(i.plugin.scripts, "js"), "styles": urls(i.plugin.styles, "css")})
+        return views
 
     def list_view(self) -> dict:
         """Every discovered plugin for the Plugins dialog, including broken ones."""

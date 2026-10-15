@@ -12,6 +12,6 @@ if __name__ == "__main__":
     print(f"PatchGoblin running at http://127.0.0.1:{port}")
     try:
         from waitress import serve
-        serve(app, host="127.0.0.1", port=port, threads=8)
+        serve(app, host="127.0.0.1", port=port, threads=32)
     except ImportError:
         app.run(host="127.0.0.1", port=port, threaded=True, use_reloader=False)

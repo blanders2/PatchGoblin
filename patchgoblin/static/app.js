@@ -1909,13 +1909,17 @@ function setupSettingsDialog() {
         else input.value = Array.isArray(obj[key]) ? obj[key].join(" ") : obj[key] ?? "";
       }
       $("#endpoint-list").replaceChildren(...s.endpoints.map(endpointBlock));
+      const browserOpt = $("#terminal-browser-option"); // offered only while the plugin is on
+      browserOpt.disabled = !browserTerminals();
+      browserOpt.textContent = browserTerminals() ? "The browser (Terminals plugin)" : "The browser (turn on the Terminals plugin first)";
+      if (browserOpt.disabled && form.elements["terminal.open_in"].value === "browser") form.elements["terminal.open_in"].value = "wt";
       showError($("#settings-error"), "");
       dialog.showModal();
     } catch (e) { toast(e.message, true); }
   };
   form.onsubmit = async ev => {
     ev.preventDefault();
-    const out = { commands: Object.fromEntries([...CLI].map(p => [p, {}])), timeouts: {}, automation: {}, git: {},
+    const out = { commands: Object.fromEntries([...CLI].map(p => [p, {}])), timeouts: {}, automation: {}, git: {}, terminal: {},
       endpoints: $$("#endpoint-list .endpoint").map(readEndpoint) };
     for (const name of settingFields(form)) {
       const [obj, key] = settingPath(name, out);
@@ -1927,6 +1931,8 @@ function setupSettingsDialog() {
       const saved = await api("PUT", "/api/settings", out);
       applyProviderSettings(saved);
       state.automation = saved.automation || {};
+      state.terminalOpenIn = saved.terminal?.open_in;
+      renderTerminalButtons();
       renderAutoDefaults();
       renderAutoFlow();
       dialog.close();
@@ -2240,6 +2246,45 @@ function setupPluginsDialog() {
   };
 }
 
+// ---- the project's Terminal and + buttons --------------------------------------------------
+// Settings → Terminal chooses where shells open: "wt" (Windows Terminal; the server switches to
+// the project's open tab or opens one) or "browser" (the Terminals plugin, via pg:open-terminal).
+// Terminal reuses the project's terminal, opening one if there's none; + always opens another.
+const browserTerminals = () => !!activityTab("terminals");
+const terminalPlace = () => state.terminalOpenIn === "browser" && browserTerminals() ? "browser" : "wt";
+
+function renderTerminalButtons() {
+  const where = terminalPlace() === "browser" ? "in the browser" : "in Windows Terminal";
+  $("#terminal-btn").title = `Switch to the project's terminal ${where}, or open one (change where in Settings)`;
+  $("#terminal-new-btn").title = `Open another terminal ${where} in the project directory`;
+}
+
+async function openProjectTerminal(fresh) {
+  const p = currentProject();
+  if (!p) return;
+  if (terminalPlace() === "browser") {
+    document.dispatchEvent(new CustomEvent("pg:open-terminal", { detail: { project: p, new: fresh } }));
+    return;
+  }
+  try {
+    const res = await api("POST", `/api/projects/${p.id}/terminal`, { new: fresh });
+    toast(res.action === "focused" ? "Switched to the project's terminal tab" : "Terminal opened");
+  } catch (e) { toast(e.message, true); }
+}
+
+async function loadTerminalSettings() {
+  try {
+    state.terminalOpenIn = (await api("GET", "/api/settings")).terminal?.open_in;
+  } catch { /* stays on Windows Terminal */ }
+  renderTerminalButtons();
+}
+
+function setupTerminalButtons() {
+  $("#terminal-btn").onclick = () => openProjectTerminal(false);
+  $("#terminal-new-btn").onclick = () => openProjectTerminal(true);
+  loadTerminalSettings();
+}
+
 function init() {
   setupThemePicker();
   setupProjectDialog();
@@ -2262,7 +2307,7 @@ function init() {
     try { await navigator.clipboard.writeText($("#ci-message").value); toast("Message copied"); }
     catch { toast("Could not copy", true); }
   };
-  $("#terminal-btn").onclick = () => postAndToast("terminal", "Terminal opened");
+  setupTerminalButtons();
   $("#vscode-btn").onclick = () => postAndToast("vscode", "VS Code opened");
   for (const btn of $$(".queue-tab")) btn.onclick = () => selectTab(btn.dataset.col);
   $(".queue-tabs").onkeydown = onTabKeydown;

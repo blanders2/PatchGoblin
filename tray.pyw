@@ -108,7 +108,7 @@ def main() -> None:
 
     try:
         app = create_app()
-        server = create_server(app, host="127.0.0.1", port=PORT, threads=8)
+        server = create_server(app, host="127.0.0.1", port=PORT, threads=32)
     except OSError as e:
         fail(f"PatchGoblin could not listen on port {PORT}: {e}")
     threading.Thread(target=server.run, name="pg-server", daemon=True).start()

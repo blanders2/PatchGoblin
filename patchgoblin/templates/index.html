@@ -16,8 +16,8 @@
   </script>
   <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
-  {% for p in plugins %}{% if p.css %}<link rel="stylesheet" href="{{ p.css }}">
-  {% endif %}{% endfor %}
+  {% for p in plugins %}{% for href in p.styles %}<link rel="stylesheet" href="{{ href }}">
+  {% endfor %}{% endfor %}
 </head>
 <body data-models="{{ models|tojson|forceescape }}" data-providers="{{ providers|tojson|forceescape }}">
 {% macro secrets_warning(ack_name, id=none, hidden=false) %}
@@ -114,7 +114,11 @@
         </div>
         <div class="project-controls">
           <button class="ghost" id="chat-btn" title="Ask the AI about this project (read-only)">Chat</button>
-          <button class="ghost" id="terminal-btn" title="Open a terminal in the project directory">Terminal</button>
+          <span class="split-btn">
+            <button class="ghost" id="terminal-btn" title="Open a terminal in the project directory">Terminal</button>
+            <button class="ghost split-toggle" id="terminal-new-btn" aria-label="New terminal"
+                    title="Open another terminal in the project directory">+</button>
+          </span>
           <button class="ghost" id="vscode-btn" title="Open the project directory in VS Code">VS Code</button>
           <button class="ghost" id="commits-btn">Commits</button>
           <button class="ghost" id="checkin-btn" title="Commit the finished tasks to SVN" hidden>Check in</button>
@@ -617,6 +621,17 @@
         <input type="checkbox" name="automation.auto_promote"> Auto-promote drafted tasks once their questions are answered</label>
     </fieldset>
     <fieldset>
+      <legend>Terminal</legend>
+      <label>Open project terminals in
+        <select name="terminal.open_in">
+          <option value="wt">Windows Terminal</option>
+          <option value="browser" id="terminal-browser-option">The browser (Terminals plugin)</option>
+        </select></label>
+      <p class="muted small">A project's <b>Terminal</b> button switches to its open terminal, or opens one
+        if there isn't one yet; <b>+</b> always opens another. Without Windows Terminal installed, the
+        system's own terminal window is used.</p>
+    </fieldset>
+    <fieldset>
       <legend>New repositories</legend>
       <label>.gitignore template
         <textarea name="git.gitignore" rows="8" class="mono" spellcheck="false"></textarea></label>
@@ -633,7 +648,7 @@
 
 <div id="toast" class="toast" hidden></div>
 <script src="{{ url_for('static', filename='app.js') }}"></script>
-{% for p in plugins %}{% if p.js %}<script src="{{ p.js }}"></script>
-{% endif %}{% endfor %}
+{% for p in plugins %}{% for src in p.scripts %}<script src="{{ src }}"></script>
+{% endfor %}{% endfor %}
 </body>
 </html>

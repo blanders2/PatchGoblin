@@ -1,0 +1,97 @@
+/* LLM API console plugin. Scoped to its sidebar pane (#sidebar-llm) and view (#llm-view). */
+#sidebar-llm { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; }
+#sidebar-llm .project-list { flex: 0 0 auto; overflow: visible; }
+#sidebar-llm .project-list li { padding: 5px 8px; border-radius: 6px; font-size: 13px; }
+#sidebar-llm li:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#sidebar-llm .p-dot.bad { background: var(--danger); }
+.llm-side-head { margin: 8px 0 4px; padding: 6px 8px 0; border-top: 1px solid var(--line); text-transform: uppercase; letter-spacing: .04em; font-size: 11px; }
+
+#llm-view { font-size: 13px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+#llm-view label { display: flex; flex-direction: column; gap: 2px; font-size: 11.5px; color: var(--muted); min-width: 0; }
+#llm-view label.check { flex-direction: row; align-items: center; gap: 6px; color: var(--text); }
+#llm-view input:not([type="checkbox"]), #llm-view select, #llm-view textarea { padding: 3px 6px; font-size: 12.5px; border-radius: 5px; color: var(--text); }
+#llm-view select { width: auto; max-width: 100%; }
+#llm-view button { padding: 3px 10px; font-size: 12.5px; border-radius: 5px; }
+#llm-view button.small { padding: 1px 7px; font-size: 12px; }
+#llm-view textarea { width: 100%; resize: vertical; box-sizing: border-box; }
+#llm-view .log { margin: 0; max-height: 40vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+#llm-view .log.llm-tall { max-height: 60vh; }
+#llm-view fieldset { border: 0; padding: 0; margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+#llm-view legend { padding: 0 0 4px; margin-bottom: 4px; width: 100%; border-bottom: 1px solid var(--line);
+  font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.llm-panel { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.llm-panel[hidden] { display: none; }
+.llm-row { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+.llm-row .actions { margin-left: auto; display: flex; gap: 6px; }
+.llm-grow { flex: 1 1 14em; }
+.llm-inline { display: flex; gap: 4px; align-items: center; }
+.llm-inline input { flex: 1; min-width: 8em; }
+.llm-num { width: 6em; }
+
+/* the shared top bar */
+.llm-bar { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+.llm-ctx { min-width: 12em; display: flex; flex-direction: column; gap: 3px; }
+.llm-ctx-text { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.llm-meter { height: 6px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 99px; overflow: hidden; }
+.llm-meter div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+.llm-meter div.warn { background: var(--warn); }
+.llm-meter div.bad { background: var(--danger); }
+
+/* chat */
+.llm-chat { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 420px); gap: 12px; align-items: start; }
+.llm-convo { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.llm-convo > details summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.llm-messages { display: flex; flex-direction: column; gap: 8px; min-height: 30vh; max-height: 58vh; overflow-y: auto;
+  padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+.llm-empty { margin: auto; text-align: center; }
+.llm-msg { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; background: var(--bg); }
+.llm-msg.user { border-left: 3px solid var(--accent); }
+.llm-msg.assistant { border-left: 3px solid var(--muted); }
+.llm-msg.system { border-left: 3px solid var(--warn); }
+.llm-msg.err { border-left-color: var(--danger); }
+.llm-msg-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; margin-bottom: 3px; }
+.llm-role { font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; }
+.llm-msg-actions { margin-left: auto; display: flex; gap: 2px; }
+.llm-msg-actions button { padding: 0 5px !important; }
+.llm-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }
+.llm-reasoning { margin: 2px 0 6px; padding: 4px 8px; border-radius: 5px; background: var(--panel-2); color: var(--muted); }
+.llm-reasoning summary { cursor: pointer; font-size: 11.5px; }
+.llm-compose { display: flex; flex-direction: column; gap: 6px; }
+.llm-compose-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.llm-compose-actions label.check { margin-right: auto; }
+.llm-side { display: flex; flex-direction: column; gap: 8px; min-width: 0; position: sticky; top: 0;
+  max-height: calc(100vh - 150px); overflow-y: auto; padding-right: 2px; }
+.llm-box { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; background: var(--panel); min-width: 0; }
+.llm-box > summary { cursor: pointer; font-weight: 600; font-size: 12px; }
+.llm-params { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 8px; margin-top: 6px; }
+.llm-params label.check { grid-column: 1 / -1; }
+.llm-params input, .llm-params select { width: 100%; box-sizing: border-box; }
+.llm-box p.muted.small { margin: 6px 0 0; font-size: 11px; }
+.llm-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 6px; flex-wrap: wrap; }
+.llm-tabs button { border: 0 !important; border-radius: 5px 5px 0 0 !important; background: transparent; color: var(--muted); }
+.llm-tabs button[aria-selected="true"] { background: var(--b-planned); color: var(--text); font-weight: 600; }
+.llm-inspector [data-pane] { display: flex; flex-direction: column; gap: 6px; }
+.llm-inspector [data-pane][hidden] { display: none; }
+.llm-inspector .llm-row { align-items: center; }
+#llm-req-url { flex: 1; overflow-wrap: anywhere; }
+.llm-stream-log { min-height: 12em; }
+.llm-kv { width: 100%; border-collapse: collapse; font-size: 12px; }
+.llm-kv th { text-align: left; font-weight: 500; color: var(--muted); padding: 2px 6px 2px 0; white-space: nowrap; vertical-align: top; }
+.llm-kv td { padding: 2px 0; overflow-wrap: anywhere; }
+.llm-logprobs { line-height: 1.7; white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace; font-size: 12px; max-height: 50vh; overflow: auto; }
+.llm-tok { background: color-mix(in srgb, var(--danger) calc(var(--p) * 70%), transparent); border-radius: 3px; cursor: help; }
+
+/* tables */
+.llm-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12.5px; }
+.llm-table th { text-align: left; color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; padding: 2px 6px; }
+.llm-table td { padding: 3px 6px; border-top: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.llm-table td:last-child { text-align: right; overflow: visible; }
+.llm-table .actions { display: inline-flex; gap: 4px; justify-content: flex-end; flex-wrap: nowrap; }
+.llm-table tr.flash td { background: var(--b-planned); }
+.llm-table tr.bad td { color: var(--danger); }
+#llm-probe-rows tr, #llm-history-rows tr { cursor: pointer; }
+#llm-probe-rows tr:hover td, #llm-history-rows tr:hover td { background: var(--panel-2); }
+
+@media (max-width: 1100px) {
+  .llm-chat { grid-template-columns: minmax(0, 1fr); }
+}

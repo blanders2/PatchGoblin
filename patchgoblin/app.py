@@ -17,10 +17,10 @@ from flask import Flask, Response, abort, jsonify, render_template, request
 from . import cline, gitops, opencode, svnops
 from .engine import Engine
 from .pluginkit import PluginManager
-from .hosts import HostError, host_for, open_terminal, open_vscode, probe
+from .hosts import HostError, host_for, open_terminal, open_vscode, probe, terminal_color
 from .openai_agent import endpoint_key, list_models, valid_base_url, valid_header
 from .prompts import IMAGE_MIME, plan_questions
-from .store import (ATTACHMENT_NAME, AUTO_MODES, CLI_PROVIDERS, MODELS, STATUSES, Registry, Settings,
+from .store import (ATTACHMENT_NAME, AUTO_MODES, CLI_PROVIDERS, MODELS, STATUSES, TERMINAL_PLACES, Registry, Settings,
                     TaskStore, attachment_path, cli_model_suggestions, empty_doc, find_endpoint, find_task, log_event, new_task, now,
                     provider_choices, resolve_auto, save_attachment, tasks_path, valid_provider, vcs_for)
 from .validators import (MAX_BATCH, TRANSITIONS, plan_answers, plan_limit, plan_trust, remote_view,
@@ -114,6 +114,18 @@ def clean_git(values) -> dict:
         if len(text.encode("utf-8")) > 64 * 1024:
             raise ValueError("The .gitignore template must be under 64 KB.")
         out["gitignore"] = text if not text or text.endswith("\n") else text + "\n"
+    return out
+
+
+def clean_terminal(values) -> dict:
+    """The terminal settings sent by the Settings form: where the Terminal button opens shells."""
+    if not isinstance(values, dict):
+        raise ValueError("terminal must be an object.")
+    out = {}
+    if "open_in" in values:
+        if values["open_in"] not in TERMINAL_PLACES:
+            raise ValueError(f"terminal.open_in must be one of: {', '.join(TERMINAL_PLACES)}.")
+        out["open_in"] = values["open_in"]
     return out
 
 
@@ -326,6 +338,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             allowed["automation"] = clean_automation(data["automation"])
         if "git" in data:
             allowed["git"] = clean_git(data["git"])
+        if "terminal" in data:
+            allowed["terminal"] = clean_terminal(data["terminal"])
         endpoints = clean_endpoints(data["endpoints"], settings.get()["endpoints"]) if "endpoints" in data else None
         before = auto_values()
         updated = settings.update(allowed)
@@ -641,8 +655,9 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
 
     @app.post("/api/projects/<pid>/terminal")
     def terminal(pid):
-        open_terminal(project_or_404(pid))
-        return jsonify(ok=True)
+        project = project_or_404(pid)
+        action = open_terminal(project, terminal_color(registry.list().index(project)), new=body().get("new") is True)
+        return jsonify(ok=True, action=action)
 
     @app.post("/api/projects/<pid>/vscode")
     def vscode(pid):
