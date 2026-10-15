@@ -108,6 +108,115 @@ function curl(method, url, headers, bodyText) {
   return parts.join(" \\\n  ");
 }
 
+// ---- JSON tables -------------------------------------------------------------------------
+const MAX_COLS = 12, MAX_ROWS = 500, MAX_DEPTH = 4;
+const isObj = v => v !== null && typeof v === "object" && !Array.isArray(v);
+
+function jsonScalar(v) {
+  if (typeof v === "number") return el("span", { class: "llm-num-cell" }, fmt(v));
+  if (v === null) return el("span", { class: "muted" }, "null");
+  return document.createTextNode(String(v));
+}
+function jsonCell(v, depth) {
+  if (v !== null && typeof v === "object") {
+    if (depth >= MAX_DEPTH) return el("span", { class: "mono" }, JSON.stringify(v));
+    const n = Array.isArray(v) ? plural(v.length, "item") : plural(Object.keys(v).length, "key");
+    return el("details", { class: "llm-nest" }, el("summary", {}, n), jsonTable(v, depth + 1));
+  }
+  return jsonScalar(v);
+}
+
+function jsonTable(value, depth = 0) {
+  if (Array.isArray(value)) {
+    if (value.length && value.every(isObj)) {
+      const rows = value.slice(0, MAX_ROWS), cols = [];
+      for (const row of rows) for (const k of Object.keys(row)) if (!cols.includes(k)) cols.push(k);
+      const shown = cols.slice(0, MAX_COLS), more = cols.length > shown.length;
+      const head = el("tr", {}, ...shown.map(c => el("th", { title: c }, c)), more ? el("th", {}, "…") : "");
+      const body = rows.map(row => el("tr", {},
+        ...shown.map(c => el("td", { class: typeof row[c] === "number" ? "num" : "" }, c in row ? jsonCell(row[c], depth) : "")),
+        more ? el("td", {}, jsonCell(Object.fromEntries(cols.slice(MAX_COLS).filter(c => c in row).map(c => [c, row[c]])), depth)) : ""));
+      const wrap = el("div", { class: "llm-scroll" }, el("table", { class: "llm-table llm-json" }, el("thead", {}, head), el("tbody", {}, ...body)));
+      if (value.length > MAX_ROWS) wrap.append(el("div", { class: "muted small" }, `${fmt(value.length - MAX_ROWS)} more rows`));
+      return wrap;
+    }
+    if (value.every(v => v === null || typeof v !== "object")) {
+      const texts = value.map(String);
+      return texts.join(", ").length > 80 ? el("div", { class: "llm-lines" }, ...texts.map(t => el("div", {}, t)))
+        : document.createTextNode(texts.join(", ") || "(empty)");
+    }
+    return el("div", { class: "llm-lines" }, ...value.map(v => el("div", {}, jsonCell(v, depth))));
+  }
+  if (isObj(value)) {
+    const entries = Object.entries(value);
+    if (!entries.length) return el("span", { class: "muted" }, "(empty)");
+    return el("table", { class: "llm-kv llm-json" }, el("tbody", {}, ...entries.map(([k, v]) =>
+      el("tr", {}, el("th", {}, k), el("td", {}, jsonCell(v, depth))))));
+  }
+  return jsonScalar(value);
+}
+
+// The useful part of a reply first (the usual list envelopes unwrapped), the other top-level keys below it.
+function smartTable(value) {
+  if (isObj(value)) {
+    const key = ["data", "models", "results", "items", "running"].find(k => Array.isArray(value[k]) && value[k].length && value[k].every(isObj));
+    if (key) {
+      const rest = Object.fromEntries(Object.entries(value).filter(([k]) => k !== key && !(k === "object" && value[k] === "list")));
+      return el("div", { class: "llm-json-parts" }, el("div", { class: "muted small" }, `${key} (${fmt(value[key].length)})`), jsonTable(value[key]),
+        Object.keys(rest).length ? jsonTable(rest) : "");
+    }
+  }
+  return jsonTable(value);
+}
+
+// Streamed lines as rows: time, event, the text each carries, and its full JSON (expandable).
+function linesTable(lines) {
+  const rows = [];
+  for (const ev of lines.slice(-MAX_ROWS)) {
+    const payload = linePayload(ev.data);
+    if (payload === null) continue;
+    let obj = null;
+    try { obj = JSON.parse(payload); } catch { /* plain text */ }
+    const c = obj && obj.choices && obj.choices[0], d = (c && (c.delta || c.message)) || {};
+    const text = obj ? (d.content || d.reasoning_content || (obj.message && obj.message.content) || obj.content || obj.response || "") : payload;
+    rows.push({ ms: Math.round(ev.t), event: obj ? (obj.type || (c && c.finish_reason) || (obj.usage ? "usage" : "chunk")) : "text",
+      text: String(text), json: obj === null ? payload : obj });
+  }
+  return jsonTable(rows.length ? rows : [{ ms: "", event: "(no data lines)", text: "", json: "" }]);
+}
+
+// Fills `box` with a Table/Raw view of a response. `text` is a body; `lines` are streamed NDJSON/SSE events.
+function showJson(box, text, { lines = null } = {}) {
+  box._src = { text, lines };
+  let parsed, ok = false;
+  if (lines) ok = lines.length > 0;
+  else if (text) { try { parsed = JSON.parse(text); ok = parsed !== null && typeof parsed === "object"; } catch { /* not JSON */ } }
+  const mode = ok ? load(`view.${box.id}`, "table") : "raw";
+  const seg = ok ? el("div", { class: "llm-seg", role: "group" }, ...["table", "raw"].map(m =>
+    el("button", { type: "button", class: "small ghost", "aria-pressed": String(m === mode),
+      onclick: () => { store(`view.${box.id}`, m); showJson(box, box._src.text, { lines: box._src.lines }); } }, m === "table" ? "Table" : "Raw"))) : "";
+  let body;
+  if (mode === "table") body = lines ? linesTable(lines) : smartTable(parsed);
+  else {
+    const raw = lines ? lines.slice(-3000).map(ev => `${String(ev.t.toFixed(0)).padStart(7)} ms  ${ev.data}`).join("\n") : pretty(text || "");
+    body = el("pre", { class: "log mono small llm-tall" }, raw);
+  }
+  box.replaceChildren(seg, body);
+}
+
+// Same, but waits for the next frame so a fast stream doesn't rebuild the table per line.
+const jsonQueued = new WeakSet();
+function showJsonSoon(box, text, opts) {
+  box._src = { text, lines: opts && opts.lines };
+  if (jsonQueued.has(box)) return;
+  jsonQueued.add(box);
+  requestAnimationFrame(() => { jsonQueued.delete(box); showJson(box, box._src.text, { lines: box._src.lines }); });
+}
+
+function kvTable(obj) {
+  return el("table", { class: "llm-kv" }, el("tbody", {}, ...Object.entries(obj || {}).map(([k, v]) => el("tr", {}, el("th", {}, k), el("td", {}, String(v))))));
+}
+
 // ---- servers -----------------------------------------------------------------------------
 async function loadServers() {
   try {
@@ -121,7 +230,7 @@ async function loadServers() {
 
 function renderServers() {
   $("#llm-server").replaceChildren(...(L.servers.length ? L.servers.map(s => el("option", { value: s.id }, s.name))
-    : [el("option", { value: "" }, "No servers yet — add one under Servers")]));
+    : [el("option", { value: "" }, "No servers yet — add one")]));
   $("#llm-server").value = L.sid;
   $("#llm-server-list").replaceChildren(...L.servers.map(s => {
     const status = L.modelErrors[s.id] === undefined ? "" : L.modelErrors[s.id] ? "bad" : "ok";
@@ -242,10 +351,11 @@ async function loadModelInfo(model, force = false) {
 async function showModelInfo(model) {
   const out = $("#llm-model-info");
   out.hidden = false;
-  out.textContent = "Loading…";
+  out.replaceChildren("Loading…");
   const info = await loadModelInfo(model, true);
-  out.textContent = `${model}\ncontext: ${info.context_length ? fmt(info.context_length) : "unknown"} ${info.context_source ? `(${info.context_source})` : ""}\n\n`
-    + JSON.stringify(info.details, null, 2);
+  const box = el("div", { id: "llm-model-info-body" });
+  out.replaceChildren(el("pre", { class: "log mono small" }, `${model}\ncontext: ${info.context_length ? fmt(info.context_length) : "unknown"} ${info.context_source ? `(${info.context_source})` : ""}`), box);
+  showJson(box, JSON.stringify(info.details || {}));
 }
 
 function contextLength() {
@@ -267,11 +377,28 @@ function renderCtx() {
 }
 
 function serverSpec(f) {
+  const env = keyMode() === "env";
   return { id: f.elements.id.value, name: f.elements.name.value.trim(), kind: f.elements.kind.value, base_url: f.elements.base_url.value.trim(),
-    api_key: f.elements.api_key.value, clear_key: f.elements.clear_key.checked, api_key_env: f.elements.api_key_env.value.trim(),
+    // Only the active key input is sent; a blank key on edit keeps the saved one (the server decides).
+    api_key: env ? "" : f.elements.api_key.value, clear_key: f.elements.clear_key.checked,
+    api_key_env: env ? f.elements.api_key_env.value.trim() : "",
     auth: f.elements.auth.value, timeout: f.elements.timeout.value ? Number(f.elements.timeout.value) : null,
     verify_tls: f.elements.verify_tls.checked, headers: f.elements.headers.value, default_model: f.elements.default_model.value.trim(),
     from_endpoint: f.elements.from_endpoint.value || undefined };
+}
+
+const keyMode = () => $("#llm-key-mode").value;
+function setKeyMode(mode) {
+  const f = $("#llm-server-form");
+  $("#llm-key-mode").value = mode;
+  f.elements.api_key.hidden = mode === "env";
+  f.elements.api_key_env.hidden = mode !== "env";
+  $("#llm-key-hint").textContent = mode === "env" ? "Name of an environment variable PatchGoblin reads the key from." : "Leave empty for servers without a key.";
+}
+
+function showServerForm(open = true) {
+  $("#llm-server-form").hidden = !open;
+  if (open) $("#llm-server-form").scrollIntoView({ block: "nearest" });
 }
 
 function resetServerForm() {
@@ -279,10 +406,29 @@ function resetServerForm() {
   f.reset();
   f.elements.id.value = f.elements.from_endpoint.value = "";
   $("#llm-server-form-title").textContent = "Add a server";
-  $("#llm-server-cancel").hidden = true;
   $("#llm-clear-key-label").hidden = true;
+  $("#llm-advanced").open = false;
   f.elements.api_key.placeholder = "(none)";
+  f.elements.base_url.placeholder = (L.kinds[f.elements.kind.value] || {}).url || "";
+  setKeyMode("key");
+  kindHint();
   showError($("#llm-server-error"), "");
+  showTest(null);
+  showServerForm(false);
+}
+
+function newServer() {
+  resetServerForm();
+  showServerForm();
+  $("#llm-kind").focus();
+}
+
+// Advanced opens when it holds anything but the defaults, so a saved setting is never hidden.
+function advancedUsed(f) {
+  const k = L.kinds[f.elements.kind.value] || {};
+  const keyed = k.auth || /^https:/.test(f.elements.base_url.value) || f.elements.api_key_env.value;
+  return f.elements.auth.value !== (k.auth || (keyed ? "bearer" : "none")) || !!f.elements.timeout.value
+    || !f.elements.verify_tls.checked || !!f.elements.headers.value.trim() || !!f.elements.default_model.value.trim();
 }
 
 function editServer(s) {
@@ -292,10 +438,56 @@ function editServer(s) {
   f.elements.verify_tls.checked = s.verify_tls !== false;
   f.elements.headers.value = Object.entries(s.headers || {}).map(([k, v]) => `${k}: ${v}`).join("\n");
   f.elements.api_key.placeholder = s.api_key_saved ? "(saved — leave blank to keep)" : "(none)";
+  setKeyMode(s.api_key_env && !s.api_key_saved ? "env" : "key");
   $("#llm-clear-key-label").hidden = !s.api_key_saved;
   $("#llm-server-form-title").textContent = `Edit ${s.name}`;
-  $("#llm-server-cancel").hidden = false;
-  f.scrollIntoView({ block: "nearest" });
+  $("#llm-advanced").open = advancedUsed(f);
+  kindHint();
+  showServerForm();
+}
+
+function kindHint() {
+  const f = $("#llm-server-form"), k = L.kinds[f.elements.kind.value] || {};
+  const port = (k.url || "").match(/:(\d+)/);
+  const needsKey = k.auth || /^https:/.test(k.url || "");
+  $("#llm-kind-hint").textContent = `${port ? `Default port ${port[1]}. ` : ""}${needsKey ? "This kind needs an API key." : "Local servers usually need no key."}`;
+}
+
+function kindChanged() {
+  const f = $("#llm-server-form"), k = L.kinds[f.elements.kind.value] || {};
+  f.elements.base_url.placeholder = k.url || "";
+  const cur = f.elements.base_url.value.trim();
+  if (!cur || Object.values(L.kinds).some(x => x.url === cur)) f.elements.base_url.value = k.url || "";
+  if (!f.elements.id.value) f.elements.auth.value = k.auth || (/^https:/.test(k.url || "") ? "bearer" : "none");
+  kindHint();
+}
+
+function showTest(content, bad = false) {
+  const box = $("#llm-server-test");
+  box.hidden = content === null;
+  box.className = `llm-test ${bad ? "bad" : "ok"}`;
+  box.replaceChildren(...(content === null ? [] : [].concat(content)));
+}
+
+async function testServer() {
+  const f = $("#llm-server-form"), btn = $("#llm-server-test-btn");
+  showError($("#llm-server-error"), "");
+  btn.disabled = true;
+  showTest("Testing…");
+  try {
+    const data = await api("POST", "/api/llm/servers/test", { server: serverSpec(f) });
+    const n = data.models.models.length, label = (L.kinds[data.detected] || {}).label || data.detected;
+    if (!n && data.models.errors.length) {
+      showTest(`✗ ${data.models.errors.join("; ")}${data.reachable.length ? "" : " — nothing answered"}`, true);
+      return;
+    }
+    const out = [`✓ ${plural(n, "model")}${data.models.sources.length ? ` (from ${data.models.sources.join(", ")})` : ""}${data.detected !== "auto" ? ` · looks like ${label}` : ""}`];
+    if (data.detected !== "auto" && f.elements.kind.value === "auto") {
+      out.push(" ", el("button", { type: "button", class: "ghost small", onclick: () => { f.elements.kind.value = data.detected; kindChanged(); } }, `Use kind ${label}`));
+    }
+    showTest(out);
+  } catch (e) { showTest(`✗ ${e.message}`, true); }
+  finally { btn.disabled = false; }
 }
 
 function suggestServer(r) {
@@ -307,7 +499,9 @@ function suggestServer(r) {
   f.elements.auth.value = (L.kinds[f.elements.kind.value] || {}).auth || (r.endpoint ? "bearer" : "none");
   f.elements.from_endpoint.value = r.endpoint || "";
   if (r.endpoint) f.elements.api_key.placeholder = "(copied from the PatchGoblin endpoint)";
-  f.scrollIntoView({ block: "nearest" });
+  $("#llm-advanced").open = advancedUsed(f);
+  kindHint();
+  showServerForm();
   f.elements.name.focus();
 }
 
@@ -708,7 +902,7 @@ async function send(regenerate = false) {
       renderReply(reply);
     } else if (ev.event === "body") {
       firstBody = ev.data;
-      $("#llm-resp-body").textContent = pretty(ev.data);
+      showJson($("#llm-resp-body"), ev.data);
       let obj = null;
       try { obj = JSON.parse(ev.data); } catch { /* not JSON */ }
       if (obj) applyPiece(reply, parsePiece(flavor, obj), ev.t);
@@ -725,7 +919,7 @@ async function send(regenerate = false) {
       if (reply.status >= 400 && !reply.error) reply.error = `HTTP ${reply.status}`;
     }
   });
-  if (!firstBody && L.last.lines.length) $("#llm-resp-body").textContent = "(streamed: see the Stream tab)";
+  if (!firstBody && L.last.lines.length) $("#llm-resp-body").replaceChildren("(streamed: see the Stream tab)");
   finishReply(reply);
 }
 
@@ -751,7 +945,7 @@ function renderResponseMeta() {
   const r = L.last.response, q = L.last.request;
   $("#llm-resp-meta").textContent = `${q.method} ${q.url}\n\nHTTP ${r.status} ${r.reason}   (first byte after ${r.ms} ms)\n`
     + Object.entries(r.headers).map(([k, v]) => `${k}: ${v}`).join("\n");
-  if (!L.last.lines.length) $("#llm-resp-body").textContent = "";
+  if (!L.last.lines.length) $("#llm-resp-body").replaceChildren();
 }
 
 let logQueued = false;
@@ -894,7 +1088,11 @@ async function runProbe() {
       s && s.kind !== data.detected && data.detected !== "auto"
         ? el("button", { class: "ghost small", type: "button", onclick: () => setKind(data.detected) }, `Set kind to ${label}`) : "");
     $("#llm-probe-rows").replaceChildren(...data.results.map(r => el("tr", { class: r.status >= 200 && r.status < 300 ? "" : "muted",
-      onclick: () => { const b = $("#llm-probe-body"); b.hidden = false; b.textContent = `GET ${r.path} → ${r.status || r.error}\n\n${pretty(r.text)}`; } },
+      onclick: () => {
+        $("#llm-probe-head").hidden = $("#llm-probe-body").hidden = false;
+        $("#llm-probe-head").textContent = `GET ${r.path} → ${r.status || r.error}`;
+        showJson($("#llm-probe-body"), r.text);
+      } },
       el("td", { class: "mono" }, r.path), el("td", {}, r.status ? String(r.status) : r.error ? "error" : "–"),
       el("td", {}, `${r.ms} ms`), el("td", { class: "mono", title: r.error || r.type }, r.error || r.type))));
   } catch (e) { $("#llm-probe-note").textContent = e.message; }
@@ -926,7 +1124,7 @@ async function sendHttp(e) {
   if (L.busy || !L.sid) { if (!L.sid) toast("Choose a server first", true); return; }
   const f = e.target, method = f.elements.method.value, out = $("#llm-http-out"), hdr = $("#llm-http-headers");
   const bodyText = ["GET", "HEAD", "DELETE", "OPTIONS"].includes(method) && !$("#llm-http-body").value.trim() ? null : $("#llm-http-body").value;
-  out.textContent = "";
+  out.replaceChildren();
   hdr.hidden = true;
   $("#llm-http-meta").textContent = "Sending…";
   const lines = [];
@@ -935,16 +1133,16 @@ async function sendHttp(e) {
     if (ev.event === "response") {
       resp = ev;
       hdr.hidden = false;
-      hdr.textContent = `HTTP ${ev.status} ${ev.reason}\n` + Object.entries(ev.headers).map(([k, v]) => `${k}: ${v}`).join("\n");
+      hdr.replaceChildren(el("pre", { class: "log mono small" }, `HTTP ${ev.status} ${ev.reason}`), kvTable(ev.headers));
     } else if (ev.event === "line") {
-      lines.push(`${String(ev.t.toFixed(0)).padStart(7)} ms  ${ev.data}`);
-      out.textContent = lines.slice(-3000).join("\n");
-      out.scrollTop = out.scrollHeight;
+      lines.push(ev);
+      showJsonSoon(out, "", { lines });
     } else if (ev.event === "body") {
-      out.textContent = $("#llm-http-pretty").checked ? pretty(ev.data) : ev.data;
+      showJson(out, ev.data);
     } else if (ev.event === "error") {
-      out.textContent += `\n${ev.message}`;
+      out.append(el("pre", { class: "log mono small" }, ev.message));
     } else if (ev.event === "done") {
+      if (lines.length) showJson(out, "", { lines });
       $("#llm-http-meta").textContent = `HTTP ${ev.status || "–"} · first byte ${resp ? resp.ms : "–"} ms · total ${ev.t} ms · ${fmt(ev.bytes)} bytes${ev.lines ? ` · ${ev.lines} lines` : ""}`;
     } else if (ev.event === "cancelled") $("#llm-http-meta").textContent = "Stopped.";
   });
@@ -972,8 +1170,10 @@ async function showHistory(rid) {
   $("#llm-hd-title").textContent = `${r.method} ${r.path} → ${r.error || r.status} (${r.ms_total} ms)`;
   $("#llm-hd-request").textContent = `${r.method} ${r.url}\n` + Object.entries(r.request_headers).map(([k, v]) => `${k}: ${v}`).join("\n")
     + (r.request_body ? `\n\n${pretty(r.request_body)}` : "");
-  $("#llm-hd-response").textContent = `HTTP ${r.status}\n` + Object.entries(r.response_headers).map(([k, v]) => `${k}: ${v}`).join("\n")
-    + `\n\n${r.lines ? r.response : pretty(r.response)}${r.error ? `\n\nError: ${r.error}` : ""}`;
+  $("#llm-hd-response-head").textContent = `HTTP ${r.status}${r.error ? `\nError: ${r.error}` : ""}`;
+  $("#llm-hd-response-headers").replaceChildren(kvTable(r.response_headers));
+  const lines = r.lines ? r.response.split("\n").filter(Boolean).map(data => ({ t: 0, data })) : null;
+  showJson($("#llm-hd-response"), r.response, { lines });
   $("#llm-history-detail").scrollIntoView({ block: "nearest" });
 }
 
@@ -1051,12 +1251,14 @@ PG.register({
     };
     $("#llm-server-form").onsubmit = submitServer;
     $("#llm-server-cancel").onclick = resetServerForm;
+    $("#llm-server-new").onclick = newServer;
+    $("#llm-server-test-btn").onclick = testServer;
+    $("#llm-key-mode").onchange = e => setKeyMode(e.target.value);
+    const addServer = () => { openTool("servers"); newServer(); };
+    $("#llm-server-add").onclick = addServer;
+    $("#llm-server-add").onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); addServer(); } };
     $("#llm-scan").onclick = scanLocal;
-    $("#llm-kind").onchange = e => {
-      const k = L.kinds[e.target.value] || {}, f = $("#llm-server-form");
-      f.elements.base_url.placeholder = k.url || "";
-      if (!f.elements.id.value) f.elements.auth.value = k.auth || (/^https:/.test(k.url || "") ? "bearer" : "none");
-    };
+    $("#llm-kind").onchange = kindChanged;
     selectTab(load("tab", "request"));
     try {
       const meta = await api("GET", "/api/llm/meta");
@@ -1066,6 +1268,7 @@ PG.register({
     $("#llm-kind").replaceChildren(...Object.entries(L.kinds).map(([id, k]) => el("option", { value: id }, k.label)));
     $("#llm-url-presets").replaceChildren(...[...new Set(Object.values(L.kinds).map(k => k.url))].map(u => el("option", { value: u })));
     $("#llm-server-form").elements.auth.value = "none";
+    kindHint();
     updatePaths();
     renderMessages();
     await loadServers();

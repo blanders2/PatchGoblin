@@ -3976,6 +3976,26 @@ class LlmConsoleTests(unittest.TestCase):
         self.client.delete(f"/api/llm/servers/{sid}", headers=H)
         self.assertEqual(self.client.get("/api/llm/servers").get_json()["servers"], [])
 
+    def test_server_test_route_checks_without_saving(self):
+        spec = {"name": "Fake", "kind": "auto", "base_url": self.base + "/v1/", "api_key": fake_llm_server.KEY}
+        self.assertEqual(self.client.post("/api/llm/servers/test", json={"server": spec}).status_code, 403)
+        res = self.client.post("/api/llm/servers/test", headers=H, json={"server": spec})
+        self.assertEqual(res.status_code, 200, res.get_data(as_text=True))
+        data = res.get_json()
+        self.assertEqual([m["id"] for m in data["models"]["models"]], ["qwen3-8b", "tiny"])
+        self.assertIn("detected", data)
+        self.assertNotIn(fake_llm_server.KEY, res.get_data(as_text=True))
+        self.assertEqual(self.app.config["SETTINGS"].plugin_data("llm").get("servers") or [], [])
+        bad = self.client.post("/api/llm/servers/test", headers=H, json={"server": {"base_url": "ftp://x"}})
+        self.assertEqual(bad.status_code, 400)
+
+    def test_switching_to_env_key_keeps_the_saved_key(self):
+        server = self.add()["servers"][0]
+        spec = {**server, "api_key": "", "api_key_env": "SOME_ENV_VAR"}  # what the form sends in env mode
+        self.client.post("/api/llm/servers", headers=H, json={"server": spec})
+        saved = self.app.config["SETTINGS"].plugin_data("llm")["servers"][0]
+        self.assertEqual((saved["api_key"], saved["api_key_env"]), (fake_llm_server.KEY, "SOME_ENV_VAR"))
+
     def test_endpoint_suggestions_copy_the_key_server_side(self):
         self.app.config["SETTINGS"].save_endpoints([{"id": "box", "name": "Box", "base_url": self.base + "/v1",
                                                      "api_key": fake_llm_server.KEY, "model": "m"}])

@@ -486,12 +486,19 @@ A built-in plugin for testing LLM servers and seeing exactly what goes over the 
 request goes through PatchGoblin, which adds the API key and records the exchange. Keys never
 reach the browser and are masked in everything it shows.
 
-- **Servers** are saved with a kind (llama.cpp, llama-swap, vLLM, SGLang, Ollama, LM Studio,
-  TGI, KoboldCpp, TabbyAPI, Hermes/Nous, OpenAI, OpenRouter, Anthropic or generic
-  OpenAI-compatible), a base URL (a trailing `/v1` is fine), an API key or environment variable,
-  the auth style, extra headers, TLS checking and a timeout. **Scan this computer** looks for
+- **Servers** are added with **Add server** (or the sidebar's **+ Add server**): pick a kind
+  first (llama.cpp, llama-swap, vLLM, SGLang, Ollama, LM Studio, TGI, KoboldCpp, TabbyAPI,
+  Hermes/Nous, OpenAI, OpenRouter, Anthropic or generic OpenAI-compatible) and its usual base
+  URL is filled in (a trailing `/v1` is fine). The API key is either typed or read from an
+  environment variable; auth style, timeout, TLS checking, extra headers and the default model
+  sit under **Advanced**. **Test connection** checks the URL and key, lists the models and
+  guesses the server software without saving anything. **Scan this computer** looks for
   servers on the usual local ports. PatchGoblin's own AI endpoints are offered as suggestions,
   and adding one copies its key on the server side.
+- **JSON responses** (Raw HTTP, Probe, model Details, History and the chat Response tab) show as
+  tables, with the usual `data`/`models` envelopes unwrapped and streamed lines as a time/event/
+  text table. A **Table / Raw** toggle switches to the pretty-printed JSON, and the choice is
+  remembered. Anything that isn't JSON is shown raw.
 - **Chat** sends a conversation through any of six APIs: OpenAI chat, completions or responses,
   Anthropic messages, Ollama `/api/chat` or llama.cpp `/completion`. The request body is
   rebuilt live on the **Request** tab as you change anything. Tick **Edit raw body** to send

@@ -146,6 +146,16 @@ class LlmPlugin(Plugin):
         return Response(stream_with_context(gen()), mimetype="application/x-ndjson",
                         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
+    def resolve_endpoint_key(self, spec: dict) -> dict:
+        """Adding a suggested PatchGoblin endpoint copies its key here, never via the browser."""
+        if spec.get("from_endpoint") and not spec.get("api_key"):
+            ep = next((e for e in self.ctx.settings.get().get("endpoints") or []
+                       if e.get("id") == spec["from_endpoint"]), None)
+            if ep:
+                spec["api_key"] = ep.get("api_key") or ""
+                spec.setdefault("api_key_env", ep.get("api_key_env") or "")
+        return spec
+
     # ---- routes ----------------------------------------------------------------------
     def routes(self, bp) -> None:
         @bp.get("/meta")
@@ -160,14 +170,7 @@ class LlmPlugin(Plugin):
         def save_server():
             data = body()
             servers = self.servers()
-            spec = dict(data.get("server") or {})
-            if spec.get("from_endpoint") and not spec.get("api_key"):
-                # Adding a suggested PatchGoblin endpoint copies its key here, never via the browser.
-                ep = next((e for e in self.ctx.settings.get().get("endpoints") or []
-                           if e.get("id") == spec["from_endpoint"]), None)
-                if ep:
-                    spec["api_key"] = ep.get("api_key") or ""
-                    spec.setdefault("api_key_env", ep.get("api_key_env") or "")
+            spec = self.resolve_endpoint_key(dict(data.get("server") or {}))
             server = llmapi.clean_server(spec, servers)
             at = next((i for i, s in enumerate(servers) if s["id"] == server["id"]), None)
             if at is None:
@@ -176,6 +179,15 @@ class LlmPlugin(Plugin):
                 servers[at] = server
             self.save_servers(servers)
             return jsonify(saved=server["id"], **self.servers_view())
+
+        @bp.post("/servers/test")
+        def test_server():
+            # Checks a server as typed in the form (nothing is saved, and the key never comes back).
+            spec = self.resolve_endpoint_key(dict(body().get("server") or {}))
+            server = llmapi.clean_server(spec, self.servers())
+            found = llmapi.probe(server)
+            return jsonify(models=llmapi.list_models(server), detected=found["detected"],
+                           reachable=[r["path"] for r in found["results"] if 200 <= (r["status"] or 0) < 300])
 
         @bp.delete("/servers/<sid>")
         def delete_server(sid):
