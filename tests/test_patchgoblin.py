@@ -13,14 +13,24 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from patchgoblin import create_app  # noqa: E402
-from patchgoblin import hosts as hosts_mod  # noqa: E402
-from patchgoblin.plugins.ssh import sshtools  # noqa: E402
-from patchgoblin.engine import Job  # noqa: E402
-from patchgoblin.hosts import (HostError, LocalHost, Result, SSHHost, WindowsSSHHost, detect_ssh_os,  # noqa: E402
-                               host_for, probe, terminal_command, vscode_command)
-from patchgoblin.openai_agent import OpenAIAgent, ProjectFiles  # noqa: E402
-from patchgoblin.providers import Outcome, _StreamJson, describe_tool, run_claude  # noqa: E402
+from patchgoblin import create_app
+from patchgoblin import hosts as hosts_mod
+from patchgoblin.engine import Job
+from patchgoblin.hosts import (
+    HostError,
+    LocalHost,
+    Result,
+    SSHHost,
+    WindowsSSHHost,
+    detect_ssh_os,
+    host_for,
+    probe,
+    terminal_command,
+    vscode_command,
+)
+from patchgoblin.openai_agent import OpenAIAgent, ProjectFiles
+from patchgoblin.plugins.ssh import sshtools
+from patchgoblin.providers import Outcome, _StreamJson, describe_tool, run_claude
 
 FAKE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_agent.py")
 H = {"X-PatchGoblin": "1"}
@@ -29,7 +39,7 @@ ASKING_PLAN = "## Steps\n1. do it\n\n## Questions for you\n1. Which colour?\n"
 
 def git_log(path):
     return subprocess.run(["git", "log", "--pretty=%s"], cwd=path, capture_output=True,
-                          text=True).stdout.splitlines()
+                          text=True, check=False).stdout.splitlines()
 
 
 class AppTestCase(unittest.TestCase):
@@ -185,7 +195,7 @@ class ProjectTests(AppTestCase):
         # is the only thing that could still add to the parent repo's history or status.
         before_log = git_log(parent)
         before_status = subprocess.run(["git", "status", "--porcelain"], cwd=parent,
-                                       capture_output=True, text=True).stdout
+                                       capture_output=True, text=True, check=False).stdout
         tid = self.post_task(pid, "Create output file", "Make agent_output.txt")["id"]
         self.assertEqual(self.action(pid, tid, "plan").status_code, 200)
         self.wait_for(pid, tid, {"planned"})
@@ -198,7 +208,7 @@ class ProjectTests(AppTestCase):
         # The parent repo (which encloses the untracked project) must never be touched.
         self.assertEqual(git_log(parent), before_log)
         after_status = subprocess.run(["git", "status", "--porcelain"], cwd=parent,
-                                      capture_output=True, text=True).stdout
+                                      capture_output=True, text=True, check=False).stdout
         self.assertEqual(after_status, before_status)
 
     def test_enable_git_tracking_later(self):
@@ -408,9 +418,8 @@ class ProjectTests(AppTestCase):
         self.assertEqual(out["parent"], "C:"+chr(92))
         self.assertEqual(out["sep"], "\\")
         self.assertEqual([d["path"] for d in out["dirs"]], [r"C:\a\b", r"C:\a\c"])
-        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(45, "", "")):
-            with self.assertRaises(HostError):
-                host.list_dirs(r"C:\a")
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(45, "", "")), self.assertRaises(HostError):
+            host.list_dirs(r"C:\a")
         with mock.patch("patchgoblin.hosts.communicate", return_value=Result(0, "C:" + chr(92) + "\nD:" + chr(92) + "\n", "")):
             self.assertEqual(len(host.list_dirs("")["dirs"]), 2)
         argv, _ = terminal_command(host, r"C:\p", platform="win32", which=lambda n: None)
@@ -424,9 +433,8 @@ class ProjectTests(AppTestCase):
             self.assertEqual(hosts_mod.detect_windows_shell("a@cmd"), "cmd")
         with mock.patch("patchgoblin.hosts.communicate", return_value=Result(0, "%OS%\r\n", "")):
             self.assertEqual(hosts_mod.detect_windows_shell("a@ps"), "powershell")
-        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(255, "", "refused")):
-            with self.assertRaises(HostError):
-                hosts_mod.detect_windows_shell("a@down")
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(255, "", "refused")), self.assertRaises(HostError):
+            hosts_mod.detect_windows_shell("a@down")
         self.assertNotIn(("a@down", None), hosts_mod._WIN_SHELL)
 
         mark = hosts_mod._PS_MARK
@@ -472,7 +480,7 @@ class ProjectTests(AppTestCase):
 
     def test_unframer(self):
         un = hosts_mod._Unframer()
-        a = base64.b64encode("héllo".encode("utf-8")).decode("ascii")
+        a = base64.b64encode("héllo".encode()).decode("ascii")
         out = un.feed(a[:3]) + un.feed(a[3:] + ".." + "  ")
         out += un.feed("\r\n" + a[:4] + "\r\n " + a[4:] + ".")
         self.assertEqual(out, "héllo\n\nhéllo\n")
@@ -510,9 +518,8 @@ class ProjectTests(AppTestCase):
         with mock.patch("patchgoblin.hosts.communicate",
                         side_effect=[Result(1, "", ""), Result(0, "Win32NT\r\n", "")]):
             self.assertEqual(detect_ssh_os("a@win"), "windows")
-        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(255, "", "refused")):
-            with self.assertRaises(HostError):
-                detect_ssh_os("a@down")
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(255, "", "refused")), self.assertRaises(HostError):
+            detect_ssh_os("a@down")
         self.assertNotIn(("a@down", None), hosts_mod._SSH_OS)
         # Git for Windows' uname on PATH must not make a Windows host look POSIX.
         with mock.patch("patchgoblin.hosts.communicate",
@@ -564,7 +571,7 @@ class WorkflowTests(AppTestCase):
         self.assertTrue(log[0].startswith("PatchGoblin: task #1 Create agent output file"))
         self.assertEqual(log[1], "PatchGoblin: checkpoint before task #1")
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.proj_dir,
-                              capture_output=True, text=True).stdout.strip()
+                              capture_output=True, text=True, check=False).stdout.strip()
         self.assertEqual(task["commit"], head)
 
         with open(os.path.join(self.proj_dir, ".patchgoblin", "tasks.json"), encoding="utf-8") as fh:
@@ -1054,7 +1061,7 @@ class WorkflowTests(AppTestCase):
         return engine, project, tid
 
     def test_plan_save_failure_is_reported_and_plan_kept(self):
-        engine, project, tid = self.plan_with_save_failures(99)
+        engine, project, _ = self.plan_with_save_failures(99)
         engine.reconcile(project)
         task = self.app.config["STORE"].read(project, fresh=True)["tasks"][0]
         self.assertEqual(task["status"], "unplanned")
@@ -1076,14 +1083,14 @@ class WorkflowTests(AppTestCase):
         self.assertNotIn((pid, tid), engine._lost)
 
     def test_plan_save_retries_transient_failure(self):
-        engine, project, tid = self.plan_with_save_failures(1)
+        _, project, _ = self.plan_with_save_failures(1)
         task = self.app.config["STORE"].read(project, fresh=True)["tasks"][0]
         self.assertIn(task["status"], ("planned", "drafted"))
         self.assertEqual(task["error"], "")
 
     def test_real_restart_still_says_restarted(self):
         pid = self.add_project()["id"]
-        tid = self.post_task(pid, "t")["id"]
+        self.post_task(pid, "t")
         project = self.app.config["REGISTRY"].get(pid)
         with self.app.config["STORE"].edit(project) as doc:
             doc["tasks"][0].update(status="planning", prev_status="unplanned")
@@ -1980,7 +1987,7 @@ class HostTests(unittest.TestCase):
 
     def test_terminal_commands(self):
         local, ssh = LocalHost(), SSHHost("me@box", 2222)
-        have = lambda names: (lambda n: n if n in names else None)  # noqa: E731
+        have = lambda names: (lambda n: n if n in names else None)
         # Windows Terminal: always a new tab in the one "PatchGoblin" window, named when asked.
         self.assertEqual(terminal_command(local, "C:\\a b", "win32", have({"wt"})),
                          (["wt", "-w", "PatchGoblin", "new-tab", "-d", "C:\\a b"], None))
@@ -2025,7 +2032,7 @@ class HostTests(unittest.TestCase):
 
     def test_vscode_commands(self):
         local, ssh = LocalHost(), SSHHost("me@box")
-        have = lambda names: (lambda n: n if n in names else None)  # noqa: E731
+        have = lambda names: (lambda n: n if n in names else None)
         self.assertEqual(vscode_command(local, "/a b", "linux", have({"code"})), ["code", "/a b"])
         self.assertEqual(vscode_command(local, "C:\\a b", "win32", have({"code"})), ["code", "C:\\a b"])
         self.assertEqual(vscode_command(ssh, "/srv/p", "linux", have({"code"})),
@@ -2229,9 +2236,8 @@ class OpenAIAgentTests(unittest.TestCase):
         import urllib.error
         err = urllib.error.HTTPError("u", 404, "no", {}, io.BytesIO(b"not here"))
         self.addCleanup(err.close)
-        with mock.patch("urllib.request.urlopen", side_effect=err):
-            with self.assertRaisesRegex(RuntimeError, "404"):
-                list_models(self.ep())
+        with mock.patch("urllib.request.urlopen", side_effect=err), self.assertRaisesRegex(RuntimeError, "404"):
+            list_models(self.ep())
 
 
 class EndpointSettingsTests(AppTestCase):
@@ -2489,6 +2495,7 @@ class OpencodeTests(AppTestCase):
 
     def test_cli_argv(self):
         import shlex
+
         from patchgoblin.providers import cli_argv
         from patchgoblin.store import DEFAULT_SETTINGS
         commands = DEFAULT_SETTINGS["commands"]
@@ -2830,7 +2837,7 @@ else:
 
 
 def svn_run(cwd, *args):
-    res = subprocess.run(["svn", "--non-interactive", *args], cwd=cwd, capture_output=True, text=True)
+    res = subprocess.run(["svn", "--non-interactive", *args], cwd=cwd, capture_output=True, text=True, check=False)
     assert res.returncode == 0, res.stderr
     return res.stdout
 
@@ -3037,7 +3044,7 @@ class StreamJsonTests(unittest.TestCase):
         return outcome, job
 
     def test_run_claude_takes_text_from_result(self):
-        outcome, job = self.run_with(TRANSCRIPT)
+        outcome, _ = self.run_with(TRANSCRIPT)
         self.assertTrue(outcome.ok)
         self.assertEqual(outcome.text, "Final answer")
 
@@ -3429,9 +3436,9 @@ class SshToolsTests(AppTestCase):
             run.assert_not_called()
 
     def test_install_keys_auth_failure(self):
-        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(255, "", "Permission denied")):
-            with self.assertRaises(sshtools.AuthError):
-                sshtools.install_keys(SSHHost("me@box"), [self.PUB])
+        with mock.patch("patchgoblin.hosts.communicate", return_value=Result(255, "", "Permission denied")), \
+                self.assertRaises(sshtools.AuthError):
+            sshtools.install_keys(SSHHost("me@box"), [self.PUB])
 
     def test_install_keys_interactive_argv_and_cap(self):
         with mock.patch("patchgoblin.plugins.ssh.sshtools.run_in_terminal") as term:
@@ -3703,9 +3710,9 @@ class SshToolsTests(AppTestCase):
     def test_tunnel_exiting_immediately_raises_with_stderr(self):
         manager = sshtools.TunnelManager()
         code = "import sys; sys.stderr.write('bind: Address already in use\\n'); sys.exit(255)"
-        with mock.patch("patchgoblin.plugins.ssh.sshtools.tunnel_argv", return_value=[sys.executable, "-c", code]):
-            with self.assertRaisesRegex(HostError, "Address already in use"):
-                manager.start(self.SPEC)
+        with mock.patch("patchgoblin.plugins.ssh.sshtools.tunnel_argv", return_value=[sys.executable, "-c", code]), \
+                self.assertRaisesRegex(HostError, "Address already in use"):
+            manager.start(self.SPEC)
         self.assertEqual(manager.running_count(), 0)
         self.assertEqual(manager.status()["web"]["state"], "stopped")
 
@@ -3849,7 +3856,7 @@ class PluginTests(unittest.TestCase):
             self.assertEqual(res.status_code, 200)
 
     def test_disable_and_enable(self):
-        app, plugins, client = self.app()
+        _, plugins, client = self.app()
         self.assertEqual(client.put("/api/plugins/ssh", json={"enabled": False}).status_code, 403)
         self.assertEqual(client.put("/api/plugins/ssh", headers=H, json={"enabled": "no"}).status_code, 400)
         self.assertEqual(client.put("/api/plugins/nope", headers=H, json={"enabled": False}).status_code, 404)
@@ -3874,7 +3881,7 @@ class PluginTests(unittest.TestCase):
             "templates/view.html": '<p id="demo-view">{{ plugins|length }}</p>',
             "static/plugin.js": 'PG.register({ id: "demo" });',
         })
-        app, plugins, client = self.app()
+        _, plugins, client = self.app()
         demo = plugins.plugin("demo")
         self.assertEqual(type(demo).events, ["start"])
         self.assertEqual(client.get("/api/demo/hello").get_json(), {"greeting": "hi", "saved": {}})
@@ -3917,7 +3924,7 @@ class PluginTests(unittest.TestCase):
         server = {"id": "box", "name": "Box", "target": "me@box", "port": None, "os": "auto"}
         with open(os.path.join(self.data, "settings.json"), "w", encoding="utf-8") as fh:
             json.dump({"ssh_servers": [server], "ssh_tunnels": [], "timeouts": {"run": 5}}, fh)
-        app, _, client = self.app()
+        _, _, client = self.app()
         self.assertEqual(client.get("/api/ssh/servers").get_json()["servers"][0]["target"], "me@box")
         with open(os.path.join(self.data, "settings.json"), encoding="utf-8") as fh:
             saved = json.load(fh)
@@ -3927,8 +3934,9 @@ class PluginTests(unittest.TestCase):
 
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import fake_llm_server  # noqa: E402
-from patchgoblin.plugins.llm import llmapi  # noqa: E402
+import fake_llm_server
+
+from patchgoblin.plugins.llm import llmapi
 
 
 class LlmConsoleTests(unittest.TestCase):
@@ -4082,7 +4090,7 @@ class LlmConsoleTests(unittest.TestCase):
         self.assertTrue(plugin.history[-1]["cancelled"])
 
     def test_detect_and_find_ctx(self):
-        r = lambda data: {"status": 200, "json": data}  # noqa: E731
+        r = lambda data: {"status": 200, "json": data}
         self.assertEqual(llmapi.detect_kind({"/running": r({"running": []})}), "llama-swap")
         self.assertEqual(llmapi.detect_kind({"/api/tags": r({"models": []})}), "ollama")
         self.assertEqual(llmapi.detect_kind({"/v1/models": r({"data": [{"id": "x", "max_model_len": 4096}]})}), "vllm")
@@ -4091,7 +4099,7 @@ class LlmConsoleTests(unittest.TestCase):
         self.assertEqual(llmapi.normalize_base("http://h:1/v1/chat/completions"), "http://h:1")
 
 
-from patchgoblin.plugins.terminals import sessions as term_sessions  # noqa: E402
+from patchgoblin.plugins.terminals import sessions as term_sessions
 
 REVERSER = [sys.executable, "-u", "-c", "print('ready'); print(input()[::-1])"]
 
@@ -4130,7 +4138,7 @@ class TerminalsTests(unittest.TestCase):
         self.assertTrue(wait_until(lambda: not s.running), s.buf)
         self.assertIn("hello", s.buf)
         self.assertEqual(s.exit_code, 0)
-        text, end, truncated = s.read_since(0)
+        _, end, truncated = s.read_since(0)
         self.assertEqual((end, truncated), (len(s.buf), False))
         self.assertEqual(s.read_since(end)[0], "")
         with self.assertRaises(ValueError):
@@ -4198,9 +4206,9 @@ class TerminalsTests(unittest.TestCase):
         for word in ("olleh", "dlrow"):  # one at a time: two Windows PTYs starting together can lose output
             sid = self.client.post("/api/terminals/sessions", headers=H, json={}).get_json()["session"]["id"]
             session = self.plugin.sessions.get(sid)
-            self.assertTrue(wait_until(lambda: "ready" in session.buf), session.buf)
+            self.assertTrue(wait_until(lambda s=session: "ready" in s.buf), session.buf)
             session.write(word + "\r")
-            self.assertTrue(wait_until(lambda: not session.running))
+            self.assertTrue(wait_until(lambda s=session: not s.running))
             made.append(sid)
         a, b = made
 

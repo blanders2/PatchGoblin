@@ -14,17 +14,24 @@ import os
 import re
 import shlex
 import socket
+import subprocess
 import sys
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Optional
 
-import subprocess
-
-from patchgoblin.hosts import (HostError, SSHHost, WindowsSSHHost, _CMD_LIMIT, _ps_quote, background_kwargs,
-                    communicate, kill_tree, run_in_terminal)
+from patchgoblin.hosts import (
+    _CMD_LIMIT,
+    HostError,
+    SSHHost,
+    WindowsSSHHost,
+    _ps_quote,
+    background_kwargs,
+    communicate,
+    kill_tree,
+    run_in_terminal,
+)
 
 KEY_NAME = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 PUBKEY_RE = re.compile(r"^(ssh-|ecdsa-|sk-)\S+ [A-Za-z0-9+/=]+( [^\r\n]*)?$")
@@ -73,7 +80,7 @@ def _key_dict(name: str, path: str, text: str, has_private: bool, fingerprint: s
             "fingerprint": fingerprint, "has_private": has_private, "text": text}
 
 
-def _fingerprint(args: list[str], input: Optional[str] = None) -> str:
+def _fingerprint(args: list[str], input: str | None = None) -> str:
     res = communicate(["ssh-keygen", "-lf", *args], input=input, timeout=15)
     parts = res.stdout.split()
     return parts[1] if res.ok and len(parts) > 1 else ""
@@ -237,7 +244,7 @@ def install_keys(host, pubkeys) -> dict:
     return {"added": added, "skipped": skipped, "note": note}
 
 
-def install_keys_interactive(target: str, port: Optional[int], pubkeys, windows: bool = False) -> dict:
+def install_keys_interactive(target: str, port: int | None, pubkeys, windows: bool = False) -> dict:
     """Password bootstrap: open a terminal window running ssh, where the user types the password."""
     keys = clean_pubkeys(pubkeys)
     SSHHost(target, port)  # validates the target
@@ -656,7 +663,7 @@ def tunnel_argv(spec: dict) -> list[str]:
 @dataclass
 class Tunnel:
     spec: dict
-    proc: Optional[subprocess.Popen] = None
+    proc: subprocess.Popen | None = None
     started: float = 0.0
     stderr: deque = field(default_factory=lambda: deque(maxlen=20))
 

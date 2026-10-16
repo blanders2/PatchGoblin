@@ -18,8 +18,7 @@ import time
 
 from flask import Response, abort, jsonify, request, stream_with_context
 
-from patchgoblin.hosts import (HostError, host_for, open_terminal, terminal_color, terminal_title,
-                               windows_shell)
+from patchgoblin.hosts import HostError, host_for, open_terminal, terminal_color, terminal_title, windows_shell
 from patchgoblin.pluginkit import Plugin
 
 from .sessions import MAX_SESSIONS, SessionManager

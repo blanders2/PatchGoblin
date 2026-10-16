@@ -22,11 +22,11 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
 
-OutputFn = Optional[Callable[[str], None]]
-StartFn = Optional[Callable[[subprocess.Popen], None]]
+OutputFn = Callable[[str], None] | None
+StartFn = Callable[[subprocess.Popen], None] | None
 
 
 class HostError(RuntimeError):
@@ -53,7 +53,7 @@ def kill_tree(proc: subprocess.Popen) -> None:
         if os.name == "nt":
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           creationflags=subprocess.CREATE_NO_WINDOW)
+                           check=False, creationflags=subprocess.CREATE_NO_WINDOW)
         else:
             os.killpg(proc.pid, signal.SIGTERM)
     except (OSError, ProcessLookupError):
@@ -71,9 +71,9 @@ def background_kwargs() -> dict:
     return {"start_new_session": True}
 
 
-def communicate(argv, cwd=None, input: Optional[str] = None, timeout: Optional[float] = None,
+def communicate(argv, cwd=None, input: str | None = None, timeout: float | None = None,
                 on_output: OutputFn = None, on_start: StartFn = None, shell: bool = False,
-                env: Optional[dict] = None) -> Result:
+                env: dict | None = None) -> Result:
     """Run a process, streaming stdout+stderr lines to ``on_output`` as they arrive.
 
     ``env`` holds extra environment variables added to this process's own environment.
@@ -187,10 +187,10 @@ class LocalHost:
         except OSError as exc:
             raise HostError(f"Could not read {path}: {exc}") from exc
 
-    def read_text(self, path: str) -> Optional[str]:
+    def read_text(self, path: str) -> str | None:
         return self._read(path, "r", encoding="utf-8")
 
-    def read_bytes(self, path: str) -> Optional[bytes]:
+    def read_bytes(self, path: str) -> bytes | None:
         return self._read(path, "rb")
 
     @staticmethod
@@ -224,14 +224,14 @@ class LocalHost:
     def write_text(self, path: str, text: str) -> None:
         self._write(path, text, "w", encoding="utf-8", newline="\n")
 
-    def run(self, argv: list[str], cwd: str, input: Optional[str] = None,
-            timeout: Optional[float] = None, on_output: OutputFn = None,
-            on_start: StartFn = None, login: bool = False, env: Optional[dict] = None) -> Result:
+    def run(self, argv: list[str], cwd: str, input: str | None = None,
+            timeout: float | None = None, on_output: OutputFn = None,
+            on_start: StartFn = None, login: bool = False, env: dict | None = None) -> Result:
         exe = shutil.which(argv[0]) or argv[0]
         return communicate([exe, *argv[1:]], cwd=cwd, input=input, timeout=timeout,
                            on_output=on_output, on_start=on_start, env=env)
 
-    def run_shell(self, command: str, cwd: str, timeout: Optional[float] = None,
+    def run_shell(self, command: str, cwd: str, timeout: float | None = None,
                   on_output: OutputFn = None, on_start: StartFn = None) -> Result:
         return communicate(command, cwd=cwd, timeout=timeout, on_output=on_output,
                            on_start=on_start, shell=True)
@@ -247,7 +247,7 @@ class SSHHost:
     os = "posix"
     noop_script = "true"
 
-    def __init__(self, target: str, port: Optional[int] = None):
+    def __init__(self, target: str, port: int | None = None):
         target = (target or "").strip()
         if not target or target.startswith("-") or not _TARGET_RE.match(target):
             raise HostError("SSH target must look like user@host or an ssh-config alias.")
@@ -317,7 +317,7 @@ class SSHHost:
         return {"path": cwd, "parent": posixpath.dirname(cwd) if cwd != "/" else None, "sep": "/",
                 "dirs": [{"name": n, "path": posixpath.join(cwd, n)} for n in names]}
 
-    def read_text(self, path: str) -> Optional[str]:
+    def read_text(self, path: str) -> str | None:
         q = shlex.quote(path)
         res = self._exec(f"if [ -f {q} ]; then cat {q}; else exit 44; fi", timeout=60)
         if res.returncode == 44:
@@ -340,7 +340,7 @@ class SSHHost:
         if not res.ok:
             raise self._fail(res, "write", path)
 
-    def read_bytes(self, path: str) -> Optional[bytes]:
+    def read_bytes(self, path: str) -> bytes | None:
         q = shlex.quote(path)
         res = self._exec(f"if [ -f {q} ]; then base64 < {q}; else exit 44; fi", timeout=120)
         if res.returncode == 44:
@@ -357,16 +357,16 @@ class SSHHost:
         if not res.ok:
             raise self._fail(res, "write", path)
 
-    def run(self, argv: list[str], cwd: str, input: Optional[str] = None,
-            timeout: Optional[float] = None, on_output: OutputFn = None,
-            on_start: StartFn = None, login: bool = False, env: Optional[dict] = None) -> Result:
+    def run(self, argv: list[str], cwd: str, input: str | None = None,
+            timeout: float | None = None, on_output: OutputFn = None,
+            on_start: StartFn = None, login: bool = False, env: dict | None = None) -> Result:
         prefix =["env", *(f"{k}={v}" for k, v in env.items())] if env else []
         script = f"cd {shlex.quote(cwd)} && " + " ".join(shlex.quote(a) for a in [*prefix, *argv])
         if login:
             script = self._login(script)
         return self._exec(script, input=input, timeout=timeout, on_output=on_output, on_start=on_start)
 
-    def run_shell(self, command: str, cwd: str, timeout: Optional[float] = None,
+    def run_shell(self, command: str, cwd: str, timeout: float | None = None,
                   on_output: OutputFn = None, on_start: StartFn = None) -> Result:
         script = self._login(f"cd {shlex.quote(cwd)} && {command}")
         return self._exec(script, timeout=timeout, on_output=on_output, on_start=on_start)
@@ -376,7 +376,7 @@ class SSHHost:
         """ssh command for an interactive login shell in ``path`` (for a terminal window)."""
         return ["ssh", "-t", *self._port_args(), self.target, f'cd {shlex.quote(path)} && exec "${{SHELL:-/bin/sh}}" -l']
 
-    def dir_status(self, path: str, timeout: Optional[float] = None) -> Result:
+    def dir_status(self, path: str, timeout: float | None = None) -> Result:
         """Result whose exit code is 0 when ``path`` is a directory on the host."""
         return self._exec(f"test -d {shlex.quote(path)}", timeout=timeout)
 
@@ -404,13 +404,13 @@ def _ps_command(script: str) -> str:
     return _PS_PREFIX + base64.b64encode(script.encode("utf-16-le")).decode("ascii")
 
 
-def _after_mark(text: str) -> Optional[str]:
+def _after_mark(text: str) -> str | None:
     """The text after the preamble's marker line, or None if the marker isn't in ``text``."""
     at = text.find(_PS_MARK)
     if at < 0:
         return None
     rest = text[at + len(_PS_MARK):]
-    return rest[2:] if rest.startswith("\r\n") else rest[1:] if rest.startswith("\n") else rest
+    return rest[2:] if rest.startswith("\r\n") else rest.removeprefix("\n")
 
 
 def _skip_to_mark(on_output: OutputFn) -> OutputFn:
@@ -524,7 +524,7 @@ class WindowsSSHHost(SSHHost):
             raise HostError("Use an absolute Windows path on the remote host, e.g. C:\\Users\\me\\project.")
         return ntpath.normpath(path)
 
-    def dir_status(self, path: str, timeout: Optional[float] = None) -> Result:
+    def dir_status(self, path: str, timeout: float | None = None) -> Result:
         return self._exec(f"if (Test-Path -LiteralPath {_ps_quote(path)} -PathType Container) "
                           "{exit 0} else {exit 1}", timeout=timeout)
 
@@ -571,7 +571,7 @@ class WindowsSSHHost(SSHHost):
         return {"path": cwd, "parent": parent, "sep": "\\",
                 "dirs": [{"name": n, "path": ntpath.join(cwd, n)} for n in names]}
 
-    def read_text(self, path: str) -> Optional[str]:
+    def read_text(self, path: str) -> str | None:
         q = _ps_quote(path)
         # A PowerShell default shell re-decodes the raw stream with its own code page, so
         # there the contents travel as base64 (as in read_bytes); cmd keeps the raw bytes.
@@ -610,7 +610,7 @@ class WindowsSSHHost(SSHHost):
         if not res.ok:
             raise self._fail(res, "write", path)
 
-    def read_bytes(self, path: str) -> Optional[bytes]:
+    def read_bytes(self, path: str) -> bytes | None:
         q = _ps_quote(path)
         script = (f"if (-not (Test-Path -LiteralPath {q} -PathType Leaf)) {{exit 44}}; "
                   f"[Console]::Out.Write([Convert]::ToBase64String([IO.File]::ReadAllBytes({q})))")
@@ -632,9 +632,9 @@ class WindowsSSHHost(SSHHost):
         if not res.ok:
             raise self._fail(res, "write", path)
 
-    def run(self, argv: list[str], cwd: str, input: Optional[str] = None,
-            timeout: Optional[float] = None, on_output: OutputFn = None,
-            on_start: StartFn = None, login: bool = False, env: Optional[dict] = None) -> Result:
+    def run(self, argv: list[str], cwd: str, input: str | None = None,
+            timeout: float | None = None, on_output: OutputFn = None,
+            on_start: StartFn = None, login: bool = False, env: dict | None = None) -> Result:
         # ``login`` is a no-op: Windows sshd sessions already carry the user's PATH.
         sets = "".join(f"$env:{k}={_ps_quote(v)}; " for k, v in (env or {}).items())
         call = "& " + " ".join(_ps_quote(a) for a in argv)
@@ -650,7 +650,7 @@ class WindowsSSHHost(SSHHost):
             res.stdout = un.feed(res.stdout) + un.close()
         return res
 
-    def run_shell(self, command: str, cwd: str, timeout: Optional[float] = None,
+    def run_shell(self, command: str, cwd: str, timeout: float | None = None,
                   on_output: OutputFn = None, on_start: StartFn = None) -> Result:
         # Unframed on purpose: arbitrary PowerShell keeps its own output formatting.
         script = (f"Set-Location -LiteralPath {_ps_quote(cwd)}; {command}\n"
@@ -667,7 +667,7 @@ _SSH_OS: dict[tuple, str] = {}
 _SSH_OS_LOCK = threading.Lock()
 
 
-def detect_ssh_os(target: str, port: Optional[int] = None) -> str:
+def detect_ssh_os(target: str, port: int | None = None) -> str:
     """``"posix"`` or ``"windows"`` for an SSH target; successes are cached, failures are not."""
     key = (target, port or None)
     with _SSH_OS_LOCK:
@@ -696,7 +696,7 @@ def detect_ssh_os(target: str, port: Optional[int] = None) -> str:
 _WIN_SHELL: dict[tuple, str] = {}
 
 
-def detect_windows_shell(target: str, port: Optional[int] = None) -> str:
+def detect_windows_shell(target: str, port: int | None = None) -> str:
     """``"cmd"`` or ``"powershell"``: the Windows OpenSSH server's DefaultShell (anything that
     isn't cmd is treated like PowerShell). Successes are cached, failures are not."""
     key = (target, port or None)
@@ -735,7 +735,7 @@ def terminal_color(index: int) -> str:
     """A tab colour for the project at ``index`` in the project list: hues a golden angle
     apart, so neighbouring projects get clearly different colours and each keeps its own."""
     r, g, b = colorsys.hls_to_rgb((index * 137.508 % 360) / 360, 0.45, 0.65)
-    return "#{:02x}{:02x}{:02x}".format(round(r * 255), round(g * 255), round(b * 255))
+    return f"#{round(r * 255):02x}{round(g * 255):02x}{round(b * 255):02x}"
 
 
 # Each project terminal tab's command line carries "PATCHGOBLIN_TAB<sep><project id>", so the
@@ -745,14 +745,14 @@ _WT_TAG_RE = re.compile(WT_TAG + r"\W{1,3}([A-Za-z0-9_-]+)")
 _TAG_OK = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
-def windows_shell(which: Callable[[str], Optional[str]] = shutil.which) -> list[str]:
+def windows_shell(which: Callable[[str], str | None] = shutil.which) -> list[str]:
     """PowerShell 7 when installed, else Windows PowerShell."""
     return ["pwsh.exe", "-NoLogo"] if which("pwsh") else ["powershell.exe", "-NoLogo"]
 
 
-def _wrap_terminal(inner: Optional[list[str]], cwd_path: Optional[str], platform: str,
-                   which: Callable[[str], Optional[str]], title: str = "",
-                   color: str = "", tag: str = "") -> tuple[list[str], Optional[str]]:
+def _wrap_terminal(inner: list[str] | None, cwd_path: str | None, platform: str,
+                   which: Callable[[str], str | None], title: str = "",
+                   color: str = "", tag: str = "") -> tuple[list[str], str | None]:
     """Argv and cwd opening a terminal on this computer that runs ``inner`` (or a shell in
     ``cwd_path`` when ``inner`` is None), named ``title`` and with tab colour ``color``
     (#rrggbb) where the terminal allows it. In Windows Terminal a local shell is tagged with
@@ -764,7 +764,7 @@ def _wrap_terminal(inner: Optional[list[str]], cwd_path: Optional[str], platform
             # A new tab in the one named window, not a new window each time. The title is kept
             # even when the shell or a remote session sets its own. Windows Terminal treats ";"
             # as a command separator, so escape it.
-            esc = lambda a: a.replace(";", "\\;")  # noqa: E731
+            esc = lambda a: a.replace(";", "\\;")
             argv = ["wt", "-w", TERMINAL_WINDOW, "new-tab"]
             if title:
                 argv += ["--title", esc(title), "--suppressApplicationTitle"]
@@ -792,8 +792,8 @@ def _wrap_terminal(inner: Optional[list[str]], cwd_path: Optional[str], platform
 
 
 def terminal_command(host, path: str, platform: str = sys.platform,
-                     which: Callable[[str], Optional[str]] = shutil.which, title: str = "",
-                     color: str = "", tag: str = "") -> tuple[list[str], Optional[str]]:
+                     which: Callable[[str], str | None] = shutil.which, title: str = "",
+                     color: str = "", tag: str = "") -> tuple[list[str], str | None]:
     """Argv and working directory that open a terminal on this computer (a tab of the
     PatchGoblin window in Windows Terminal, tagged with ``tag``: see wt_tabs).
 
@@ -846,7 +846,7 @@ def wt_tabs() -> list[str]:
 
 
 def run_in_terminal(argv: list[str], platform: str = sys.platform,
-                    which: Callable[[str], Optional[str]] = shutil.which, title: str = "") -> None:
+                    which: Callable[[str], str | None] = shutil.which, title: str = "") -> None:
     """Open a terminal on this computer running ``argv`` (e.g. ssh asking for a password)."""
     cmd, cwd = _wrap_terminal(argv, None, platform, which, title)
     try:
@@ -897,7 +897,7 @@ _opening_lock = threading.Lock()
 _just_opened: dict[str, float] = {}
 
 
-def _spawn(argv: list[str], cwd: Optional[str], windows_flag: str) -> None:
+def _spawn(argv: list[str], cwd: str | None, windows_flag: str) -> None:
     """Start ``argv`` detached without waiting; ``windows_flag`` names the subprocess creation flag."""
     kwargs = {}
     if os.name == "nt":
@@ -910,7 +910,7 @@ def _spawn(argv: list[str], cwd: Optional[str], windows_flag: str) -> None:
 
 
 def vscode_command(host, path: str, platform: str = sys.platform,
-                   which: Callable[[str], Optional[str]] = shutil.which) -> list[str]:
+                   which: Callable[[str], str | None] = shutil.which) -> list[str]:
     """Argv that opens ``path`` in VS Code on this computer (via Remote-SSH for SSH projects)."""
     code = which("code")
     if not code and platform == "win32":

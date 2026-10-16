@@ -538,7 +538,7 @@ class Engine:
     def _record_svn_changes(self, project: dict, task: dict, outcome, before, error: str, job: Job) -> None:
         """Remember the files a finished run changed so the next check-in can list them. Nothing is
         committed; failures are logged on the task, never fail it."""
-        pid, tid = project["id"], task["id"]
+        tid = task["id"]
         host, path = host_for(project), project["path"]
         changes, event = [], error
         if before is not None:

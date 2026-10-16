@@ -95,7 +95,7 @@ class LlmPlugin(Plugin):
 
         def gen():
             t0 = time.monotonic()
-            ms = lambda: round((time.monotonic() - t0) * 1000, 1)  # noqa: E731
+            ms = lambda: round((time.monotonic() - t0) * 1000, 1)
             yield ndjson("request", id=rid, method=method, url=url, headers=rec["request_headers"], body=payload)
             resp = None
             parts: list[str] = []

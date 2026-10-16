@@ -15,3 +15,14 @@ dependencies = [
 [tool.uv]
 # An app run from this directory (python run.py), not an installable package.
 package = false
+
+[tool.ruff]
+line-length = 140
+
+[tool.ruff.lint]
+ignore = [
+    "TRY004",  # validators raise ValueError on purpose: routes map it to HTTP 400
+    "BLE001",  # deliberate catch-alls so a plugin/session/background error never fails the request
+    "S110",    # best-effort cleanup where a failure is expected and harmless
+    "RUF012",  # class-level plugin declarations and test fixtures are never mutated
+]

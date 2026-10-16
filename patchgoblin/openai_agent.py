@@ -30,7 +30,7 @@ class ProjectFiles:
     def resolve(self, rel: str, for_write: bool = False) -> str:
         rel = (rel or "").replace("\\", "/").strip()
         norm = posixpath.normpath(rel) if rel else "."
-        if norm.startswith("/") or norm == ".." or norm.startswith("../") or ":" in norm.split("/")[0]:
+        if norm.startswith(("/", "../")) or norm == ".." or ":" in norm.split("/")[0]:
             raise ValueError(f"Path must be relative to the project root: {rel!r}")
         first = norm.split("/")[0]
         if for_write and first in self.RESERVED:

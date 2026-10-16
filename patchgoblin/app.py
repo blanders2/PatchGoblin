@@ -16,15 +16,46 @@ from flask import Flask, Response, abort, jsonify, render_template, request
 
 from . import cline, gitops, opencode, svnops
 from .engine import Engine
-from .pluginkit import PluginManager
 from .hosts import HostError, host_for, open_terminal, open_vscode, probe, terminal_color
 from .openai_agent import endpoint_key, list_models, valid_base_url, valid_header
+from .pluginkit import PluginManager
 from .prompts import IMAGE_MIME, plan_questions
-from .store import (ATTACHMENT_NAME, AUTO_MODES, CLI_PROVIDERS, MODELS, STATUSES, TERMINAL_PLACES, Registry, Settings,
-                    TaskStore, attachment_path, cli_model_suggestions, empty_doc, find_endpoint, find_task, log_event, new_task, now,
-                    provider_choices, resolve_auto, save_attachment, tasks_path, valid_provider, vcs_for)
-from .validators import (MAX_BATCH, TRANSITIONS, plan_answers, plan_limit, plan_trust, remote_view,
-                         require_secrets_ack, sync_mode, transition)
+from .store import (
+    ATTACHMENT_NAME,
+    AUTO_MODES,
+    CLI_PROVIDERS,
+    MODELS,
+    STATUSES,
+    TERMINAL_PLACES,
+    Registry,
+    Settings,
+    TaskStore,
+    attachment_path,
+    cli_model_suggestions,
+    empty_doc,
+    find_endpoint,
+    find_task,
+    log_event,
+    new_task,
+    now,
+    provider_choices,
+    resolve_auto,
+    save_attachment,
+    tasks_path,
+    valid_provider,
+    vcs_for,
+)
+from .validators import (
+    MAX_BATCH,
+    TRANSITIONS,
+    plan_answers,
+    plan_limit,
+    plan_trust,
+    remote_view,
+    require_secrets_ack,
+    sync_mode,
+    transition,
+)
 
 EDITABLE = ("title", "description", "plan", "provider", "plan_model", "code_model", "plan_trust")
 MODEL_KEYS = ("plan_model", "code_model")
