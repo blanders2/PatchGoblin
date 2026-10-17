@@ -321,6 +321,10 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         return {**values, "automation": automation, "endpoints": endpoints, "providers": provider_choices(values),
                 "models": model_suggestions(values)}
 
+    @app.get("/api/busy")
+    def get_busy():
+        return jsonify({"busy": engine.any_busy()})
+
     @app.get("/api/settings")
     def get_settings():
         return jsonify(settings_view(settings.get()))

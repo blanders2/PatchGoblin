@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -4287,6 +4288,67 @@ class TerminalsTests(unittest.TestCase):
         self.assertLess(page.index("/plugins/terminals/vendor/xterm.css"), page.index("/plugins/terminals/plugin.css"))
         with self.client.get("/plugins/terminals/vendor/xterm.js") as res:
             self.assertEqual(res.status_code, 200)
+
+
+class BusyEndpointTests(AppTestCase):
+    def test_busy(self):
+        self.assertEqual(self.client.get("/api/busy").get_json(), {"busy": False})
+        self.app.config["ENGINE"].jobs[("p", 1)] = Job("run")
+        self.assertEqual(self.client.get("/api/busy").get_json(), {"busy": True})
+
+
+class LinuxInstallerTests(unittest.TestCase):
+    def setUp(self):
+        import install_linux
+        self.mod = install_linux
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_desktop_entry(self):
+        entry = self.mod.desktop_entry("/opt/my repo", False)
+        self.assertIn('Exec="/opt/my repo/.venv/bin/python" "/opt/my repo/tray.pyw"\n', entry)
+        self.assertIn("Icon=patchgoblin", entry)
+        self.assertIn('tray.pyw" --service\n', self.mod.desktop_entry("/r", True))
+        self.assertIn("100%%", self.mod.desktop_entry("/100%", False))
+
+    def test_service_unit(self):
+        unit = self.mod.service_unit("/r", port="6000", data="/d", path="/bin")
+        self.assertIn("ExecStart=/r/.venv/bin/python /r/run.py", unit)
+        self.assertIn('Environment="PATCHGOBLIN_PORT=6000"', unit)
+        self.assertIn('Environment="PATCHGOBLIN_DATA=/d"', unit)
+        self.assertIn("RestartSec=5", unit)
+        bare = self.mod.service_unit("/r")
+        self.assertNotIn("PATCHGOBLIN_PORT", bare)
+        self.assertNotIn("Environment", bare)
+
+    def test_paths(self):
+        p = self.mod.paths(self.tmp.name)
+        self.assertEqual(p["desktop"], Path(self.tmp.name, ".local/share/applications/patchgoblin.desktop"))
+        self.assertEqual(p["unit"], Path(self.tmp.name, ".config/systemd/user/patchgoblin.service"))
+
+    def test_round_trip(self):
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[0].endswith("python") and "-c" in cmd:
+                Path(cmd[-1]).write_bytes(b"png")
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with mock.patch.object(self.mod, "run", fake_run), \
+                mock.patch.object(self.mod.shutil, "which", return_value="/usr/bin/x"):
+            written = self.mod.install(self.tmp.name, service=True, autostart=True)
+            p = self.mod.paths(self.tmp.name)
+            for key in ("icon_svg", "icon_png", "desktop", "autostart", "unit"):
+                self.assertTrue(p[key].exists(), key)
+            self.assertEqual(len(written), 5)
+            self.assertIn("X-GNOME-Autostart-enabled=true", p["autostart"].read_text())
+            self.assertIn(["systemctl", "--user", "enable", "--now", "patchgoblin.service"], calls)
+            self.mod.install(self.tmp.name, service=True, autostart=True)  # idempotent
+            removed = self.mod.uninstall(self.tmp.name)
+            self.assertEqual(len(removed), 5)
+            for key in ("icon_svg", "icon_png", "desktop", "autostart", "unit"):
+                self.assertFalse(p[key].exists(), key)
 
 
 if __name__ == "__main__":

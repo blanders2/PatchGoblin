@@ -31,6 +31,19 @@ changes; it interrupts running AI jobs, after asking first. The
 log goes to `patchgoblin.log` in the data directory. If PatchGoblin is already running on the
 port, launching it again just opens the browser.
 
+**Linux install.** `python3 install_linux.py` runs `uv sync` and installs, for your user only (no
+root), a goblin icon, an app-menu launcher for `tray.pyw` and, optionally, a login autostart
+entry and a systemd user service. Pass `--service/--no-service` and `--autostart/--no-autostart`
+(or `--yes` for the defaults: autostart on, service off) to skip the questions. With the service,
+the server runs as `patchgoblin.service` and the tray only attaches to it: Restart runs
+`systemctl --user restart` and Quit stops the service. Service logs: `journalctl --user -u
+patchgoblin`; the unit gets your `PATH` at install time so the AI CLIs are found, and
+`loginctl enable-linger $USER` starts it at boot without a login. GNOME and COSMIC only show
+AppIndicator tray icons, so install PyGObject first (`sudo apt install python3-gi
+gir1.2-ayatanaappindicator3-0.1`); the installer then builds `.venv` with system site packages.
+Restart prompts use zenity or kdialog. `python3 install_linux.py --uninstall` removes
+everything it wrote and leaves `data/` and `.venv` alone.
+
 ## How it works
 
 **Theme.** Pick System, Light, Dark, Midnight or Sepia from the Theme menu in the top bar; the choice is remembered per browser.

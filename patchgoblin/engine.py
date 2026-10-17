@@ -127,6 +127,10 @@ class Engine:
         """True while any AI job (planning, run or chat) is active for the project."""
         return any(key[0] == pid for key in list(self.jobs)) or self.chat(pid).job is not None
 
+    def any_busy(self) -> bool:
+        """True while any AI job (planning, run or chat) is active in any project."""
+        return bool(self.jobs) or any(c.job is not None for c in list(self.chats.values()))
+
     def _run_marker(self, pid: str) -> tuple[int, bool]:
         """(runs started so far, whether one is active) for the project: if this differs
         before and after a plan, or a run is active, working-tree changes may be the run's."""

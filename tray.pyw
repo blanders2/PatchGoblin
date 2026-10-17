@@ -4,17 +4,26 @@ Click the icon (or choose Open PatchGoblin) to open the app in your browser; Res
 the server and starts it again (after asking, if AI jobs are running); Quit stops the server. Started as .pyw so Windows runs it without a console window; the server log
 goes to patchgoblin.log in the data directory. PATCHGOBLIN_PORT / PATCHGOBLIN_DATA apply
 as for run.py. If PatchGoblin is already running on the port, this just opens it.
+
+On Linux, dialogs use zenity or kdialog, and the icon uses the AppIndicator backend when the
+system PyGObject is visible (see install_linux.py). With --service (or when the systemd user
+unit patchgoblin.service is enabled) the tray doesn't host the server: it starts or attaches to
+that unit, Restart restarts the unit and Quit stops it.
 """
+import json
 import logging
 import logging.handlers
 import os
 import socket
 import subprocess
 import sys
+import shutil
 import threading
 import time
+import urllib.request
 import webbrowser
 
+UNIT = "patchgoblin.service"
 PORT = int(os.environ.get("PATCHGOBLIN_PORT", "5050"))
 URL = f"http://127.0.0.1:{PORT}"
 DATA_DIR = os.environ.get("PATCHGOBLIN_DATA") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -64,20 +73,115 @@ def relaunch() -> None:
                          | subprocess.CREATE_NO_WINDOW)
 
 
+def linux_dialog(kind: str, message: str) -> bool | None:
+    """Show a zenity/kdialog dialog ("question" or "error"). None if neither tool exists."""
+    if shutil.which("zenity"):
+        cmd = ["zenity", f"--{kind}", "--title=PatchGoblin", "--no-markup", f"--text={message}"]
+    elif shutil.which("kdialog"):
+        cmd = ["kdialog", "--title", "PatchGoblin", "--yesno" if kind == "question" else "--error", message]
+    else:
+        return None
+    try:
+        return subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL).returncode == 0
+    except OSError:
+        return None
+
+
 def fail(message: str) -> None:
     logging.error(message)
     if os.name == "nt":
         import ctypes
         ctypes.windll.user32.MessageBoxW(None, message, "PatchGoblin", 0x10)
+    else:
+        linux_dialog("error", message)
     sys.exit(1)
 
 
 def confirm(message: str) -> bool:
-    """Yes/No warning dialog (Windows only; elsewhere assume yes)."""
+    """Yes/No warning dialog (Windows, or zenity/kdialog on Linux; otherwise assume yes)."""
     if os.name != "nt":
-        return True
+        answer = linux_dialog("question", message)
+        return True if answer is None else answer
     import ctypes
     return ctypes.windll.user32.MessageBoxW(None, message, "PatchGoblin", 0x4 | 0x30 | 0x40000) == 6
+
+
+def systemctl(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True)
+
+
+def service_mode() -> bool:
+    if not sys.platform.startswith("linux"):
+        return False
+    if "--service" in sys.argv[1:]:
+        return True
+    try:
+        return systemctl("is-enabled", UNIT).returncode == 0
+    except OSError:
+        return False
+
+
+def pick_linux_backend() -> None:
+    """GNOME/COSMIC panels only show StatusNotifier icons: use AppIndicator when it's importable."""
+    if not sys.platform.startswith("linux") or os.environ.get("PYSTRAY_BACKEND"):
+        return
+    try:
+        import gi
+    except ImportError:
+        return
+    for name in ("AyatanaAppIndicator3", "AppIndicator3"):
+        try:
+            gi.require_version(name, "0.1")
+            __import__(f"gi.repository.{name}")
+        except (ValueError, ImportError):
+            continue
+        os.environ["PYSTRAY_BACKEND"] = "appindicator"
+        return
+
+
+def server_busy() -> bool:
+    """Ask a server in another process whether AI jobs are running (assume not if unreachable)."""
+    try:
+        with urllib.request.urlopen(f"{URL}/api/busy", timeout=3) as r:
+            return bool(json.load(r).get("busy"))
+    except (OSError, ValueError):
+        return False
+
+
+def run_service_tray() -> None:
+    """Tray front-end for the systemd user unit: the server runs there, not in this process."""
+    import pystray
+
+    try:
+        if systemctl("is-active", UNIT).returncode != 0:
+            systemctl("start", UNIT)
+    except OSError as e:
+        fail(f"PatchGoblin could not run systemctl: {e}")
+    deadline = time.monotonic() + 15
+    while not already_running() and time.monotonic() < deadline:
+        time.sleep(0.25)
+    logging.info("PatchGoblin tray attached to %s (%s)", UNIT, URL)
+
+    def open_app(icon, item):
+        webbrowser.open(URL)
+
+    def restart_app(icon, item):
+        if server_busy() and not confirm("Restarting will interrupt running AI jobs. Restart anyway?"):
+            return
+        logging.info("Restarting %s from the tray", UNIT)
+        systemctl("restart", UNIT)
+
+    def quit_app(icon, item):
+        logging.info("Stopping %s from the tray", UNIT)
+        systemctl("stop", UNIT)
+        icon.stop()
+
+    pystray.Icon("PatchGoblin", make_icon_image(), f"PatchGoblin ({URL})", menu=pystray.Menu(
+        pystray.MenuItem("Open PatchGoblin", open_app, default=True),
+        pystray.MenuItem("Restart", restart_app),
+        pystray.MenuItem("Quit", quit_app),
+    )).run()
 
 
 def make_icon_image():
@@ -97,10 +201,15 @@ def main() -> None:
     setup_logging()
     if "--restarted" in sys.argv[1:]:
         wait_for_port_free()
+    if service_mode():
+        pick_linux_backend()
+        run_service_tray()
+        return
     if already_running():
         webbrowser.open(URL)
         return
 
+    pick_linux_backend()
     import pystray
     from waitress import create_server
 
@@ -123,8 +232,7 @@ def main() -> None:
     def restart_app(icon, item):
         nonlocal restart
         engine = app.config["ENGINE"]
-        busy = bool(engine.jobs) or any(c.job is not None for c in list(engine.chats.values()))
-        if busy and not confirm("Restarting will interrupt running AI jobs. Restart anyway?"):
+        if engine.any_busy() and not confirm("Restarting will interrupt running AI jobs. Restart anyway?"):
             return
         restart = True
         icon.stop()
