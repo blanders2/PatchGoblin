@@ -895,6 +895,8 @@ async function createTask(ev) {
       { title, description: desc, ...(paused ? { paused: true } : {}) });
     $("#nt-title").value = "";
     $("#nt-desc").value = "";
+    $("#nt-desc").classList.remove("expanded");
+    $("#nt-desc").style.height = "";
     renderImagePreviews($("#nt-desc"), $("#nt-desc-img"));
     state.tasks.push(task); markTasksChanged();
     if (state.tab !== "unplanned") selectTab("unplanned");
@@ -2503,6 +2505,21 @@ function init() {
   setupServersDialog();
   loadAutomation();
   $("#new-task").onsubmit = createTask;
+  const ntDesc = $("#nt-desc");
+  ntDesc.addEventListener("focus", () => ntDesc.classList.add("expanded"));
+  ntDesc.addEventListener("blur", () => {
+    if (!ntDesc.value.trim()) { ntDesc.classList.remove("expanded"); ntDesc.style.height = ""; }
+  });
+  ntDesc.addEventListener("input", () => {
+    ntDesc.style.height = "auto";
+    ntDesc.style.height = Math.min(ntDesc.scrollHeight + 2, window.innerHeight * 0.5) + "px";
+  });
+  ntDesc.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      $("#new-task").requestSubmit();
+    }
+  });
   $("#commits-btn").onclick = showCommits;
   $("#checkin-btn").onclick = showCheckin;
   $("#ci-submit-btn").onclick = submitCheckin;

@@ -245,9 +245,13 @@ button.link {
 }
 button.link:hover { filter: none; }
 
-.new-task { display: flex; gap: 8px; margin: 12px 0 16px; }
+.new-task { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0 16px; }
 .new-task #nt-title { flex: 2; }
-.new-task #nt-desc { flex: 3; }
+.new-task #nt-desc {
+  flex: 3; resize: none; overflow: hidden; display: block; min-height: 0;
+  transition: min-height .15s ease;
+}
+.new-task #nt-desc.expanded { min-height: 7em; resize: vertical; overflow: auto; }
 
 /* ---- board ---- */
 .queue-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 12px; overflow-x: auto; }
@@ -505,7 +509,7 @@ legend { padding: 0 4px; font-weight: 600; }
   .activity-btn[aria-selected="true"]::before { left: 8px; right: 8px; top: auto; bottom: -3px; width: auto; height: 3px; }
   .sidebar { width: auto; border-right: 0; border-bottom: 1px solid var(--line); max-height: 30vh; }
   main { padding: 14px 16px; }
-  .new-task { flex-direction: column; }
+  .new-task { flex-direction: column; align-items: stretch; }
 }
 
 /* ---- live activity ---- */
