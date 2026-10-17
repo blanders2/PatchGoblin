@@ -31,6 +31,7 @@ from patchgoblin.hosts import (
 )
 from patchgoblin.openai_agent import OpenAIAgent, ProjectFiles
 from patchgoblin.plugins.ssh import sshtools
+from patchgoblin.plugins.todo import todos
 from patchgoblin.providers import Outcome, _StreamJson, describe_tool, run_claude
 
 FAKE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_agent.py")
@@ -3824,6 +3825,99 @@ class Demo(Plugin):
 
 PLUGIN = Demo
 '''
+
+
+class TodoTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.app = create_app(os.path.join(self.tmp.name, "data"), start_engine=False)
+        self.addCleanup(self.app.config["PLUGINS"].stop_all)
+        self.client = self.app.test_client()
+
+    def add(self, text="Write tests", **extra):
+        res = self.client.post("/api/todo/items", headers=H, json={"text": text, **extra})
+        self.assertEqual(res.status_code, 201, res.get_json())
+        return res.get_json()
+
+    def test_writes_need_the_header(self):
+        item = self.add()["items"][0]
+        for method, url, kw in (("post", "/api/todo/items", {"json": {"text": "x"}}),
+                                ("patch", f"/api/todo/items/{item['id']}", {"json": {"done": True}}),
+                                ("delete", f"/api/todo/items/{item['id']}", {}),
+                                ("put", "/api/todo/order", {"json": {"ids": []}}),
+                                ("post", "/api/todo/clear-done", {})):
+            self.assertEqual(getattr(self.client, method)(url, **kw).status_code, 403, url)
+
+    def test_add_patch_toggle_delete(self):
+        self.add("first")
+        data = self.add("  second  ", project="p1")
+        self.assertEqual([i["text"] for i in data["items"]], ["second", "first"])  # newest on top
+        self.assertEqual((data["open"], data["items"][0]["project"]), (2, "p1"))
+        iid = data["items"][0]["id"]
+        url = f"/api/todo/items/{iid}"
+        data = self.client.patch(url, headers=H, json={"done": True}).get_json()
+        self.assertTrue(data["items"][0]["done"])
+        self.assertIsNotNone(data["items"][0]["done_at"])
+        self.assertEqual(data["open"], 1)
+        data = self.client.patch(url, headers=H, json={"done": False, "text": "renamed", "project": ""}).get_json()
+        self.assertEqual((data["items"][0]["done_at"], data["items"][0]["text"], data["items"][0]["project"]),
+                         (None, "renamed", ""))
+        data = self.client.delete(url, headers=H).get_json()
+        self.assertEqual([i["text"] for i in data["items"]], ["first"])
+        self.assertEqual(self.client.delete(url, headers=H).status_code, 404)
+        self.assertEqual(self.client.patch(url, headers=H, json={"done": True}).status_code, 404)
+        self.assertEqual(self.client.get("/api/todo/items").get_json()["open"], 1)
+
+    def test_validation(self):
+        for text in ("", "   ", "a\nb", "x" * 501, 5):
+            res = self.client.post("/api/todo/items", headers=H, json={"text": text})
+            self.assertEqual(res.status_code, 400, repr(text))
+        iid = self.add()["items"][0]["id"]
+        res = self.client.patch(f"/api/todo/items/{iid}", headers=H, json={"done": "yes"})
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(self.client.patch(f"/api/todo/items/{iid}", headers=H, json={"text": ""}).status_code, 400)
+        self.app.config["SETTINGS"].save_plugin_data("todo", {"items": [
+            todos.validate_item({"text": f"t{n}"}) for n in range(todos.MAX_ITEMS)]})
+        self.assertEqual(self.client.post("/api/todo/items", headers=H, json={"text": "one more"}).status_code, 400)
+
+    def test_reorder_and_clear_done(self):
+        for text in ("a", "b", "c"):
+            data = self.add(text)
+        ids = [i["id"] for i in data["items"]]  # c, b, a
+        res = self.client.put("/api/todo/order", headers=H, json={"ids": ids[:2]})
+        self.assertEqual(res.status_code, 400)
+        res = self.client.put("/api/todo/order", headers=H, json={"ids": ids[:2] + ["nope"]})
+        self.assertEqual(res.status_code, 400)
+        data = self.client.put("/api/todo/order", headers=H, json={"ids": ids[::-1]}).get_json()
+        self.assertEqual([i["text"] for i in data["items"]], ["a", "b", "c"])
+        self.client.patch(f"/api/todo/items/{ids[0]}", headers=H, json={"done": True})
+        data = self.client.post("/api/todo/clear-done", headers=H).get_json()
+        self.assertEqual([i["text"] for i in data["items"]], ["a", "b"])
+
+    def test_data_is_stored_in_plugin_data(self):
+        self.add("kept")
+        settings = self.app.config["SETTINGS"]
+        self.assertEqual(settings.plugin_data("todo")["items"][0]["text"], "kept")
+        self.assertNotIn("kept", json.dumps(self.client.get("/api/settings").get_json()))
+
+    def test_plugin_listing_and_switch(self):
+        listed = self.client.get("/api/plugins").get_json()["plugins"]
+        self.assertTrue(any(p["id"] == "todo" and p["enabled"] and not p["error"] for p in listed))
+        page = self.client.get("/").get_data(as_text=True)
+        self.assertIn("/plugins/todo/plugin.js?v=", page)
+        self.assertIn('id="todo-view"', page)
+        self.assertEqual(self.client.get("/plugins/todo/plugin.css").status_code, 200)
+        self.client.put("/api/plugins/todo", headers=H, json={"enabled": False})
+        self.assertEqual(self.client.get("/api/todo/items").status_code, 404)
+
+    def test_clean_items_drops_junk_and_repeats(self):
+        good = {"id": "a", "text": "ok"}
+        out = todos.clean_items([good, {"id": "a", "text": "again"}, {"text": ""}, "junk", {"text": "x", "done": 1}, None])
+        self.assertEqual([i["id"] for i in out], ["a"])
+        self.assertEqual(todos.clean_items("nope"), [])
+        with self.assertRaises(ValueError):
+            todos.clean_items([good, good], strict=True)
 
 
 class PluginTests(unittest.TestCase):

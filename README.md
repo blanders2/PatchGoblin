@@ -427,7 +427,7 @@ versions (a single "OpenAI API" block) become an endpoint with id `openai`.
 ## The activity bar and plugins
 
 The narrow icon bar on the far left switches the sidebar and the main area between
-**Projects** and each developer tool (plugin), such as **SSH tools**. Switching only hides the
+**Projects** and each developer tool (plugin), such as **SSH tools** or **Todo**. Switching only hides the
 project screens. Running tasks, the open drawer or chat and unsaved Project settings all keep
 going, and switching back returns you to exactly where you were. Click the selected icon again
 to collapse the sidebar and click it once more to bring it back. Arrow keys move between the icons. A plugin can show a badge on its
@@ -636,6 +636,19 @@ Things to know:
 - The passphrase of a generated key is passed to `ssh-keygen -N`, so it is briefly visible
   in the process list of the machine running it. Leave it empty to avoid that.
 - A hard kill of PatchGoblin (not Quit) can leave `ssh` tunnel processes behind.
+
+## Todo
+
+A built-in plugin with one personal checklist, separate from the project task board. Add an item
+with the box at the top, tick it off, double-click its text to edit (Enter saves, Esc cancels),
+drag rows to reorder them and press **Clear done** to remove finished items. An item can be tagged with
+one of your projects. The icon's badge counts the open items.
+
+The sidebar filters the list: **All**, **Open**, **Done**, or a single project. Dragging while a
+filter is active reorders only the visible items. Items (up to 500, each a single line of up to
+500 characters) are saved in the plugin's data in `settings.json`, and every change is a small
+request, so two browser tabs don't overwrite each other. Deleting a project keeps its items; the
+tag then shows the old project id.
 
 ## Safety notes
 

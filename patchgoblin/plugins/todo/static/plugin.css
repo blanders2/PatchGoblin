@@ -1,0 +1,23 @@
+/* Todo plugin. Everything is scoped to its sidebar pane (#sidebar-todo) and view (#todo-view). */
+#sidebar-todo .project-list li { display: flex; justify-content: space-between; gap: 8px; padding: 5px 8px; border-radius: 6px; font-size: 13px; }
+#sidebar-todo .project-list li:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#sidebar-todo .todo-count { color: var(--muted); font-size: 11.5px; }
+#sidebar-todo .todo-sep { border-top: 1px solid var(--line); margin-top: 6px; padding: 0; pointer-events: none; }
+#todo-view { max-width: 760px; font-size: 13px; }
+#todo-view h1 { font-size: 17px; margin-bottom: 10px; }
+.todo-add { display: flex; gap: 8px; margin-bottom: 8px; }
+.todo-add input { flex: 1; min-width: 0; }
+.todo-add select { width: auto; max-width: 14em; }
+.todo-list { list-style: none; margin: 8px 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.todo-item { display: flex; align-items: center; gap: 8px; padding: 5px 8px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; }
+.todo-item[draggable="true"] { cursor: grab; }
+.todo-item.todo-dragging { opacity: .45; }
+.todo-item.todo-over { border-color: var(--accent); box-shadow: 0 -2px 0 var(--accent); }
+.todo-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.todo-item.todo-done .todo-text { color: var(--muted); text-decoration: line-through; }
+.todo-edit { flex: 1; min-width: 0; }
+.todo-chip { flex: 0 0 auto; max-width: 12em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 0 7px; border-radius: 9px; border: 1px solid var(--line); color: var(--muted); font-size: 11.5px; }
+.todo-del { padding: 0 6px; font-size: 12px; }
+.todo-footer { display: flex; justify-content: flex-end; }

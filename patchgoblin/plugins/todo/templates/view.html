@@ -1,0 +1,13 @@
+{# The Todo main view, inside the plugin's <section class="plugin-view">. #}
+<div id="todo-view">
+  <h1 id="todo-title">All</h1>
+  <form id="todo-add-form" class="todo-add">
+    <input id="todo-add-text" name="text" autocomplete="off" maxlength="500" placeholder="Add an item and press Enter" aria-label="New item">
+    <select id="todo-add-project" name="project" aria-label="Project"></select>
+    <button type="submit">Add</button>
+  </form>
+  <div id="todo-error" class="error" hidden></div>
+  <ul id="todo-list" class="todo-list"></ul>
+  <p id="todo-empty" class="muted small" hidden>Nothing here.</p>
+  <div class="todo-footer"><button type="button" class="ghost" id="todo-clear-done">Clear done</button></div>
+</div>
