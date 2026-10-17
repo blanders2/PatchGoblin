@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,13 @@ from patchgoblin.providers import Outcome, _StreamJson, describe_tool, run_claud
 
 FAKE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_agent.py")
 H = {"X-PatchGoblin": "1"}
+
+
+def remote_script(command: str) -> str:
+    """The script inside an ``sh -c <script>`` remote command line (what the remote shell sees)."""
+    words = shlex.split(command)
+    assert words[:2] == ["sh", "-c"] and len(words) == 3, command
+    return words[2]
 ASKING_PLAN = "## Steps\n1. do it\n\n## Questions for you\n1. Which colour?\n"
 
 
@@ -155,7 +163,7 @@ class ProjectTests(AppTestCase):
             self.assertEqual(res.status_code, 400)
 
     def test_terminal_place_setting(self):
-        self.assertEqual(self.client.get("/api/settings").get_json()["terminal"], {"open_in": "wt"})
+        self.assertEqual(self.client.get("/api/settings").get_json()["terminal"], {"open_in": "wt", "linux_backend": "auto", "kitty_socket": ""})
         res = self.client.put("/api/settings", headers=H, json={"terminal": {"open_in": "browser"}})
         self.assertEqual(res.get_json()["terminal"]["open_in"], "browser")
         self.assertEqual(self.client.get("/api/settings").get_json()["terminal"]["open_in"], "browser")
@@ -308,6 +316,7 @@ class ProjectTests(AppTestCase):
     def test_open_terminal(self):
         project = self.add_project()
         url = f"/api/projects/{project['id']}/terminal"
+        self.client.put("/api/settings", headers=H, json={"terminal": {"linux_backend": "window"}})
         with mock.patch("patchgoblin.hosts.wt_tabs", return_value=[]), \
                 mock.patch("patchgoblin.hosts.subprocess.Popen") as popen:
             res = self.client.post(url, headers=H, json={"secrets_ack": True})
@@ -389,7 +398,7 @@ class ProjectTests(AppTestCase):
                 out = probe(project)
             self.assertEqual(out["ok"], ok, out)
             self.assertIn(text, out["error"])
-            self.assertIn("test -d '/srv/my app'", comm.call_args[0][0][-1])
+            self.assertEqual(remote_script(comm.call_args[0][0][-1]), "test -d '/srv/my app'")
 
     @staticmethod
     def _decode_ps(argv):
@@ -1876,7 +1885,7 @@ class RemoteTests(AppTestCase):
         with mock.patch("patchgoblin.hosts.communicate") as comm:
             comm.return_value = mock.Mock(ok=True)
             host.run(["git", "fetch"], cwd="/srv/p", env={"GIT_TERMINAL_PROMPT": "0"})
-        self.assertEqual(comm.call_args.args[0][-1], "cd /srv/p && env GIT_TERMINAL_PROMPT=0 git fetch")
+        self.assertEqual(remote_script(comm.call_args.args[0][-1]), "cd /srv/p && env GIT_TERMINAL_PROMPT=0 git fetch")
 
 
 class ChatTests(AppTestCase):
@@ -2031,7 +2040,7 @@ class HostTests(unittest.TestCase):
             host.run(["claude", "-p", "it's"], cwd="/srv/my app", input="prompt")
         argv = comm.call_args.args[0]
         self.assertEqual(argv[-2], "me@box")
-        self.assertEqual(argv[-1], "cd '/srv/my app' && claude -p 'it'\"'\"'s'")
+        self.assertEqual(remote_script(argv[-1]), "cd '/srv/my app' && claude -p 'it'\"'\"'s'")
         self.assertIn("BatchMode=yes", argv)
 
     def test_terminal_commands(self):
@@ -2068,7 +2077,7 @@ class HostTests(unittest.TestCase):
         argv, cwd = terminal_command(ssh, "/srv/my app", "win32", have({"wt"}), title="App (me@box)")
         self.assertEqual(argv[:12], ["wt", "-w", "PatchGoblin", "new-tab", "--title", "App (me@box)",
                                      "--suppressApplicationTitle", "ssh", "-t", "-p", "2222", "me@box"])
-        self.assertIn("cd '/srv/my app'", argv[12])
+        self.assertIn("cd '/srv/my app'", remote_script(argv[12]))
         self.assertIsNone(cwd)
         self.assertEqual(terminal_command(local, "/a", "darwin", have(set()))[0],
                          ["open", "-a", "Terminal", "/a"])
@@ -4704,6 +4713,208 @@ class LinuxInstallerTests(unittest.TestCase):
             self.assertEqual(len(removed), 5)
             for key in ("icon_svg", "icon_png", "desktop", "autostart", "unit"):
                 self.assertFalse(p[key].exists(), key)
+
+
+
+from patchgoblin import linux_terminals as lt
+from patchgoblin.hosts import Result as _R
+
+
+KITTY_LS = json.dumps([{"id": 1, "platform_window_id": 77, "tabs": [{"windows": [
+    {"id": 5, "env": {"PATCHGOBLIN_TAB": "p1"}}, {"id": 6, "env": {}}]}, {"windows": [
+    {"id": 7, "env": {"PATCHGOBLIN_TAB": "p2"}}]}]}])
+
+
+class LinuxTerminalTests(unittest.TestCase):
+    def setUp(self):
+        hosts_mod._just_opened.clear()
+        self.addCleanup(hosts_mod._just_opened.clear)
+
+    def test_remote_scripts_read_the_same_in_sh_and_fish(self):
+        for text in ["it's", "a\\b", "$HOME `x` \"q\"", "two\nlines", "", "'", "a b"]:
+            self.assertEqual(shlex.split(hosts_mod._pq(text) or "''"), [text] if text else [""])
+            for shell in ("sh", "fish"):
+                if not shutil.which(shell):
+                    continue
+                out = subprocess.run([shell, "-c", "printf %s " + hosts_mod._pq(text)],
+                                     capture_output=True, text=True).stdout
+                self.assertEqual(out, text, (shell, text))
+
+    def test_login_script_runs_in_sh_whatever_the_login_shell(self):
+        script = SSHHost._login("echo \"it's $HOME\"")
+        self.assertIn('"${SHELL:-/bin/sh}" -lc \'exec sh -c "$PG_SCRIPT"\'', script)
+        for shell in ("sh", "fish"):
+            if shutil.which(shell):
+                out = subprocess.run(["sh", "-c", script], capture_output=True, text=True,
+                                     env={**os.environ, "SHELL": shutil.which(shell)}).stdout
+                self.assertEqual(out, f"it's {os.environ['HOME']}\n", shell)
+
+    def test_windows_ssh_commands_are_not_wrapped_in_sh(self):
+        host = hosts_mod.WindowsSSHHost("me@win")
+        hosts_mod._WIN_SHELL[("me@win", None)] = "cmd"
+        self.addCleanup(hosts_mod._WIN_SHELL.clear)
+        with mock.patch("patchgoblin.hosts.communicate") as comm:
+            comm.return_value = mock.Mock(ok=True, stdout="")
+            host._exec("exit 0")
+        self.assertNotIn("sh -c", comm.call_args.args[0][-1])
+
+    def test_parse_environ_and_proc_tags(self):
+        self.assertEqual(lt.parse_environ(b"A=1\0PATCHGOBLIN_TAB=p1\0junk\0B=x=y\0"),
+                         {"A": "1", "PATCHGOBLIN_TAB": "p1", "B": "x=y"})
+        with tempfile.TemporaryDirectory() as root:
+            for pid, env in (("10", b"PATCHGOBLIN_TAB=p1\0"), ("11", b"PATCHGOBLIN_TAB=p1\0"),
+                             ("12", b"PATH=/bin\0"), ("self", b"PATCHGOBLIN_TAB=no\0")):
+                os.makedirs(os.path.join(root, pid))
+                Path(root, pid, "environ").write_bytes(env)
+            os.makedirs(os.path.join(root, "13"))  # no readable environ
+            self.assertEqual(lt.proc_tags(root), {"p1": [10, 11]})
+
+    def test_parse_kitty_ls(self):
+        self.assertEqual(lt.parse_kitty_ls(KITTY_LS), [("p1", 77), ("p2", 77)])
+        self.assertEqual(lt.parse_kitty_ls("not json"), [])
+
+    def kitty(self, ls_ok=True):
+        calls = []
+
+        def comm(argv, **kw):
+            calls.append(argv)
+            if argv[-1] == "ls":
+                return _R(0, KITTY_LS, "") if ls_ok is True else _R(1, "", ls_ok)
+            return _R(0, "", "")
+        k = lt.KittyBackend("unix:/tmp/k")
+        return k, calls, mock.patch.object(lt, "communicate", comm)
+
+    def test_kitty_open_focus_and_list(self):
+        k, calls, patch = self.kitty()
+        with patch, mock.patch.object(lt, "is_wayland", return_value=True):
+            self.assertEqual(k.list_tags(), ["p1", "p2"])
+            k.open(["ssh", "-t", "h"], "/a b", "App (h)", "#12ab9f", "p3")
+            k.open(None, "/a", "App", "red;x", "bad tag")
+            k.focus("p2")
+        base = ["kitty", "@", "--to", "unix:/tmp/k"]
+        launch = [c for c in calls if "launch" in c]
+        self.assertEqual(launch[0], base + ["launch", "--type=tab", "--cwd", "/a b", "--tab-title", "App (h)",
+                                            "--env", "PATCHGOBLIN_TAB=p3", "--", "ssh", "-t", "h"])
+        self.assertIn(base + ["set-tab-color", "--match", "env:PATCHGOBLIN_TAB=p3",
+                              "active_bg=#12ab9f", "inactive_bg=#12ab9f"], calls)
+        self.assertEqual(launch[1], base + ["launch", "--type=tab", "--cwd", "/a", "--tab-title", "App"])
+        self.assertEqual(len([c for c in calls if "set-tab-color" in c]), 1)  # bad colour / tag left out
+        self.assertIn(base + ["focus-tab", "--match", "env:PATCHGOBLIN_TAB=p2"], calls)
+
+    def test_kitty_remote_control_off_explains_how_to_enable_it(self):
+        k, _, patch = self.kitty("Remote control is disabled")
+        with patch, self.assertRaises(HostError) as cm:
+            k.open(None, "/a", "App", "", "p1")
+        self.assertIn("allow_remote_control", str(cm.exception))
+        with patch, mock.patch.object(k, "which", lambda n: "/usr/bin/kitty"):
+            ok, msg = k.probe()
+        self.assertFalse(ok)
+        self.assertIn("allow_remote_control", msg)
+
+    def test_kitty_starts_its_own_with_a_session_file(self):
+        k = lt.KittyBackend("", lambda n: "/usr/bin/kitty")
+        seen = {}
+
+        def spawn(argv, cwd, flag):
+            seen["argv"] = argv
+            seen["session"] = Path(argv[argv.index("--session") + 1]).read_text()
+        finds = iter([("", ""), ("unix:/x", "")])
+        calls = []
+        with mock.patch.object(k, "find", lambda: next(finds)), mock.patch.object(hosts_mod, "_spawn", spawn), \
+                mock.patch.object(lt, "communicate", lambda argv, **kw: calls.append(argv) or _R(0, "", "")), \
+                mock.patch.object(lt.time, "sleep"):
+            k.open(["ssh", "h"], "/a b", "My App", "#aabbcc", "p1")
+        self.assertEqual(seen["argv"][:3], ["kitty", "-o", "allow_remote_control=socket-only"])
+        self.assertEqual(seen["session"], "new_tab My App\ncd /a b\nlaunch --env PATCHGOBLIN_TAB=p1 ssh h\n")
+        self.assertFalse(os.path.exists(seen["argv"][-1]))
+        self.assertTrue(any("set-tab-color" in c for c in calls))
+
+    def tmux(self, session_exists, clients=""):
+        calls = []
+
+        def comm(argv, **kw):
+            calls.append(argv[1:])
+            cmd = argv[1]
+            if cmd == "has-session":
+                return _R(0 if session_exists else 1, "", "")
+            if cmd in ("new-window", "new-session"):
+                return _R(0, "@4\n", "")
+            if cmd == "list-windows":
+                return _R(0, "@1\tp1\n@2\t\n@3\tp2\n", "")
+            if cmd == "list-clients":
+                return _R(0 if clients else 0, clients, "")
+            if cmd == "-V":
+                return _R(0, "tmux 3.4\n", "")
+            return _R(0, "", "")
+        return calls, mock.patch.object(lt, "communicate", comm)
+
+    def test_tmux_open_creates_session_or_window_and_names_it(self):
+        for exists, cmd in ((False, "new-session"), (True, "new-window")):
+            calls, patch = self.tmux(exists, clients="123\n")
+            with patch, mock.patch.object(lt, "raise_x11") as raised:
+                lt.TmuxBackend(lambda n: n).open(["ssh", "h"], "/a", "App", "#12ab9f", "p1")
+            made = next(c for c in calls if c[0] == cmd)
+            self.assertEqual(made[-2:], ["ssh", "h"])
+            self.assertIn("PATCHGOBLIN_TAB=p1", made)
+            self.assertEqual(made[made.index("-n") + 1], "App")
+            for opt in (["@patchgoblin_tab", "p1"], ["automatic-rename", "off"], ["allow-rename", "off"],
+                        ["window-status-style", "bg=#12ab9f"], ["window-status-current-style", "bg=#12ab9f"]):
+                self.assertIn(["set-option", "-w", "-t", "@4", *opt], calls)
+            raised.assert_called_once_with(pid=123, which=mock.ANY)
+
+    def test_tmux_focus_and_attach(self):
+        calls, patch = self.tmux(True)
+        spawned = []
+        with patch, mock.patch.object(hosts_mod, "_spawn", lambda a, c, f: spawned.append(a)):
+            t = lt.TmuxBackend(lambda n: n if n in ("xterm", "tmux") else None)
+            self.assertEqual(t.list_tags(), ["p1", "p2"])
+            t.focus("p2")
+        self.assertIn(["select-window", "-t", "@3"], calls)
+        self.assertEqual(spawned, [["xterm", "-e", "tmux", "attach", "-t", "PatchGoblin"]])
+
+    def test_resolve_backend(self):
+        def have(*names):
+            return lambda n: f"/usr/bin/{n}" if n in names else None
+        with mock.patch.object(lt.KittyBackend, "find", return_value=("unix:/k", "")):
+            self.assertEqual(lt.resolve_backend({}, have("kitty", "tmux")).name, "kitty")
+        with mock.patch.object(lt.KittyBackend, "find", return_value=("", "")):
+            self.assertEqual(lt.resolve_backend({}, have("kitty", "tmux")).name, "tmux")
+            self.assertEqual(lt.resolve_backend({}, have("kitty")).name, "kitty")
+            self.assertIsNone(lt.resolve_backend({}, have()))
+            self.assertIsNone(lt.resolve_backend({"linux_backend": "window"}, have("kitty", "tmux")))
+            self.assertEqual(lt.resolve_backend({"linux_backend": "wezterm"}, have()).name, "wezterm")
+        with mock.patch.object(lt.KittyBackend, "find", return_value=("", lt.KITTY_HELP)):
+            self.assertEqual(lt.resolve_backend({}, have("kitty", "tmux")).name, "kitty")  # surfaces the fix
+
+    def test_open_terminal_with_a_linux_backend(self):
+        with tempfile.TemporaryDirectory() as d:
+            project = {"id": "p2", "name": "App", "location": "local", "path": d}
+            backend = mock.Mock(name="b")
+            backend.list_tags.return_value = ["p1", "p2"]
+            with mock.patch.object(lt, "resolve_backend", return_value=backend):
+                self.assertEqual(hosts_mod.open_terminal(project, "#112233", platform="linux", terminal_settings={}), "focused")
+                backend.focus.assert_called_once_with("p2")
+                self.assertEqual(hosts_mod.open_terminal(project, "#112233", new=True, platform="linux", terminal_settings={}), "opened")
+                backend.open.assert_called_once_with(None, d, "App", "#112233", "p2")
+                other = {**project, "id": "p3"}
+                self.assertEqual(hosts_mod.open_terminal(other, platform="linux", terminal_settings={}), "opened")
+                # a double-click right after opening focuses instead of opening again
+                self.assertEqual(hosts_mod.open_terminal(other, platform="linux", terminal_settings={}), "focused")
+                self.assertEqual(backend.open.call_count, 2)
+            with mock.patch.object(lt, "resolve_backend", return_value=None), \
+                    mock.patch.object(hosts_mod, "_spawn") as spawn:
+                hosts_mod._just_opened.clear()
+                hosts_mod.open_terminal(project, platform="linux", terminal_settings={"linux_backend": "window"})
+                self.assertEqual(spawn.call_count, 1)
+
+    def test_terminal_settings_validation_and_status(self):
+        from patchgoblin.app import clean_terminal
+        self.assertEqual(clean_terminal({"linux_backend": "tmux", "kitty_socket": " unix:/tmp/k "}),
+                         {"linux_backend": "tmux", "kitty_socket": "unix:/tmp/k"})
+        for bad in ({"linux_backend": "screen"}, {"kitty_socket": "/tmp/k"}, {"kitty_socket": 5},
+                    {"kitty_socket": "unix:" + "x" * 300}):
+            with self.assertRaises(ValueError):
+                clean_terminal(bad)
 
 
 if __name__ == "__main__":

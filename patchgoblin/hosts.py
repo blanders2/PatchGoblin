@@ -240,6 +240,15 @@ class LocalHost:
 _TARGET_RE = re.compile(r"^[A-Za-z0-9_.@\-\[\]:%]+$")
 
 
+def _pq(s: str) -> str:
+    """Quote ``s`` so sh, bash, zsh and fish all read it as the same string: runs of other
+    characters go in single quotes, ``'`` and ``\\`` in double quotes (a backslash means
+    different things to them inside single quotes). sshd hands the remote command to the user's
+    login shell, which may be fish."""
+    return "".join('"\'"' if c == "'" else '"\\\\"' if c == "\\" else f"'{c}'"
+                   for c in re.findall(r"[^'\\]+|'|\\", s)) or "''"
+
+
 class SSHHost:
     """A POSIX host reached with the system ``ssh`` client (key auth, BatchMode)."""
 
@@ -261,7 +270,8 @@ class SSHHost:
         return argv + self._port_args() + [self.target, remote_command]
 
     def _exec(self, script: str, **kw) -> Result:
-        return communicate(self._argv(script), **kw)
+        # Always run in sh: the remote login shell may be fish, which can't parse POSIX scripts.
+        return communicate(self._argv("sh -c " + _pq(script)), **kw)
 
     def _fail(self, res: Result, verb: str, path: str) -> HostError:
         return HostError(f"Could not {verb} {path} on {self.label}: {res.stderr.strip() or 'ssh failed'}")
@@ -271,8 +281,11 @@ class SSHHost:
 
     @staticmethod
     def _login(script: str) -> str:
-        # Login shell so PATH additions from ~/.profile (npm, nvm, ~/.local/bin) apply.
-        return f'exec "${{SHELL:-/bin/sh}}" -lc {shlex.quote(script)}'
+        # Login shell so PATH additions from ~/.profile (npm, nvm, ~/.local/bin) apply; the script
+        # itself still runs in sh, whatever the login shell is ("$PG_SCRIPT" reads the same in
+        # sh, bash, zsh and fish).
+        return (f'exec env PG_SCRIPT={shlex.quote(script)} "${{SHELL:-/bin/sh}}" '
+                '-lc \'exec sh -c "$PG_SCRIPT"\'')
 
     def join(self, *parts: str) -> str:
         return posixpath.join(*parts)
@@ -374,7 +387,8 @@ class SSHHost:
 
     def shell_argv(self, path: str) -> list[str]:
         """ssh command for an interactive login shell in ``path`` (for a terminal window)."""
-        return ["ssh", "-t", *self._port_args(), self.target, f'cd {shlex.quote(path)} && exec "${{SHELL:-/bin/sh}}" -l']
+        script = f'cd {shlex.quote(path)} && exec "${{SHELL:-/bin/sh}}" -l'
+        return ["ssh", "-t", *self._port_args(), self.target, "sh -c " + _pq(script)]
 
     def dir_status(self, path: str, timeout: float | None = None) -> Result:
         """Result whose exit code is 0 when ``path`` is a directory on the host."""
@@ -865,12 +879,19 @@ def _local_dir_guard(project: dict) -> tuple:
     return host, path
 
 
-def open_terminal(project: dict, color: str = "", new: bool = False, platform: str = sys.platform) -> str:
+def open_terminal(project: dict, color: str = "", new: bool = False, platform: str = sys.platform,
+                  terminal_settings: dict | None = None) -> str:
     """Open a terminal on this computer in the project's directory, named after the project
-    and with tab colour ``color`` (see terminal_color). In Windows Terminal, the project's
-    tab is focused if it's still open (unless ``new``). Returns "focused" or "opened"."""
+    and with tab colour ``color`` (see terminal_color). In Windows Terminal, or on Linux with
+    a tab backend (``terminal_settings``, see linux_terminals), the project's tab is focused
+    if it's still open (unless ``new``). Returns "focused" or "opened"."""
     host, path = _local_dir_guard(project)
     tag = project.get("id") or ""
+    if platform.startswith("linux") and terminal_settings is not None:
+        from . import linux_terminals
+        backend = linux_terminals.resolve_backend(terminal_settings)
+        if backend:
+            return _open_in_backend(backend, host, path, tag, terminal_title(project), color, new)
     # One look-up-then-open at a time, and a tab opened moments ago counts as open even before its
     # shell shows up in the process list, so a double-click doesn't open two tabs.
     with _opening_lock:
@@ -885,6 +906,25 @@ def open_terminal(project: dict, color: str = "", new: bool = False, platform: s
                     return "focused"
             argv, cwd = terminal_command(host, path, platform, title=terminal_title(project), color=color, tag=tag)
             _spawn(argv, cwd, "CREATE_NEW_CONSOLE")
+        except OSError as exc:
+            raise HostError(f"Could not open a terminal: {exc}") from exc
+        if tag:
+            _just_opened[tag] = time.monotonic()
+    return "opened"
+
+
+def _open_in_backend(backend, host, path: str, tag: str, title: str, color: str, new: bool) -> str:
+    """open_terminal for a Linux tab backend: focus the project's tab if it's open, else open one."""
+    tag = tag if _TAG_OK.match(tag) else ""
+    with _opening_lock:
+        try:
+            if not new and tag:
+                if time.monotonic() - _just_opened.get(tag, -OPEN_GRACE) < OPEN_GRACE:
+                    return "focused"
+                if tag in backend.list_tags():
+                    backend.focus(tag)
+                    return "focused"
+            backend.open(host.shell_argv(path) if host.kind == "ssh" else None, path, title, color, tag)
         except OSError as exc:
             raise HostError(f"Could not open a terminal: {exc}") from exc
         if tag:

@@ -83,8 +83,33 @@ new tab in one window named **PatchGoblin**, created the first time. Each tab is
 project (with the SSH host for remote ones), and the shell can't rename it. Each tab also gets the
 project's own colour, picked from its place in the project list so that neighbouring projects
 look clearly different. A project keeps its colour unless a project above it is removed. Without Windows
-Terminal, a PowerShell window opens with the project name as its title. On macOS and Linux the
-system terminal opens a new window as before.
+Terminal, a PowerShell window opens with the project name as its title. On macOS the
+system terminal opens a new window.
+
+On Linux, **Settings → Terminal → Terminal tabs on Linux** picks a backend. Tabs are matched on an
+exact `PATCHGOBLIN_TAB=<project id>` value in the shell's environment, so dragging tabs around
+can't focus the wrong one.
+- **kitty** (the main option): each project is a tab named after it and coloured like on Windows
+  (`kitty @ launch`, `set-tab-color`, `focus-tab --match env:…`). This needs kitty's remote
+  control: add `allow_remote_control socket-only` and `listen_on unix:/tmp/kitty` to
+  `~/.config/kitty/kitty.conf` and restart kitty (or enter the socket under *kitty socket*).
+  If no kitty is listening, PatchGoblin starts its own with remote control turned on by flags, so
+  `kitty.conf` needs no edits.
+- **tmux** (works in any emulator, and over SSH): one session named `PatchGoblin` with a window per
+  project, named and coloured in the status bar. If nobody is attached, a terminal window running
+  `tmux attach` opens. Needs tmux 3.0 or newer.
+- **WezTerm**: named tabs (no colour), found through `wezterm cli`.
+- **A new terminal window each time**: the old behaviour.
+
+*Automatic* uses a reachable kitty, else tmux, else a kitty PatchGoblin starts, else a plain window.
+Commands are passed to the terminal as argument lists, so fish needs no special handling; kitty
+keeps the tab's title and tmux has window renaming turned off, so `fish_title` can't overwrite
+it. SSH projects work with a fish login shell on the remote side too: every remote script runs
+under `sh -c`.
+
+*Bringing the window forward:* switching tabs works everywhere, but on **Wayland** the
+compositor may not let an app raise a window, so the window may only flash "needs attention". On
+**X11**, PatchGoblin raises it with `xdotool` or `wmctrl` when one is installed.
 
 **Live activity.** While the AI plans, runs or answers in chat, PatchGoblin shows a live feed of
 what it is doing: files it reads and edits, commands it runs, and its own messages, plus a one-line

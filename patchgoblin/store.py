@@ -102,11 +102,13 @@ DEFAULT_SETTINGS = {
     }],
     "timeouts": {"plan": 900, "run": 3600},
     "automation": {"auto_plan": False, "auto_queue": False, "auto_promote": True},
-    # where a project's Terminal button opens shells: "wt" (Windows Terminal, else the platform's
-    # own terminal) or "browser" (the Terminals plugin)
-    "terminal": {"open_in": "wt"},
+    # where a project's Terminal button opens shells: "wt" (Windows Terminal; on Linux/macOS a
+    # terminal app on this computer) or "browser" (the Terminals plugin). On Linux, linux_backend
+    # picks how tabs are named and found (see linux_terminals.py) and kitty_socket where kitty listens.
+    "terminal": {"open_in": "wt", "linux_backend": "auto", "kitty_socket": ""},
 }
 TERMINAL_PLACES = ("wt", "browser")
+LINUX_TERMINAL_BACKENDS = ("auto", "kitty", "tmux", "wezterm", "window")
 
 # Automation modes: a global default in Settings, overridden per project by True/False
 # (None or missing inherits). Each maps to the status of the tasks it acts on when turned on.

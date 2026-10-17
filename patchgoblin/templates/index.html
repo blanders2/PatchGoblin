@@ -19,7 +19,7 @@
   {% for p in plugins %}{% for href in p.styles %}<link rel="stylesheet" href="{{ href }}">
   {% endfor %}{% endfor %}
 </head>
-<body data-models="{{ models|tojson|forceescape }}" data-providers="{{ providers|tojson|forceescape }}">
+<body data-platform="{{ platform }}" data-models="{{ models|tojson|forceescape }}" data-providers="{{ providers|tojson|forceescape }}">
 {% macro secrets_warning(ack_name, id=none, hidden=false) %}
 <div{% if id %} id="{{ id }}"{% endif %} class="secrets-warning"{% if hidden %} hidden{% endif %}>
   <p>Every file in this directory will be committed to git. Don't use a directory that contains secrets such as API keys, <code>.env</code> files, credentials or private keys. Move them out or add them to <code>.gitignore</code> first.</p>
@@ -651,12 +651,30 @@
       <legend>Terminal</legend>
       <label>Open project terminals in
         <select name="terminal.open_in">
-          <option value="wt">Windows Terminal</option>
+          <option value="wt">{% if platform == "win32" %}Windows Terminal{% elif platform == "darwin" %}The Terminal app{% else %}A terminal app on this computer{% endif %}</option>
           <option value="browser" id="terminal-browser-option">The browser (Terminals plugin)</option>
         </select></label>
       <p class="muted small">A project's <b>Terminal</b> button switches to its open terminal, or opens one
         if there isn't one yet; <b>+</b> always opens another. Without Windows Terminal installed, the
         system's own terminal window is used.</p>
+      {% if platform.startswith("linux") %}
+      <label>Terminal tabs on Linux
+        <select name="terminal.linux_backend">
+          <option value="auto">Automatic (kitty, else tmux, else a new window)</option>
+          <option value="kitty">kitty (named, coloured tabs)</option>
+          <option value="tmux">tmux (works in any terminal, and over SSH)</option>
+          <option value="wezterm">WezTerm (named tabs)</option>
+          <option value="window">A new terminal window each time</option>
+        </select></label>
+      <label>kitty socket (optional)
+        <input name="terminal.kitty_socket" placeholder="unix:/tmp/kitty" spellcheck="false"></label>
+      <p class="muted small" id="terminal-status"></p>
+      <p class="muted small">kitty needs remote control: add <code>allow_remote_control socket-only</code> and
+        <code>listen_on unix:/tmp/kitty</code> to <code>~/.config/kitty/kitty.conf</code> and restart it. Without it,
+        PatchGoblin starts its own kitty. tmux keeps one session named <b>PatchGoblin</b>, with a window per project.
+        On Wayland the window may only flash for attention instead of coming to the front; on X11 install
+        <code>xdotool</code> or <code>wmctrl</code> to bring it forward.</p>
+      {% endif %}
     </fieldset>
     <fieldset>
       <legend>New repositories</legend>

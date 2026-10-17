@@ -7,6 +7,7 @@ import binascii
 import json
 import os
 import re
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -14,7 +15,7 @@ from urllib.parse import urlparse
 
 from flask import Flask, Response, abort, jsonify, render_template, request
 
-from . import cline, gitops, opencode, svnops
+from . import cline, gitops, linux_terminals, opencode, svnops
 from .engine import Engine
 from .hosts import HostError, host_for, open_terminal, open_vscode, probe, terminal_color
 from .openai_agent import endpoint_key, list_models, valid_base_url, valid_header
@@ -27,6 +28,7 @@ from .store import (
     CLI_PROVIDERS,
     MODELS,
     STATUSES,
+    LINUX_TERMINAL_BACKENDS,
     TERMINAL_PLACES,
     Registry,
     Settings,
@@ -158,6 +160,16 @@ def clean_terminal(values) -> dict:
         if values["open_in"] not in TERMINAL_PLACES:
             raise ValueError(f"terminal.open_in must be one of: {', '.join(TERMINAL_PLACES)}.")
         out["open_in"] = values["open_in"]
+    if "linux_backend" in values:
+        if values["linux_backend"] not in LINUX_TERMINAL_BACKENDS:
+            raise ValueError(f"terminal.linux_backend must be one of: {', '.join(LINUX_TERMINAL_BACKENDS)}.")
+        out["linux_backend"] = values["linux_backend"]
+    if "kitty_socket" in values:
+        sock = values["kitty_socket"]
+        sock = sock.strip() if isinstance(sock, str) else None
+        if sock is None or len(sock) > 200 or (sock and not sock.startswith(("unix:", "tcp:"))):
+            raise ValueError("terminal.kitty_socket must be empty or look like unix:/path or tcp:host:port.")
+        out["kitty_socket"] = sock
     return out
 
 
@@ -308,7 +320,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     def index():
         current = settings.get()
         return render_template("index.html", statuses=STATUSES, providers=provider_choices(current),
-                               models=model_suggestions(current), plugins=plugins.page_view())
+                               models=model_suggestions(current), plugins=plugins.page_view(),
+                               platform=sys.platform)
 
     # ---- settings -----------------------------------------------------------
     def settings_view(values: dict) -> dict:
@@ -704,8 +717,21 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     @app.post("/api/projects/<pid>/terminal")
     def terminal(pid):
         project = project_or_404(pid)
-        action = open_terminal(project, terminal_color(registry.list().index(project)), new=body().get("new") is True)
+        action = open_terminal(project, terminal_color(registry.list().index(project)), new=body().get("new") is True,
+                               terminal_settings=settings.get().get("terminal") or {})
         return jsonify(ok=True, action=action)
+
+    @app.get("/api/terminal/status")
+    def terminal_status():
+        """Whether the Linux terminal backend is usable, so Settings can say so before a click."""
+        if not sys.platform.startswith("linux"):
+            return jsonify(platform=sys.platform, backend="", ok=True, message="")
+        backend = linux_terminals.resolve_backend(settings.get().get("terminal") or {})
+        if backend is None:
+            return jsonify(platform=sys.platform, backend="window", ok=True,
+                           message="A new terminal window opens each time.")
+        ok, message = backend.probe()
+        return jsonify(platform=sys.platform, backend=backend.name, ok=ok, message=message)
 
     @app.post("/api/projects/<pid>/vscode")
     def vscode(pid):

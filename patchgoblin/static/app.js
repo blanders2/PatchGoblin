@@ -1924,6 +1924,16 @@ function settingPath(name, settings) {
   return CLI.has(group) ? [settings.commands[group], key] : [settings[group], key];
 }
 
+async function showTerminalStatus() {
+  const line = $("#terminal-status"); // Linux only
+  if (!line) return;
+  try {
+    const st = await api("GET", "/api/terminal/status");
+    line.textContent = st.message;
+    line.classList.toggle("error", !st.ok);
+  } catch { line.textContent = ""; }
+}
+
 function setupSettingsDialog() {
   const dialog = $("#settings-dialog");
   const form = $("#settings-form");
@@ -1947,6 +1957,7 @@ function setupSettingsDialog() {
       browserOpt.textContent = browserTerminals() ? "The browser (Terminals plugin)" : "The browser (turn on the Terminals plugin first)";
       if (browserOpt.disabled && form.elements["terminal.open_in"].value === "browser") form.elements["terminal.open_in"].value = "wt";
       showError($("#settings-error"), "");
+      showTerminalStatus();
       dialog.showModal();
     } catch (e) { toast(e.message, true); }
   };
@@ -2458,7 +2469,8 @@ const browserTerminals = () => !!activityTab("terminals");
 const terminalPlace = () => state.terminalOpenIn === "browser" && browserTerminals() ? "browser" : "wt";
 
 function renderTerminalButtons() {
-  const where = terminalPlace() === "browser" ? "in the browser" : "in Windows Terminal";
+  const where = terminalPlace() === "browser" ? "in the browser"
+    : document.body.dataset.platform === "win32" ? "in Windows Terminal" : "in your terminal app";
   $("#terminal-btn").title = `Switch to the project's terminal ${where}, or open one (change where in Settings)`;
   $("#terminal-new-btn").title = `Open another terminal ${where} in the project directory`;
 }
