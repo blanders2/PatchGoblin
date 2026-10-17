@@ -523,9 +523,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             path = host.home()
         return jsonify(host.list_dirs(path))
 
-    @app.post("/api/projects")
-    def add_project():
-        data = body()
+    def register_project(data: dict) -> dict:
+        """Validate and register a project (the body of POST /api/projects); also handed to plugins."""
         fields = project_fields(data)
         fields["git_tracking"] = data.get("git_tracking") is True
         if fields["git_tracking"]:
@@ -553,7 +552,13 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             gitops.commit_all(host, path, "PatchGoblin: initial commit")
         added = registry.add(fields)
         remember(fields["provider"], [fields[k] for k in PROJECT_MODEL_KEYS])
-        return jsonify(added), 201
+        return added
+
+    plugins.set_project_adder(register_project)
+
+    @app.post("/api/projects")
+    def add_project():
+        return jsonify(register_project(body())), 201
 
     @app.post("/api/projects/<pid>/git/enable")
     def enable_git(pid):

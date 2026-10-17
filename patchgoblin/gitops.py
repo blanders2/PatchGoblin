@@ -224,6 +224,43 @@ def set_remote(host, path: str, url: str, name: str = REMOTE) -> None:
     _check(git(host, path, "remote", verb, name, url), f"remote {verb}")
 
 
+def clone(host, parent: str, url: str, folder: str, timeout: float = 900) -> str:
+    """``git clone url parent/folder`` on ``host``; returns the new folder's path."""
+    url = (url or "").strip()
+    if not url or url.startswith("-") or _BAD_URL.search(url):
+        raise ValueError("Repository URL must not start with '-' or contain spaces or control characters.")
+    folder = (folder or "").strip()
+    if (not folder or folder in (".", "..") or any(c in folder for c in "/\\:") or ".." in folder
+            or folder.startswith("-") or _BAD_URL.search(folder)):
+        raise ValueError("The folder name must be a single name (no slashes, '..' or leading '-').")
+    if not host.is_dir(parent):
+        raise ValueError(f"Directory does not exist: {parent}")
+    dest = host.join(parent, folder)
+    if host.is_dir(dest) or host.read_bytes(dest) is not None:
+        raise ValueError(f"{dest} already exists.")
+    res = git(host, parent, *NOPROMPT_ARGS, "clone", "--", url, folder, timeout=timeout, env=NOPROMPT_ENV)
+    if not res.ok:
+        err = (res.stderr or res.stdout).strip()
+        if "Host key verification failed" in err:
+            err += "\n(The target machine does not trust github.com yet: run `ssh -T git@github.com` there once.)"
+        elif "Permission denied (publickey)" in err:
+            err += "\n(The target machine's SSH key is not authorized on GitHub, or try cloning over HTTPS.)"
+        raise HostError(f"git clone failed: {err}")
+    return dest
+
+
+def exclude_metadata(host, path: str) -> None:
+    """Keep PatchGoblin's ``.patchgoblin/`` out of the repository without touching .gitignore."""
+    exclude = host.join(path, ".git", "info", "exclude")
+    text = host.read_text(exclude)
+    if text is not None and ".patchgoblin/" in [l.strip() for l in text.splitlines()]:
+        return
+    if text is None:
+        host.ensure_dir(host.join(path, ".git", "info"))
+        text = ""
+    host.write_text(exclude, text + ("" if not text or text.endswith("\n") else "\n") + ".patchgoblin/\n")
+
+
 def current_branch(host, path: str) -> str:
     res = git(host, path, "symbolic-ref", "--quiet", "--short", "HEAD")
     if not res.ok or not res.stdout.strip():

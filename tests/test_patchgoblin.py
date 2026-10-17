@@ -4156,7 +4156,7 @@ class ServerManagerTests(AppTestCase):
 
     def test_server_types_lists_ssh_and_llm(self):
         types = {t["id"]: t for t in self.client.get("/api/server-types").get_json()["types"]}
-        self.assertEqual(set(types), {"ssh", "llm"})
+        self.assertEqual(set(types), {"ssh", "llm", "github"})
         self.assertTrue(types["ssh"]["available"] and types["ssh"]["testable"])
         fields = {f["key"]: f for f in types["llm"]["fields"]}
         self.assertTrue(fields["api_key"]["secret"])
@@ -4919,3 +4919,124 @@ class LinuxTerminalTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeResponse:
+    def __init__(self, data, link=""):
+        import io
+        self.body, self.headers = io.BytesIO(json.dumps(data).encode()), {"Link": link}
+
+    def read(self):
+        return self.body.read()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class TestGithubPlugin(AppTestCase):
+    TOKEN = "ghp_secret_token_123"
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(self.app.config["PLUGINS"].stop_all)
+        git = lambda *a, cwd: subprocess.run(["git", *a], cwd=cwd, check=True, capture_output=True)
+        self.bare = os.path.join(self.tmp.name, "origin.git")
+        seed = os.path.join(self.tmp.name, "seed")
+        os.makedirs(seed)
+        git("init", "-q", "--bare", "-b", "main", self.bare, cwd=self.tmp.name)
+        git("init", "-q", cwd=seed)
+        Path(seed, "hello.txt").write_text("hi\n")
+        git("add", "-A", cwd=seed)
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init", cwd=seed)
+        git("push", "-q", self.bare, "HEAD:refs/heads/main", cwd=seed)
+        self.parent = os.path.join(self.tmp.name, "parent")
+        os.makedirs(self.parent)
+        self.repos = [
+            {"full_name": "me/hello", "name": "hello", "owner": {"login": "me"}, "private": True,
+             "ssh_url": self.bare, "clone_url": "https://github.com/me/hello.git"},
+            {"full_name": "org/other", "name": "other", "owner": {"login": "org"}, "fork": True,
+             "ssh_url": "git@github.com:org/other.git", "clone_url": "https://github.com/org/other.git"},
+        ]
+        res = self.client.post("/api/servers", headers=H, json={"server": {
+            "type": "github", "name": "Me", "token": self.TOKEN}})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.sid = res.get_json()["saved"]
+
+    def fake_urlopen(self, req, timeout=None):
+        self.assertEqual(req.get_header("Authorization"), f"Bearer {self.TOKEN}")
+        if "page=2" in req.full_url:
+            return FakeResponse(self.repos[1:])
+        return FakeResponse(self.repos[:1], '<https://api.github.com/user/repos?page=2>; rel="next"')
+
+    def repos_url(self, refresh=True):
+        return f"/api/github/accounts/{self.sid}/repos" + ("?refresh=1" if refresh else "")
+
+    def clone(self, **extra):
+        body = {"account": self.sid, "repo": "me/hello", "parent": self.parent, "protocol": "ssh",
+                "secrets_ack": True, **extra}
+        with mock.patch("urllib.request.urlopen", self.fake_urlopen):
+            return self.client.post("/api/github/clone", headers=H, json=body)
+
+    def test_plugin_and_server_type(self):
+        plugins = self.client.get("/api/plugins").get_json()["plugins"]
+        self.assertTrue(next(p for p in plugins if p["id"] == "github")["enabled"])
+        types = self.client.get("/api/server-types").get_json()["types"]
+        gh = next(t for t in types if t["id"] == "github")
+        self.assertTrue(next(f for f in gh["fields"] if f["key"] == "token")["secret"])
+        saved = self.client.get("/api/servers").get_json()["servers"]
+        got = next(s for s in saved if s["id"] == self.sid)
+        self.assertNotIn("token", got)
+        self.assertTrue(got["token_saved"])
+
+    def test_repos_follow_pagination_and_slim(self):
+        with mock.patch("urllib.request.urlopen", self.fake_urlopen):
+            data = self.client.get(self.repos_url()).get_json()
+        self.assertEqual([r["full_name"] for r in data["repos"]], ["me/hello", "org/other"])
+        self.assertEqual(data["repos"][0]["owner"], "me")
+        self.assertNotIn(self.TOKEN, json.dumps(data))
+
+    def test_bad_token_is_a_clear_error(self):
+        import urllib.error
+        def deny(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 401, "no", {}, None)
+        with mock.patch("urllib.request.urlopen", deny):
+            res = self.client.get(self.repos_url())
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("rejected the token", res.get_json()["error"])
+        self.assertNotIn(self.TOKEN, json.dumps(res.get_json()))
+
+    def test_clone_registers_project_and_keeps_metadata_out_of_git(self):
+        res = self.clone()
+        self.assertEqual(res.status_code, 201, res.get_json())
+        path = os.path.join(self.parent, "hello")
+        self.assertTrue(os.path.isfile(os.path.join(path, "hello.txt")))
+        self.assertIn(".patchgoblin/", Path(path, ".git", "info", "exclude").read_text())
+        projects = self.client.get("/api/projects", headers=H).get_json()["projects"]
+        self.assertEqual([(p["path"], p["git_tracking"]) for p in projects], [(path, True)])
+        pid = projects[0]["id"]
+        self.assertEqual(self.app.config["SETTINGS"].plugin_data("github")["clones"], {"me/hello": [pid]})
+        with mock.patch("urllib.request.urlopen", self.fake_urlopen):
+            repos = self.client.get(self.repos_url(False)).get_json()["repos"]
+        self.assertEqual(repos[0]["projects"], [{"id": pid, "name": "hello"}])
+        self.post_task(pid, "A task")
+        gitops_mod = __import__("patchgoblin.gitops", fromlist=["x"])
+        gitops_mod.commit_all(LocalHost(), path, "task")
+        tracked = subprocess.run(["git", "ls-files"], cwd=path, capture_output=True, text=True).stdout
+        self.assertNotIn(".patchgoblin", tracked)
+        self.assertIn("hello.txt", tracked)
+
+    def test_clone_refusals(self):
+        self.assertEqual(self.clone().status_code, 201)
+        self.assertEqual(self.clone().status_code, 400)  # destination exists
+        for folder in ("a/b", "..", "x..y", "-evil", "a\\b"):
+            self.assertEqual(self.clone(folder=folder).status_code, 400, folder)
+        self.assertEqual(self.clone(repo="nobody/else", folder="z").status_code, 400)
+        res = self.clone(folder="noack", secrets_ack=False)
+        self.assertEqual(res.status_code, 400)
+        self.assertFalse(os.path.exists(os.path.join(self.parent, "noack")))
+        res = self.clone(folder="plain", add_project=False)
+        self.assertEqual(res.status_code, 201)
+        self.assertIsNone(res.get_json()["project"])

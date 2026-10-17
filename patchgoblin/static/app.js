@@ -2418,6 +2418,7 @@ window.PG = {
     btn.title = value && title ? `${name} · ${title}` : name;
   },
   show: id => setMode(id),
+  reloadProjects: () => loadProjects(),
   current: () => state.mode,
   // Saved servers: list(type?) → public servers (secrets are never sent); open(type?, prefill?) opens the
   // Server Manager. Changes fire "pg:servers-changed" on document ({ id, type, deleted? }).

@@ -21,6 +21,9 @@ id, a label, ``Field`` specs and optional ``clean`` / ``test`` hooks); the Serve
 its form from the field specs. Plugins read and write servers through ``ctx.servers``:
 ``list(type)``, ``get(id)`` (secrets included, for server-side use only), ``save(spec)`` and
 ``delete(id)``. Servers of a disabled plugin's type are kept and shown as unavailable.
+
+Projects: a plugin that creates a folder can register it as a PatchGoblin project through
+``ctx.add_project(data)``, which runs the same code as ``POST /api/projects``.
 """
 from __future__ import annotations
 
@@ -32,6 +35,7 @@ import re
 import sys
 import traceback
 from dataclasses import dataclass, field
+from typing import Callable
 
 from flask import Blueprint, Flask, abort, request, send_from_directory
 from jinja2 import ChoiceLoader, FileSystemLoader, PrefixLoader
@@ -90,6 +94,9 @@ class PluginContext:
     settings: object  # store.Settings
     data_dir: str
     servers: ServerHandle | None = None  # the saved servers (see servers.py)
+    # Registers a project: takes the fields of POST /api/projects, returns the project, and raises
+    # ValueError / HostError. Set once the app has built it.
+    add_project: Callable[[dict], dict] | None = None
 
     def load(self) -> dict:
         """This plugin's saved data (a dict, empty at first)."""
@@ -254,6 +261,11 @@ class PluginManager:
             if item is None or not self.enabled(pid):
                 abort(404)
             return send_from_directory(item.static_dir, filename, max_age=0)
+
+    def set_project_adder(self, fn) -> None:
+        """Give every loaded plugin the core's project registration (``ctx.add_project``)."""
+        for item in self.ready():
+            item.plugin.ctx.add_project = fn
 
     # ---- lookups -----------------------------------------------------------------
     def ready(self) -> list[Loaded]:

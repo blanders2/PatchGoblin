@@ -693,6 +693,15 @@ Things to know:
   in the process list of the machine running it. Leave it empty to avoid that.
 - A hard kill of PatchGoblin (not Quit) can leave `ssh` tunnel processes behind.
 
+## GitHub plugin
+
+The built-in **GitHub** plugin lists your repositories and clones them into PatchGoblin projects. Add an account with **Add GitHub account** (a `github` server in the Server Manager, with a **Test** button) and paste a personal access token, or name an environment variable that holds it. The token stays on the PatchGoblin server and is never sent to the browser. Set an API URL only for GitHub Enterprise.
+
+- **Token scopes:** a classic token needs `repo` (or `public_repo` for public repositories only); a fine-grained token needs *Metadata: read* and *Contents: read*.
+- **Clone…** asks for a target ("This computer" or a saved SSH server), a parent folder (with a folder picker) and a folder name, then runs `git clone` on that machine and, if ticked, adds the folder as a project.
+- **SSH clones** use the *target machine's* GitHub SSH key, and `github.com` must already be in its `known_hosts`. **HTTPS clones** of private repositories use the target machine's own git credential helper: PatchGoblin never puts your token into a clone URL.
+- **Task data stays local:** before git tracking starts, `.patchgoblin/` is added to the clone's `.git/info/exclude`, so tasks are never committed or pushed to your repository. A failed project registration leaves the cloned folder in place.
+
 ## Todo
 
 A built-in plugin with one personal checklist, separate from the project task board. Add an item

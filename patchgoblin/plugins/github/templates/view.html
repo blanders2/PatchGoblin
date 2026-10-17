@@ -1,0 +1,57 @@
+{# The GitHub main view: the repository list and the clone dialog. #}
+<div id="gh-view">
+  <h1 id="gh-title">GitHub</h1>
+  <div class="gh-bar">
+    <input id="gh-search" type="search" autocomplete="off" placeholder="Search repositories" aria-label="Search repositories">
+    <button type="button" class="ghost" id="gh-refresh" title="Reload from GitHub">Refresh</button>
+  </div>
+  <div class="gh-chips" id="gh-chips">
+    <label class="check"><input type="checkbox" data-filter="owned"> Owned</label>
+    <label class="check"><input type="checkbox" data-filter="private"> Private</label>
+    <label class="check"><input type="checkbox" data-filter="forks"> Forks</label>
+    <label class="check"><input type="checkbox" data-filter="archived"> Archived</label>
+  </div>
+  <div id="gh-error" class="error" hidden></div>
+  <p id="gh-note" class="muted small" hidden></p>
+  <ul id="gh-list" class="gh-list"></ul>
+  <p id="gh-empty" class="muted small" hidden></p>
+
+  <dialog id="gh-clone-dialog">
+    <form id="gh-clone-form" method="dialog">
+      <h2>Clone <span id="gh-clone-repo"></span></h2>
+      <label>Clone onto <select name="target" id="gh-target"></select></label>
+      <label>Parent folder
+        <span class="gh-path"><input name="parent" id="gh-parent" autocomplete="off" required>
+          <button type="button" class="ghost" id="gh-browse-btn">Browse…</button></span>
+      </label>
+      <div id="gh-picker" class="gh-picker" hidden>
+        <div class="gh-picker-bar">
+          <button type="button" class="ghost small" id="gh-up">Up</button>
+          <button type="button" class="ghost small" id="gh-home">Home</button>
+          <label class="check"><input type="checkbox" id="gh-hidden"> Hidden</label>
+          <button type="button" class="small" id="gh-use">Use this folder</button>
+        </div>
+        <div class="gh-picker-path muted small" id="gh-picker-path"></div>
+        <ul id="gh-dirs" class="gh-dirs"></ul>
+      </div>
+      <label>Folder name <input name="folder" id="gh-folder" autocomplete="off" required></label>
+      <label>Clone with
+        <select name="protocol"><option value="ssh">SSH</option><option value="https">HTTPS</option></select>
+      </label>
+      <label class="check"><input type="checkbox" name="add_project" checked> Add as PatchGoblin project</label>
+      <div id="gh-project-opts">
+        <label>AI <select name="provider" id="gh-provider"></select></label>
+        <label class="check"><input type="checkbox" name="git_tracking" checked> Track with git</label>
+        <div id="gh-secrets" class="secrets-warning">
+          <p>Every file in this directory will be committed to git. PatchGoblin's task data (<code>.patchgoblin/</code>) is kept out of the repository, but make sure the clone holds no secrets that should not be committed.</p>
+          <label class="check"><input type="checkbox" name="secrets_ack"> I confirm this directory contains no secrets that should not be committed</label>
+        </div>
+      </div>
+      <div id="gh-clone-error" class="error" hidden></div>
+      <div class="actions">
+        <button type="button" class="ghost" id="gh-clone-cancel">Cancel</button>
+        <button type="submit" id="gh-clone-go">Clone</button>
+      </div>
+    </form>
+  </dialog>
+</div>
