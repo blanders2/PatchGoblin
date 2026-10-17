@@ -112,7 +112,7 @@ automatically.
 | --- | --- |
 | Unplanned | New task. Edit it, ask the AI to plan it, or mark it planned yourself. |
 | Planning… | The AI is investigating the project (read-only) and writing a plan. |
-| Drafted | AI plan has open questions; answer them (or remove them and click Mark planned) to reach Planned. A planned task with hand-added questions can be moved back with Move to drafted. |
+| Plan | AI plan has open questions; answer them (or remove them and click Mark planned) to reach Planned. A planned task with hand-added questions can be moved back with Move to Plan. |
 | Planned | Has a plan (AI-drafted or yours). You can edit it, refine it with AI feedback, or queue it. |
 | Queued | Waiting for the AI to implement it. |
 | Running… | The AI is working in the project directory. Live output is shown in the task panel. |
@@ -172,16 +172,16 @@ uses the project's level).
 off by default; Auto-promote is on by default. Queued tasks always run.
 - **Auto-plan** starts AI planning as soon as a task is created.
 - **Auto-queue** queues a task the first time it goes from Unplanned to Planned, through an
-  AI plan or **Mark planned**. A drafted plan waits for your answers, and a re-plan after
-  answering questions, Mark planned from Drafted, or a task you took out of the queue is
+  AI plan or **Mark planned**. A plan with open questions waits for your answers, and a re-plan after
+  answering questions, Mark planned from Plan, or a task you took out of the queue is
   not auto-queued.
-- **Auto-promote** moves a Drafted task to Planned as soon as its plan has no open
+- **Auto-promote** moves a task in Plan to Planned as soon as its plan has no open
   questions, after an AI re-plan with your answers or a hand edit that removes the last
-  question. Turn it off and such tasks wait in Drafted until you click **Mark planned**.
-  Turning it on promotes every question-free Drafted task now.
+  question. Turn it off and such tasks wait in Plan until you click **Mark planned**.
+  Turning it on promotes every question-free Plan task now.
 
 The board shows a small arrow between the tabs for each mode: after Unplanned (Auto-plan),
-after Drafted (Auto-promote) and after Planned (Auto-queue). A coloured arrow means the mode is on
+after Plan (Auto-promote) and after Planned (Auto-queue). A coloured arrow means the mode is on
 for the current project; a red line through it means it is off. Click it to turn the mode on or off for that project; this sets
 a project override, and turning on Auto-plan, Auto-promote or Auto-queue applies it to existing tasks
 right away, like a Settings save.
@@ -197,7 +197,7 @@ questions goes from creation to an AI run and a commit without you reviewing the
 
 **Batch actions.** Tick the checkbox on each card you want (Shift+click selects a
 range, Space toggles the focused card, Esc clears). A toolbar then shows the actions
-that apply to the ticked tasks: Plan with AI, Mark planned, Move to drafted, Queue for AI, Remove from
+that apply to the ticked tasks: Plan with AI, Mark planned, Move to Plan, Queue for AI, Remove from
 queue, Back to unplanned, Approve, Reopen, Pause, Resume, Cancel, Set AI and Delete. The same rules apply as for
 a single task. Tasks that don't qualify are skipped and listed in the result message,
 and the rest still go through. Batch-queued tasks run in id order. Selections stay

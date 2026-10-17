@@ -58,10 +58,10 @@ def remote_view(project: dict, status: dict) -> dict:
 
 
 # Simple state changes: action -> (allowed from, new status, history message).
-# A "planned" target lands in "drafted" instead while the plan has open questions.
+# A "planned" target lands in Plan ("drafted") instead while the plan has open questions.
 TRANSITIONS = {
     "mark_planned": (("unplanned", "failed", "drafted"), "planned", "Marked planned"),
-    "mark_drafted": (("planned",), "drafted", "Moved to drafted"),
+    "mark_drafted": (("planned",), "drafted", "Moved to Plan"),
     "unplan": (("planned", "drafted"), "unplanned", "Moved back to unplanned"),
     "queue": (("planned", "drafted", "failed"), "queued", "Queued for AI"),
     "dequeue": (("queued",), "planned", "Removed from queue"),
@@ -105,5 +105,5 @@ def transition(engine, pid: str, task: dict, action: str, queued_at: str | None 
     set_status(task, status, message)
     if action == "queue":
         return True
-    # Like an AI plan, only a first plan is auto-queued (not one from drafted or failed).
+    # Like an AI plan, only a first plan is auto-queued (not one from Plan or failed).
     return action == "mark_planned" and source == "unplanned" and engine.maybe_auto_queue(pid, task)

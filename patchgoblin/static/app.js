@@ -4,7 +4,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 const STATUS_LABEL = {
-  unplanned: "Unplanned", planning: "Planning…", drafted: "Drafted", planned: "Planned", queued: "Queued",
+  unplanned: "Unplanned", planning: "Planning…", drafted: "Plan", planned: "Planned", queued: "Queued",
   running: "Running…", review: "Needs review", done: "Done", failed: "Failed",
 };
 const COLUMN_OF = {
@@ -764,7 +764,7 @@ function effectiveAuto(p, key) {
 const AUTO_FLOW_HINT = {
   auto_plan: "plans every Unplanned task now",
   auto_queue: "queues every Planned task now",
-  auto_promote: "moves every question-free Drafted task to Planned now",
+  auto_promote: "moves every question-free Plan task to Planned now",
 };
 
 // Colours (or strikes through) each Auto-plan / Auto-promote / Auto-queue indicator between the tabs for the current project.
@@ -911,7 +911,7 @@ async function createTask(ev) {
 const BATCH_ACTIONS = [
   { action: "plan", label: "Plan with AI", from: ["unplanned", "drafted", "planned", "failed"] },
   { action: "mark_planned", label: "Mark planned", from: ["unplanned", "drafted", "failed"] },
-  { action: "mark_drafted", label: "Move to drafted", from: ["planned"], when: hasOpenQuestions },
+  { action: "mark_drafted", label: "Move to Plan", from: ["planned"], when: hasOpenQuestions },
   { action: "queue", label: "Queue for AI", from: ["drafted", "planned", "failed"] },
   { action: "dequeue", label: "Remove from queue", from: ["queued"] },
   { action: "unplan", label: "Back to unplanned", from: ["drafted", "planned"] },
@@ -923,7 +923,7 @@ const BATCH_ACTIONS = [
   { action: "cancel", label: "Cancel", from: ["planning", "running"], cls: "danger" },
 ].map(a => a.action === "resume" ? a : { ...a, when: t => !t.paused && (!a.when || a.when(t)) });
 const BATCH_VERB = { delete: "Deleted", set_provider: "Updated", set_models: "Updated", plan: "Started planning",
-  mark_planned: "Marked planned", mark_drafted: "Moved to drafted", queue: "Queued", dequeue: "Removed from queue",
+  mark_planned: "Marked planned", mark_drafted: "Moved to Plan", queue: "Queued", dequeue: "Removed from queue",
   unplan: "Moved back", reopen: "Reopened", approve: "Approved",
   cancel: "Cancelled", pause: "Paused", resume: "Resumed" };
 
@@ -1354,8 +1354,8 @@ function drawerActions(t) {
           : "Answer the questions, or delete them from the plan, save, and click Mark planned.")];
     case "planned":
       return [actionButton("Queue to run", act("queue"), asking ? "" : "primary", QUEUE_TIP), plan(),
-        asking ? actionButton("Move to drafted", act("mark_drafted"), "ghost",
-          "The plan has open questions; park it in Drafted until they're answered") : null,
+        asking ? actionButton("Move to Plan", act("mark_drafted"), "ghost",
+          "The plan has open questions; park it in Plan until they're answered") : null,
         backToUnplanned(), pauseButton()].filter(Boolean);
     case "queued":
       return [actionButton("Remove from queue", act("dequeue")), pauseButton()];

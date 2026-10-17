@@ -864,7 +864,7 @@ class WorkflowTests(AppTestCase):
         self.assertEqual(tasks[0]["status"], "planned")  # reconcile leaves hand-added questions alone
         task = self.action(pid, tid, "mark_drafted").get_json()
         self.assertEqual(task["status"], "drafted")
-        self.assertEqual(task["history"][-1]["event"], "Moved to drafted")
+        self.assertEqual(task["history"][-1]["event"], "Moved to Plan")
 
     def test_batch_mark_planned_and_drafted(self):
         pid = self.add_project()["id"]

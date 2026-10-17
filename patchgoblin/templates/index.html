@@ -30,7 +30,7 @@
 {% set auto_tips = {
   "auto_plan": "Start AI planning as soon as a task is created. Turning this on starts planning every Unplanned task now (up to the plan limit at a time; with no plan limit, that is one AI job per task at once). With Auto-queue also on, AI work runs without you reviewing the plan.",
   "auto_queue": "Queue a task for the AI as soon as it is first planned (AI plan or Mark planned; not after answering questions). Turning this on queues every Planned task now. With Auto-plan also on, AI work runs without you reviewing the plan.",
-  "auto_promote": "Move a drafted task to Planned as soon as its plan has no open questions. When off, it waits in Drafted until you click Mark planned. Turning this on promotes every question-free Drafted task now.",
+  "auto_promote": "Move a task in Plan to Planned as soon as its plan has no open questions. When off, it waits in Plan until you click Mark planned. Turning this on promotes every question-free Plan task now.",
 } %}
 {% set clis = [
   {"id": "claude", "title": "Claude Code", "default": "CLI default"},
@@ -140,7 +140,7 @@
       <div class="image-previews" id="nt-desc-img" hidden></div>
 
       <div class="queue-tabs" role="tablist" aria-label="Task queues">
-        {% for col, label in [("unplanned", "Unplanned"), ("drafted", "Drafted"), ("planned", "Planned"), ("queue", "AI queue"), ("review", "Review"), ("finished", "Finished"), ("failed", "Failed")] %}
+        {% for col, label in [("unplanned", "Unplanned"), ("drafted", "Plan"), ("planned", "Planned"), ("queue", "AI queue"), ("review", "Review"), ("finished", "Finished"), ("failed", "Failed")] %}
         <button type="button" class="queue-tab" role="tab" id="tab-{{ col }}" data-col="{{ col }}" data-label="{{ label }}" aria-controls="col-{{ col }}"{% if col == "failed" %} hidden{% endif %}>
           {{ label }} <span class="tab-activity" hidden></span><span class="count empty"></span>
         </button>
@@ -645,7 +645,7 @@
       <label class="check" title="{{ auto_tips.auto_queue }}">
         <input type="checkbox" name="automation.auto_queue"> Auto-queue planned tasks</label>
       <label class="check" title="{{ auto_tips.auto_promote }}">
-        <input type="checkbox" name="automation.auto_promote"> Auto-promote drafted tasks once their questions are answered</label>
+        <input type="checkbox" name="automation.auto_promote"> Auto-promote tasks in Plan once their questions are answered</label>
     </fieldset>
     <fieldset>
       <legend>Terminal</legend>

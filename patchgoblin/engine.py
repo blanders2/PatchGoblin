@@ -269,7 +269,7 @@ class Engine:
         return True
 
     def maybe_auto_promote(self, pid: str, task: dict) -> bool:
-        """Move a drafted task with no open questions to Planned if Auto-promote is on.
+        """Move a task in Plan (status "drafted") with no open questions to Planned if Auto-promote is on.
         Call inside ``store.edit``."""
         if (task["status"] != "drafted" or task.get("paused") or plan_questions(task.get("plan") or "")
                 or not self.auto(pid, "auto_promote")):
