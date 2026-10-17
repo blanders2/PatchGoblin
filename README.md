@@ -136,7 +136,7 @@ automatically.
 | State | Meaning |
 | --- | --- |
 | Unplanned | New task. Edit it, ask the AI to plan it, or mark it planned yourself. |
-| Planning… | The AI is investigating the project (read-only) and writing a plan. |
+| Planning… | The AI is investigating the project (read-only) and writing a plan. Shown in the Plan column. |
 | Plan | AI plan has open questions; answer them (or remove them and click Mark planned) to reach Planned. A planned task with hand-added questions can be moved back with Move to Plan. |
 | Planned | Has a plan (AI-drafted or yours). You can edit it, refine it with AI feedback, or queue it. |
 | Queued | Waiting for the AI to implement it. |

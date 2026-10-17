@@ -8,7 +8,7 @@ const STATUS_LABEL = {
   running: "Running…", review: "Needs review", done: "Done", failed: "Failed",
 };
 const COLUMN_OF = {
-  unplanned: "unplanned", planning: "unplanned", drafted: "drafted", planned: "planned",
+  unplanned: "unplanned", planning: "drafted", drafted: "drafted", planned: "planned",
   queued: "queue", running: "queue", review: "review", done: "finished", failed: "failed",
 };
 // Waiting on the user: not locked by the AI (LOCKED in app.py) and not done.
@@ -942,7 +942,8 @@ async function createTask(ev) {
     $("#nt-desc").style.height = "";
     renderImagePreviews($("#nt-desc"), $("#nt-desc-img"));
     state.tasks.push(task); markTasksChanged();
-    if (state.tab !== "unplanned") selectTab("unplanned");
+    const col = COLUMN_OF[task.status] || "unplanned";
+    if (state.tab !== col) selectTab(col);
     else renderBoard();
   } catch (e) { toast(e.message, true); }
 }
