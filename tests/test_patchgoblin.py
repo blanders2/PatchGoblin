@@ -701,6 +701,52 @@ class WorkflowTests(AppTestCase):
         self.assertNotIn("Title:", task["plan"])
         self.assertIn("Step one", task["plan"])
 
+    def test_task_without_title_gets_placeholder(self):
+        pid = self.add_project()["id"]
+        res = self.client.post(f"/api/projects/{pid}/tasks", headers=H,
+                               json={"title": "", "description": "Make agent_output.txt\nmore"})
+        self.assertEqual(res.status_code, 201)
+        task = res.get_json()
+        self.assertEqual(task["title"], "Make agent_output.txt")
+        self.assertIs(task["title_auto"], True)
+
+    def test_task_needs_title_or_details(self):
+        pid = self.add_project()["id"]
+        res = self.client.post(f"/api/projects/{pid}/tasks", headers=H,
+                               json={"title": " ", "description": " "})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("A task needs a title or details.", res.get_json()["error"])
+
+    def test_fallback_title(self):
+        from patchgoblin.prompts import fallback_title
+        img = "![x](.patchgoblin/attachments/" + "a" * 32 + ".png)"
+        self.assertEqual(fallback_title("\n\n# Fix  the bug\nsecond"), "Fix the bug")
+        self.assertEqual(fallback_title(f"{img}\nSee this {img} now"), "See this now")
+        self.assertEqual(fallback_title(img), "Untitled task")
+        long = fallback_title("word " * 50)
+        self.assertLessEqual(len(long), 80)
+        self.assertTrue(long.endswith("…"))
+
+    def test_placeholder_title_replaced_even_when_rewrite_disabled(self):
+        pid = self.add_project()["id"]
+        self.client.patch(f"/api/projects/{pid}", headers=H, json={"rewrite_titles": False})
+        res = self.client.post(f"/api/projects/{pid}/tasks", headers=H,
+                               json={"title": "", "description": "Make agent_output.txt"})
+        tid = res.get_json()["id"]
+        self.assertEqual(self.action(pid, tid, "plan").status_code, 200)
+        task = self.wait_for(pid, tid, {"planned"})
+        self.assertEqual(task["title"], "Create agent output file")
+        self.assertIs(task["title_auto"], False)
+
+    def test_editing_title_clears_title_auto(self):
+        pid = self.add_project()["id"]
+        res = self.client.post(f"/api/projects/{pid}/tasks", headers=H,
+                               json={"title": "", "description": "Some details"})
+        tid = res.get_json()["id"]
+        res = self.client.patch(f"/api/projects/{pid}/tasks/{tid}", headers=H, json={"title": "Mine"})
+        self.assertEqual(res.status_code, 200)
+        self.assertIs(res.get_json()["title_auto"], False)
+
     def test_plan_trust_settings(self):
         from patchgoblin import engine as engine_mod
         pid = self.add_project()["id"]

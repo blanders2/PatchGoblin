@@ -331,7 +331,7 @@ class Engine:
 
     def _plan(self, project, task, feedback, answers, job) -> None:
         pid, tid = project["id"], task["id"]
-        rewrite = project.get("rewrite_titles", True) is not False
+        rewrite = project.get("rewrite_titles", True) is not False or bool(task.get("title_auto"))
         trust = resolve_trust(task, project)
         try:
             try:
@@ -394,9 +394,11 @@ class Engine:
             if outcome.ok:
                 title, plan = split_title(outcome.text) if rewrite else ("", outcome.text)
                 current["plan"] = plan.strip() or outcome.text
-                if title and title != current["title"]:
-                    old, current["title"] = current["title"], title
-                    log_event(current, f"Title rewritten by AI (was: {old})")
+                if title:
+                    if title != current["title"]:
+                        old, current["title"] = current["title"], title
+                        log_event(current, f"Title rewritten by AI (was: {old})")
+                    current["title_auto"] = False
                 current["error"] = ""
                 n = len(plan_questions(current["plan"]))
                 if ready_status(current["plan"]) == "drafted":

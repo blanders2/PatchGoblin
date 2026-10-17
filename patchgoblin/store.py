@@ -628,11 +628,13 @@ def find_task(doc: dict, tid: int) -> dict | None:
 
 
 def new_task(doc: dict, title: str, description: str = "", provider: str = "",
-             plan_model: str = "", code_model: str = "", plan_trust: str = "", paused: bool = False) -> dict:
+             plan_model: str = "", code_model: str = "", plan_trust: str = "", paused: bool = False,
+             title_auto: bool = False) -> dict:
     ts = now()
     task = {
         "id": doc["next_id"],
         "title": title,
+        "title_auto": title_auto,  # placeholder title the AI replaces; older tasks lack it, read with .get()
         "description": description,
         "plan": "",
         "status": "unplanned",

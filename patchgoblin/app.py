@@ -20,7 +20,7 @@ from .hosts import HostError, host_for, open_terminal, open_vscode, probe, termi
 from .openai_agent import endpoint_key, list_models, valid_base_url, valid_header
 from . import servers as servermod
 from .pluginkit import PluginManager, ServerHandle
-from .prompts import IMAGE_MIME, plan_questions
+from .prompts import IMAGE_MIME, fallback_title, plan_questions
 from .store import (
     ATTACHMENT_NAME,
     AUTO_MODES,
@@ -764,8 +764,12 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         project = project_or_404(pid)
         data = body()
         title = (data.get("title") or "").strip()
+        description = (data.get("description") or "").strip()
+        auto = False
         if not title:
-            raise ValueError("A task needs a title.")
+            if not description:
+                raise ValueError("A task needs a title or details.")
+            title, auto = fallback_title(description), True
         provider = data.get("provider") or ""
         if provider:
             require_provider(provider)
@@ -773,8 +777,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         trust = plan_trust(data.get("plan_trust") or "", allow_blank=True)
         paused = data.get("paused") is True
         with store.edit(project) as doc:
-            task = new_task(doc, title, (data.get("description") or "").strip(), provider, **models,
-                            plan_trust=trust, paused=paused)
+            task = new_task(doc, title, description, provider, **models,
+                            plan_trust=trust, paused=paused, title_auto=auto)
         remember(provider or project.get("provider") or "claude", models.values())
         if not paused and engine.auto(pid, "auto_plan"):
             try:
@@ -802,6 +806,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
                 require_provider(data["provider"])
             if "title" in changed and not str(data["title"]).strip():
                 raise ValueError("A task needs a title.")
+            if "title" in changed:
+                task["title_auto"] = False  # the user chose a title
             for key in changed:
                 task[key] = data[key].strip() if key == "title" else data[key]
             if changed:

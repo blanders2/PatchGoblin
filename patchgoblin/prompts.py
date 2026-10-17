@@ -99,6 +99,20 @@ MAX_CHAT_CONTEXT = 40000
 
 IMAGE_REF = re.compile(r"!\[[^\]]*\]\((\.patchgoblin/attachments/[0-9a-f]{32}\.(?:png|jpg|gif|webp))\)")
 MAX_IMAGES = 10
+
+
+def fallback_title(description: str, limit: int = 80) -> str:
+    """A placeholder title from a task's details, for when the user gave none."""
+    text = IMAGE_REF.sub("", description or "")
+    line = next((ln for ln in text.splitlines() if ln.strip()), "")
+    line = re.sub(r"^\s*(?:#+|[-*])\s+", "", line)
+    line = " ".join(line.split())
+    if len(line) > limit:
+        cut = line[:limit - 1]
+        if " " in cut:
+            cut = cut.rsplit(" ", 1)[0]
+        line = cut.rstrip() + "…"
+    return line or "Untitled task"
 IMAGE_MIME = {"png": "image/png", "jpg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"}
 
 

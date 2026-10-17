@@ -887,11 +887,12 @@ async function approveFromCard(t) {
 async function createTask(ev) {
   ev.preventDefault();
   const title = $("#nt-title").value.trim();
-  if (!title) return;
+  const desc = $("#nt-desc").value.trim();
+  if (!title && !desc) return;
   const paused = $("#nt-paused").checked;
   try {
     const task = await api("POST", `/api/projects/${state.pid}/tasks`,
-      { title, description: $("#nt-desc").value.trim(), ...(paused ? { paused: true } : {}) });
+      { title, description: desc, ...(paused ? { paused: true } : {}) });
     $("#nt-title").value = "";
     $("#nt-desc").value = "";
     renderImagePreviews($("#nt-desc"), $("#nt-desc-img"));
