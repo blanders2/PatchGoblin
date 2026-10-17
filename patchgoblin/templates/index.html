@@ -170,7 +170,7 @@
       </div>
       <div class="board">
         {% for col in ["unplanned", "drafted", "planned", "queue", "review", "finished", "failed"] %}
-        <div class="column" id="col-{{ col }}" data-col="{{ col }}" role="tabpanel" aria-labelledby="tab-{{ col }}"><div class="cards"></div></div>
+        <div class="column" id="col-{{ col }}" data-col="{{ col }}" role="tabpanel" aria-labelledby="tab-{{ col }}"><div class="cards"></div><div class="list-footer" hidden></div></div>
         {% endfor %}
       </div>
     </section>

@@ -730,6 +730,7 @@ function renderBoard() {
     const active = col === state.tab;
     $(".cards", column).replaceChildren(...(tasks.length ? tasks.map(renderCard)
       : [el("div", { class: "muted empty-col" }, "No tasks here")]));
+    renderListFooter(column, col, tasks);
     column.hidden = !active;
 
     // The badge counts only tasks the user can act on; the tooltip gives the full breakdown.
@@ -754,6 +755,28 @@ function renderBoard() {
   }
   renderAutoFlow();
   renderBatchBar();
+}
+
+// Mirrors MAX_BATCH in validators.py so very large lists aren't rejected outright.
+const MAX_BATCH = 200;
+
+// Bulk buttons under a list; only the Unplanned tab uses it so far.
+function renderListFooter(column, col, tasks) {
+  const footer = $(".list-footer", column);
+  const ready = col === "unplanned" ? tasks.filter(t => t.status === "unplanned" && !t.paused) : [];
+  footer.hidden = !ready.length;
+  if (!ready.length) { footer.replaceChildren(); return; }
+  footer.replaceChildren(
+    actionButton(`Plan all (${ready.length})`, () => doBatch("plan", {}, ready.slice(0, MAX_BATCH)),
+      "small primary", "The AI drafts a plan for every Unplanned task"),
+    actionButton(`Mark all planned (${ready.length})`, () => markAllPlanned(ready), "small ghost",
+      "Accept every Unplanned task as written without asking the AI"));
+}
+
+function markAllPlanned(tasks) {
+  if (effectiveAuto(currentProject(), "auto_queue")
+    && !confirm(`Auto-queue is on: ${plural(tasks.length, "task")} will go straight to the AI queue. Continue?`)) return;
+  return doBatch("mark_planned", {}, tasks.slice(0, MAX_BATCH));
 }
 
 // The effective automation mode for a project: its own override, else the global default.
@@ -863,21 +886,41 @@ function renderCard(t) {
     t.error && t.status !== "failed" ? el("span", { class: "chip warn", title: t.error }, "last attempt failed") : null,
     t.commit ? el("span", { class: "chip mono" }, t.commit.slice(0, 7)) : null,
     el("span", { class: "muted" }, relTime(t.updated_at))),
-  t.status === "review" ? el("button", {
-    type: "button", class: "card-action primary", title: "The work is good; move it to Finished",
-    onclick: e => { e.stopPropagation(); e.currentTarget.disabled = true; approveFromCard(t); },
-    onkeydown: e => e.stopPropagation(),
-  }, "Approve") : null);
+  el("span", { class: "card-actions" }, ...cardButtons(t)));
 }
 
-async function approveFromCard(t) {
-  if (t.id === state.openTid) return doAction("approve");
+// One-click row buttons; they act without opening the drawer.
+function cardButton(label, cls, title, onClick) {
+  return el("button", {
+    type: "button", class: `card-action ${cls}`, title,
+    onclick: e => { e.stopPropagation(); e.currentTarget.disabled = true; onClick(); },
+    onkeydown: e => e.stopPropagation(),
+  }, label);
+}
+
+function cardButtons(t) {
+  if (t.status === "review") {
+    return [cardButton("Approve", "primary", "The work is good; move it to Finished", () => cardAction(t, "approve"))];
+  }
+  if (t.status === "unplanned" && !t.paused) {
+    return [
+      cardButton((t.plan || "").trim() ? "Refine plan with AI" : "Plan with AI", "primary",
+        "The AI drafts a plan (read-only)", () => cardAction(t, "plan")),
+      cardButton("Mark planned", "ghost", "Accept the plan as written without asking the AI",
+        () => cardAction(t, "mark_planned")),
+    ];
+  }
+  return [];
+}
+
+async function cardAction(t, action) {
+  if (t.id === state.openTid) return doAction(action);
   try {
-    const updated = await api("POST", `/api/projects/${state.pid}/tasks/${t.id}/action`, { action: "approve" });
+    const updated = await api("POST", `/api/projects/${state.pid}/tasks/${t.id}/action`, { action });
     Object.assign(t, updated); markTasksChanged();
     state.selected.delete(t.id);
     renderBoard();
-    toast("Approved");
+    toast(BATCH_VERB[action]);
   } catch (e) {
     toast(e.message, true);
     renderBoard();
@@ -979,9 +1022,9 @@ function renderBatchBar() {
   del.textContent = `Delete (${editable})`;
 }
 
-async function doBatch(action, extra = {}) {
+async function doBatch(action, extra = {}, targets = null) {
   const spec = BATCH_ACTIONS.find(a => a.action === action);
-  const targets = eligible(spec?.from || NOT_BUSY, spec?.when);
+  targets ??= eligible(spec?.from || NOT_BUSY, spec?.when);
   if (!targets.length) return;
   const many = plural(targets.length, "task");
   if (action === "delete" && !confirm(`Delete ${many} permanently?\n\n${targets.map(t => `#${t.id} ${t.title}`).join("\n")}`)) return;

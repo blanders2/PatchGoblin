@@ -304,6 +304,8 @@ button.link:hover { filter: none; }
 .board { display: block; }
 .column { background: var(--panel-2); border-radius: 10px; padding: 10px; min-height: 120px; }
 .cards { display: flex; flex-direction: column; gap: 6px; }
+.list-footer { display: flex; gap: 6px; justify-content: flex-end; padding: 8px 4px 0; border-top: 1px solid var(--line); margin-top: 6px; }
+.list-footer[hidden] { display: none; }
 .empty-col { padding: 8px 4px; }
 /* One task per row: #id, title, meta chips, status badge. */
 .card {
@@ -327,7 +329,9 @@ button.link:hover { filter: none; }
 .card-title { font-weight: 550; word-break: break-word; flex: 1; min-width: 0; order: 1; }
 .card-meta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 11.5px; order: 2; }
 .card-meta:empty { display: none; }
-.card .card-action { order: 3; padding: 2px 10px; font-size: 12px; flex-shrink: 0; }
+.card .card-actions { order: 3; display: flex; gap: 4px; flex-shrink: 0; }
+.card .card-actions:empty { display: none; }
+.card .card-action { padding: 2px 10px; font-size: 12px; }
 .card .badge { order: 4; }
 .chip { background: var(--panel-2); border-radius: 5px; padding: 1px 6px; }
 .chip.paused { background: var(--t-paused); color: var(--b-paused); font-weight: 600; }

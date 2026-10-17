@@ -220,6 +220,12 @@ this in every project that uses the default. Each automatic step is written to t
 history ("Auto-planned", "Auto-queued"). With both modes on, a task whose plan has no open
 questions goes from creation to an AI run and a commit without you reviewing the plan.
 
+**Unplanned shortcuts.** Each Unplanned card has **Plan with AI** and **Mark planned**
+buttons that act in one click without opening the task. Below the list, **Plan all (N)** and
+**Mark all planned (N)** act on every Unplanned task in the tab, whatever is ticked. Plan all
+asks for optional feedback shared by every task (Cancel aborts), and Mark all planned asks
+for confirmation when Auto-queue is on. Paused tasks get no buttons and aren't counted.
+
 **Batch actions.** Tick the checkbox on each card you want (Shift+click selects a
 range, Space toggles the focused card, Esc clears). A toolbar then shows the actions
 that apply to the ticked tasks: Plan with AI, Mark planned, Move to Plan, Queue for AI, Remove from
