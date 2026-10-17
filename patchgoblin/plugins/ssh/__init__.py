@@ -36,8 +36,9 @@ class SshPlugin(Plugin):
 
     def __init__(self, ctx):
         super().__init__(ctx)
-        # Servers and tunnels were top-level settings before SSH tools became a plugin.
-        ctx.settings.adopt_legacy(self.id, {"ssh_servers": "servers", "ssh_tunnels": "tunnels"})
+        # Tunnels were a top-level setting before SSH tools became a plugin. (Servers moved to the
+        # core Server Manager, which adopts the old lists itself: see store.Settings.)
+        ctx.settings.adopt_legacy(self.id, {"ssh_tunnels": "tunnels"})
         self.tunnels = sshtools.TunnelManager()
 
     def stop(self) -> None:
@@ -45,7 +46,7 @@ class SshPlugin(Plugin):
 
     # ---- saved data ----------------------------------------------------------------
     def servers(self) -> list[dict]:
-        return sshtools.clean_servers(self.ctx.load().get("servers"))
+        return self.ctx.servers.list("ssh")
 
     def saved_tunnels(self) -> list[dict]:
         return sshtools.clean_tunnels(self.ctx.load().get("tunnels"))
@@ -55,10 +56,6 @@ class SshPlugin(Plugin):
 
     def routes(self, bp) -> None:
         tunnels = self.tunnels
-
-        def servers_view() -> dict:
-            servers = self.servers()
-            return {"servers": servers, "suggestions": sshtools.server_suggestions(self.ctx.registry, servers)}
 
         def saved_server(sid: str) -> dict:
             for server in self.servers():
@@ -74,14 +71,9 @@ class SshPlugin(Plugin):
             sshtools.send_wol(server["mac"], server["wol_address"])
             return jsonify(ok=True, mac=server["mac"], address=server["wol_address"] or "255.255.255.255")
 
-        @bp.get("/servers")
-        def get_servers():
-            return jsonify(servers_view())
-
-        @bp.put("/servers")
-        def put_servers():
-            self._save("servers", sshtools.clean_servers(body().get("servers"), strict=True))
-            return jsonify(servers_view())
+        @bp.get("/suggestions")
+        def get_suggestions():
+            return jsonify(suggestions=sshtools.server_suggestions(self.ctx.registry, self.servers()))
 
         @bp.get("/keys")
         def ssh_keys():

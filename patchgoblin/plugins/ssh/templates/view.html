@@ -18,30 +18,12 @@
         <thead><tr><th>Host</th><th>Port</th><th>From</th><th></th></tr></thead>
         <tbody id="ssh-suggestion-rows"></tbody>
       </table>
-      <p class="muted small">Hosts used by your projects and aliases from <code>~/.ssh/config</code>. Nothing is saved until you press Save on the form below.</p>
+      <p class="muted small">Hosts used by your projects and aliases from <code>~/.ssh/config</code>. Nothing is saved until you press Save in the Server Manager.</p>
     </fieldset>
-    <form id="ssh-server-form">
-      <fieldset>
-        <legend id="ssh-server-form-title">Add a server</legend>
-        <input type="hidden" name="id">
-        <div class="row">
-          <label>Name <input class="w-host" name="name" autocomplete="off" placeholder="defaults to the host"></label>
-          <label>SSH host <input class="w-host" name="target" required autocomplete="off" placeholder="user@host or alias"></label>
-          <label>SSH port <input class="w-port" name="port" type="number" min="1" max="65535" placeholder="22"></label>
-          <label>OS
-            <select name="os"><option value="auto">Auto-detect</option><option value="posix">Linux/macOS</option><option value="windows">Windows</option></select>
-          </label>
-          <label>MAC address (wake-on-LAN) <input class="w-host" name="mac" autocomplete="off" placeholder="aa:bb:cc:dd:ee:ff"></label>
-          <label>Wake-up address <input class="w-host" name="wol_address" autocomplete="off" placeholder="255.255.255.255"></label>
-          <div class="actions">
-            <button type="submit">Save server</button>
-            <button type="button" class="ghost" id="ssh-server-cancel" hidden>Cancel edit</button>
-          </div>
-        </div>
-        <p class="muted small">The wake-up packet is sent from this computer, so the server must be on the same LAN, or the wake-up address must be its subnet's broadcast address (e.g. <code>192.168.1.255</code>). It does not cross routers or VPNs.</p>
-        <div id="ssh-server-error" class="error" hidden></div>
-      </fieldset>
-    </form>
+    <div class="row">
+      <button type="button" id="ssh-server-manage">Edit in Server Manager</button>
+      <span class="muted small">Servers are saved in the Server Manager (the servers button at the bottom of the left bar) and shared with the rest of PatchGoblin. The wake-up packet is sent from this computer, so the server must be on the same LAN, or its wake-up address must be the subnet's broadcast address.</span>
+    </div>
   </div>
 
   <div id="ssh-keys-panel" class="ssh-panel" hidden>

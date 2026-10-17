@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from patchgoblin import create_app
 from patchgoblin import hosts as hosts_mod
+from patchgoblin import servers as servermod
 from patchgoblin.engine import Job
 from patchgoblin.hosts import (
     HostError,
@@ -3497,57 +3498,57 @@ class SshToolsTests(AppTestCase):
         self.assertEqual(packet[:6], b"\xff" * 6)
         self.assertEqual(packet[6:], bytes.fromhex("aabbccddeeff") * 16)
 
+    def save_ssh(self, *servers):
+        self.app.config["SETTINGS"].save_servers([{**s, "type": "ssh"} for s in servers])
+
     def test_wake_route(self):
         url = "/api/ssh/servers/box/wake"
         mac = "aa:bb:cc:dd:ee:ff"
-        self.client.put("/api/ssh/servers", headers=H, json={"servers": [self.SERVER]})
+        self.save_ssh(self.SERVER)
         with mock.patch.object(sshtools.socket, "socket") as sock_cls:
             sock = sock_cls.return_value.__enter__.return_value
             self.assertEqual(self.client.post("/api/ssh/servers/nope/wake", headers=H).status_code, 404)
             self.assertEqual(self.client.post(url).status_code, 403)
             self.assertEqual(self.client.post(url, headers=H).status_code, 400)  # no MAC saved
             sock.sendto.assert_not_called()
-            self.client.put("/api/ssh/servers", headers=H, json={"servers": [{**self.SERVER, "mac": mac}]})
+            self.save_ssh({**self.SERVER, "mac": mac})
             self.assertEqual(self.client.post(url, headers=H).status_code, 200)
             sock.setsockopt.assert_called_with(sshtools.socket.SOL_SOCKET, sshtools.socket.SO_BROADCAST, 1)
             sock.sendto.assert_called_with(sshtools.magic_packet(mac), ("255.255.255.255", 9))
-            self.client.put("/api/ssh/servers", headers=H,
-                            json={"servers": [{**self.SERVER, "mac": mac, "wol_address": "192.168.1.255"}]})
+            self.save_ssh({**self.SERVER, "mac": mac, "wol_address": "192.168.1.255"})
             self.assertEqual(self.client.post(url, headers=H).status_code, 200)
             sock.sendto.assert_called_with(sshtools.magic_packet(mac), ("192.168.1.255", 9))
 
-    def test_validate_server_rules(self):
-        self.assertEqual(sshtools.validate_server(self.SERVER), self.SERVER)
-        self.assertEqual(sshtools.validate_server({**self.SERVER, "mac": "AA-BB-CC-DD-EE-FF"})["mac"], "aa:bb:cc:dd:ee:ff")
+    def test_ssh_type_validation_rules(self):
+        types = servermod.core_types()
+        spec = {**self.SERVER, "type": "ssh"}
+        self.assertEqual(servermod.clean_server(spec, [], types), spec)
+        self.assertEqual(servermod.clean_server({**spec, "mac": "AA-BB-CC-DD-EE-FF"}, [], types)["mac"], "aa:bb:cc:dd:ee:ff")
         for change in ({"mac": "zz"}, {"wol_address": "nope"}):
             with self.assertRaises(ValueError, msg=change):
-                sshtools.validate_server({**self.SERVER, **change})
-        out = sshtools.validate_server({"id": "a", "target": "me@box"})
-        self.assertEqual((out["name"], out["os"], out["port"]), ("me@box", "auto", None))
-        for change in ({"target": "-oProxyCommand=x"}, {"port": 99999}, {"os": "beos"}, {"name": "a\nb"}, {"id": "Bad Id"}):
+                servermod.clean_server({**spec, **change}, [], types)
+        out = servermod.clean_server({"type": "ssh", "target": "me@box"}, [], types)
+        self.assertEqual((out["id"], out["name"], out["os"], out["port"]), ("me-box", "me@box", "auto", None))
+        for change in ({"target": "-oProxyCommand=x"}, {"port": 99999}, {"port": "x"}, {"os": "beos"},
+                       {"name": "a\nb"}, {"id": "Bad Id"}, {"target": ""}, {"type": "nope"}):
             with self.assertRaises(ValueError, msg=change):
-                sshtools.validate_server({**self.SERVER, **change})
-
-    def test_clean_servers(self):
-        dup = [self.SERVER, {**self.SERVER, "id": "box"}, {**self.SERVER, "id": "other", "target": "ME@box"},
-               {"name": "New", "target": "new@host"}]
-        out = sshtools.clean_servers(dup)
-        self.assertEqual([s["id"] for s in out], ["box", "new"])
-        with self.assertRaises(ValueError):
-            sshtools.clean_servers(dup[:2], strict=True)
-        with self.assertRaisesRegex(ValueError, "already saved"):
-            sshtools.clean_servers([self.SERVER, {**self.SERVER, "id": "other"}], strict=True)
+                servermod.clean_server({**spec, **change}, [], types)
+        with self.assertRaisesRegex(ValueError, "not a"):  # an id is unique across types
+            servermod.clean_server(spec, [{**spec, "type": "llm"}], types)
 
     def test_servers_routes_never_add_automatically(self):
-        self.client.post("/api/projects", headers=H, json={"location": "ssh", "ssh_target": "me@box", "path": "/x"})
-        data = self.client.get("/api/ssh/servers").get_json()
-        self.assertEqual(data["servers"], [])
-        self.assertEqual(self.app.config["SETTINGS"].plugin_data("ssh").get("servers", []), [])
-        self.assertEqual(self.client.put("/api/ssh/servers", json={"servers": []}).status_code, 403)
-        self.assertEqual(self.client.put("/api/ssh/servers", headers=H, json={"servers": [{**self.SERVER, "os": "x"}]}).status_code, 400)
-        data = self.client.put("/api/ssh/servers", headers=H, json={"servers": [self.SERVER]}).get_json()
-        self.assertEqual(data["servers"], [self.SERVER])
-        self.assertNotIn("box", [s["target"] for s in data["suggestions"]])
+        self.app.config["REGISTRY"].add({"name": "x", "location": "ssh", "ssh_target": "me@box", "path": "/x"})
+        self.assertEqual(self.client.get("/api/servers").get_json()["servers"], [])
+        self.assertEqual(self.app.config["SETTINGS"].servers(), [])
+        sug = self.client.get("/api/ssh/suggestions").get_json()["suggestions"]
+        self.assertIn("me@box", [s["target"] for s in sug])
+        self.assertEqual(self.client.post("/api/servers", json={"server": {}}).status_code, 403)
+        bad = self.client.post("/api/servers", headers=H, json={"server": {**self.SERVER, "type": "ssh", "os": "x"}})
+        self.assertEqual(bad.status_code, 400)
+        res = self.client.post("/api/servers", headers=H, json={"server": {**self.SERVER, "type": "ssh"}})
+        self.assertEqual(res.get_json()["server"]["target"], "me@box")
+        sug = self.client.get("/api/ssh/suggestions").get_json()["suggestions"]
+        self.assertNotIn("me@box", [s["target"] for s in sug if s.get("port") == 2200])
 
     # ---- network map
     @staticmethod
@@ -3668,13 +3669,13 @@ class SshToolsTests(AppTestCase):
         self.assertEqual(node["error"], "Permission denied")
 
     def test_network_route(self):
-        self.app.config["SETTINGS"].save_plugin_data("ssh", {"servers": sshtools.clean_servers([self.SERVER])})
+        self.save_ssh(self.SERVER)
         scan = {"files": [], "own_keys": [], "admin": False, "os": "posix", "error": ""}
         with mock.patch.object(sshtools, "scan_server", return_value=scan) as scanner, \
                 mock.patch.object(sshtools, "list_local_keys", return_value=[]):
             self.assertEqual(self.client.post("/api/ssh/network").status_code, 403)
             self.assertEqual(scanner.call_count, 0)
-            self.client.get("/api/ssh/servers")
+            self.client.get("/api/servers")
             self.assertEqual(scanner.call_count, 0)
             data = self.client.post("/api/ssh/network", headers=H).get_json()
         self.assertEqual(scanner.call_count, 1)
@@ -3959,14 +3960,14 @@ class PluginTests(unittest.TestCase):
             res = client.put("/api/plugins/ssh", headers=H, json={"enabled": False})
         stop_all.assert_called_once()
         self.assertFalse(next(p for p in res.get_json()["plugins"] if p["id"] == "ssh")["enabled"])
-        self.assertEqual(client.get("/api/ssh/servers").status_code, 404)
+        self.assertEqual(client.get("/api/ssh/suggestions").status_code, 404)
         self.assertEqual(client.get("/plugins/ssh/plugin.js").status_code, 404)
         self.assertNotIn('data-view="ssh"', client.get("/").get_data(as_text=True))
         # The choice is saved: a restart keeps it off.
         _, _, client2 = self.app()
-        self.assertEqual(client2.get("/api/ssh/servers").status_code, 404)
+        self.assertEqual(client2.get("/api/ssh/suggestions").status_code, 404)
         client.put("/api/plugins/ssh", headers=H, json={"enabled": True})
-        self.assertEqual(client.get("/api/ssh/servers").status_code, 200)
+        self.assertEqual(client.get("/api/ssh/suggestions").status_code, 200)
         self.assertIn('data-view="ssh"', client.get("/").get_data(as_text=True))
 
     def test_drop_in_plugin(self):
@@ -4011,21 +4012,227 @@ class PluginTests(unittest.TestCase):
         self.assertIn("already uses", errors["clash"])
         self.assertIn("Invalid plugin id", errors["reserved"])
         self.assertTrue(plugins.enabled("ssh"))
-        self.assertEqual(client.get("/api/ssh/servers").status_code, 200)
+        self.assertEqual(client.get("/api/ssh/suggestions").status_code, 200)
         self.assertEqual(client.get("/api/projects").status_code, 200)
 
-    def test_legacy_ssh_settings_move_into_the_plugin(self):
+    def test_legacy_ssh_settings_move_into_the_server_manager(self):
         os.makedirs(self.data)
         server = {"id": "box", "name": "Box", "target": "me@box", "port": None, "os": "auto"}
+        tunnel = {"id": "web", "name": "Web", "target": "me@box", "port": None, "direction": "local",
+                  "bind": "127.0.0.1", "listen_port": 8080, "dest_host": "localhost", "dest_port": 80}
         with open(os.path.join(self.data, "settings.json"), "w", encoding="utf-8") as fh:
-            json.dump({"ssh_servers": [server], "ssh_tunnels": [], "timeouts": {"run": 5}}, fh)
+            json.dump({"ssh_servers": [server], "ssh_tunnels": [tunnel], "timeouts": {"run": 5}}, fh)
         _, _, client = self.app()
-        self.assertEqual(client.get("/api/ssh/servers").get_json()["servers"][0]["target"], "me@box")
+        got = client.get("/api/servers").get_json()["servers"]
+        self.assertEqual([(s["id"], s["type"], s["target"]) for s in got], [("box", "ssh", "me@box")])
         with open(os.path.join(self.data, "settings.json"), encoding="utf-8") as fh:
             saved = json.load(fh)
-        self.assertNotIn("ssh_servers", saved)
-        self.assertEqual(saved["plugin_data"]["ssh"]["servers"][0]["id"], "box")
+        self.assertEqual(saved["plugin_data"]["ssh"]["tunnels"][0]["id"], "web")  # tunnels still go to the plugin
         self.assertEqual(saved["timeouts"], {"run": 5})
+
+
+TYPE_PLUGIN = '''
+from patchgoblin.pluginkit import Plugin
+from patchgoblin.servers import Field, ServerType
+
+
+class Demo(Plugin):
+    id = "%(pid)s"
+    name = "Type demo"
+
+    def server_types(self):
+        return [ServerType(id="%(tid)s", label="Demo server", fields=[
+            Field("url", "URL", required=True), Field("token", "Token", kind="password", secret=True)])]
+
+
+PLUGIN = Demo
+'''
+
+
+class ServerManagerTests(AppTestCase):
+    SSH = {"type": "ssh", "name": "Box", "target": "me@box", "port": 2200, "os": "posix"}
+
+    def save(self, **extra):
+        res = self.client.post("/api/servers", headers=H, json={"server": {**self.SSH, **extra}})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        return res.get_json()["saved"]
+
+    def servers(self, query=""):
+        return self.client.get("/api/servers" + query).get_json()["servers"]
+
+    def test_create_update_delete_ssh_server(self):
+        sid = self.save()
+        self.assertEqual(sid, "box")
+        got = self.servers()[0]
+        self.assertEqual((got["type"], got["target"], got["port"], got["usable"]), ("ssh", "me@box", 2200, True))
+        self.save(id=sid, name="Renamed", port=None, mac="AA-BB-CC-DD-EE-FF")
+        got = self.servers("?type=ssh")
+        self.assertEqual((len(got), got[0]["name"], got[0]["port"], got[0]["mac"]), (1, "Renamed", None, "aa:bb:cc:dd:ee:ff"))
+        self.assertEqual(self.servers("?type=llm"), [])
+        self.assertEqual(self.client.delete(f"/api/servers/{sid}").status_code, 403)
+        self.assertEqual(self.client.delete(f"/api/servers/{sid}", headers=H).status_code, 200)
+        self.assertEqual(self.client.delete(f"/api/servers/{sid}", headers=H).status_code, 404)
+        self.assertEqual(self.servers(), [])
+
+    def test_validation_errors(self):
+        for change in ({"target": "-oProxyCommand=x"}, {"target": ""}, {"port": 70000}, {"port": "abc"},
+                       {"mac": "zz"}, {"wol_address": "nope"}, {"os": "beos"}, {"type": "nope"}):
+            res = self.client.post("/api/servers", headers=H, json={"server": {**self.SSH, **change}})
+            self.assertEqual(res.status_code, 400, change)
+        self.assertEqual(self.servers(), [])
+
+    def test_secrets_stay_on_the_server(self):
+        llm = {"type": "llm", "name": "L", "base_url": "http://127.0.0.1:9", "api_key": "sekrit-0001"}
+        sid = self.client.post("/api/servers", headers=H, json={"server": llm}).get_json()["saved"]
+        view = self.servers()[0]
+        self.assertTrue(view["api_key_saved"])
+        self.assertNotIn("api_key", view)
+        self.assertNotIn("sekrit-0001", self.client.get("/api/servers").get_data(as_text=True))
+        settings = self.app.config["SETTINGS"]
+        # A blank secret keeps the saved one; clear_<key> removes it.
+        self.client.post("/api/servers", headers=H, json={"server": {**llm, "id": sid, "api_key": "", "name": "L2"}})
+        self.assertEqual(settings.servers()[0]["api_key"], "sekrit-0001")
+        self.client.post("/api/servers", headers=H, json={"server": {**llm, "id": sid, "api_key": "", "clear_api_key": True}})
+        self.assertEqual(settings.servers()[0]["api_key"], "")
+        # ctx.servers.get returns secrets for plugins; /api/settings never shows the list.
+        self.client.post("/api/servers", headers=H, json={"server": {**llm, "id": sid}})
+        self.assertEqual(self.app.config["PLUGINS"].get("llm").plugin.ctx.servers.get(sid)["api_key"], "sekrit-0001")
+        self.assertNotIn("servers", self.client.get("/api/settings").get_json())
+
+    def test_server_types_lists_ssh_and_llm(self):
+        types = {t["id"]: t for t in self.client.get("/api/server-types").get_json()["types"]}
+        self.assertEqual(set(types), {"ssh", "llm"})
+        self.assertTrue(types["ssh"]["available"] and types["ssh"]["testable"])
+        fields = {f["key"]: f for f in types["llm"]["fields"]}
+        self.assertTrue(fields["api_key"]["secret"])
+        self.assertEqual(fields["kind"]["kind"], "select")
+        self.assertIn("llamacpp", [o["value"] for o in fields["kind"]["options"]])
+
+    def test_ssh_test_hook_checks_the_typed_server(self):
+        with mock.patch.object(SSHHost, "check") as check:
+            res = self.client.post("/api/servers/test", headers=H, json={"server": self.SSH})
+        self.assertEqual(res.status_code, 200)
+        check.assert_called_once()
+        self.assertEqual(self.servers(), [])
+        with mock.patch.object(SSHHost, "check", side_effect=HostError("nope")):
+            self.assertEqual(self.client.post("/api/servers/test", headers=H, json={"server": self.SSH}).status_code, 502)
+
+    def link_project(self, sid):
+        fields = {"location": "ssh", "server": sid, "path": "/home/me/app", "provider": "claude"}
+        with mock.patch.object(SSHHost, "check"), mock.patch.object(SSHHost, "is_dir", return_value=True), \
+                mock.patch.object(SSHHost, "read_text", return_value="{}"), \
+                mock.patch.object(SSHHost, "write_text"):
+            res = self.client.post("/api/projects", headers=H, json=fields)
+        self.assertEqual(res.status_code, 201, res.get_json())
+        return res.get_json()
+
+    def test_add_project_from_a_saved_server(self):
+        sid = self.save()
+        project = self.link_project(sid)
+        self.assertEqual((project["server"], project["ssh_target"], project["ssh_port"], project["ssh_os"]),
+                         (sid, "me@box", 2200, "posix"))
+        bad = self.client.post("/api/projects", headers=H, json={"location": "ssh", "server": "nope", "path": "/x"})
+        self.assertEqual(bad.status_code, 400)
+
+    def test_servers_used_by_projects_cannot_be_deleted_and_follow_edits(self):
+        sid = self.save()
+        project = self.link_project(sid)
+        res = self.client.delete(f"/api/servers/{sid}", headers=H)
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("app", res.get_json()["error"])
+        self.assertEqual(len(self.servers()), 1)
+        self.save(id=sid, target="me@newbox", port=2222, os="windows")
+        got = self.app.config["REGISTRY"].get(project["id"])
+        self.assertEqual((got["ssh_target"], got["ssh_port"], got["ssh_os"]), ("me@newbox", 2222, "windows"))
+        self.save(id=sid, target="me@other", port=None, os="auto")  # auto-detect again: the stored OS is dropped
+        got = self.app.config["REGISTRY"].get(project["id"])
+        self.assertEqual((got["ssh_target"], got["ssh_port"], got["ssh_os"]), ("me@other", None, None))
+        self.app.config["REGISTRY"].remove(project["id"])
+        self.assertEqual(self.client.delete(f"/api/servers/{sid}", headers=H).status_code, 200)
+
+    def plugin_app(self, *plugins, data=None):
+        data = data or os.path.join(self.tmp.name, "pdata")
+        for pid, tid in plugins:
+            write_file(os.path.join(data, "plugins", pid, "__init__.py"), TYPE_PLUGIN % {"pid": pid, "tid": tid})
+        app = create_app(data, start_engine=False)
+        self.addCleanup(app.config["PLUGINS"].stop_all)
+        return app, app.test_client()
+
+    def test_plugin_server_types_and_clashes(self):
+        app, client = self.plugin_app(("alpha", "demo"), ("beta", "demo"))
+        errors = {p["id"]: p["error"] for p in client.get("/api/plugins").get_json()["plugins"]}
+        self.assertEqual(errors["alpha"], "")
+        self.assertIn("already registered", errors["beta"])
+        self.assertIn("alpha", errors["beta"])
+        types = {t["id"]: t for t in client.get("/api/server-types").get_json()["types"]}
+        self.assertEqual((types["demo"]["owner"], types["demo"]["available"]), ("alpha", True))
+
+    def test_servers_of_a_disabled_plugin_are_kept_and_unusable(self):
+        app, client = self.plugin_app(("alpha", "demo"))
+        spec = {"type": "demo", "name": "D", "url": "http://x", "token": "tok-123"}
+        sid = client.post("/api/servers", headers=H, json={"server": spec}).get_json()["saved"]
+        client.put("/api/plugins/alpha", headers=H, json={"enabled": False})
+        got = client.get("/api/servers").get_json()["servers"]
+        self.assertEqual([(s["id"], s["usable"]) for s in got], [(sid, False)])
+        self.assertNotIn("tok-123", json.dumps(got))
+        types = {t["id"]: t for t in client.get("/api/server-types").get_json()["types"]}
+        self.assertFalse(types["demo"]["available"])
+        self.assertEqual(client.post("/api/servers", headers=H, json={"server": {**spec, "id": sid}}).status_code, 400)
+        self.assertEqual(app.config["SETTINGS"].servers()[0]["token"], "tok-123")  # kept as it is
+        # A server whose type vanished entirely still never leaks its secrets.
+        app.config["SETTINGS"].save_servers([{"id": "old", "name": "O", "type": "gone", "api_key": "k-1", "url": "u"}])
+        got = client.get("/api/servers").get_json()["servers"]
+        self.assertEqual((got[0]["usable"], "api_key" in got[0], got[0]["api_key_saved"]), (False, False, True))
+        client.put("/api/plugins/alpha", headers=H, json={"enabled": True})
+        self.assertEqual(client.delete("/api/servers/old", headers=H).status_code, 200)
+
+
+class ServerMigrationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data = os.path.join(self.tmp.name, "data")
+        os.makedirs(self.data)
+        self.path = os.path.join(self.data, "settings.json")
+
+    def build(self):
+        app = create_app(self.data, start_engine=False)
+        self.addCleanup(app.config["PLUGINS"].stop_all)
+        return app
+
+    def test_legacy_lists_move_into_the_core_list_once(self):
+        ssh = {"id": "box", "name": "Box", "target": "me@box", "port": 22, "os": "auto", "mac": "", "wol_address": ""}
+        legacy = {"id": "old", "name": "Old", "target": "me@old"}
+        llm = {"id": "box", "name": "LLM box", "kind": "ollama", "base_url": "http://127.0.0.1:11434",
+               "api_key": "k-1", "headers": {"X": "y"}, "verify_tls": False, "timeout": 30}
+        with open(self.path, "w", encoding="utf-8") as fh:
+            json.dump({"ssh_servers": [legacy], "plugin_data": {"ssh": {"servers": [ssh]}, "llm": {"servers": [llm]}}}, fh)
+        app = self.build()
+        settings = app.config["SETTINGS"]
+        got = {s["id"]: s for s in settings.servers()}
+        self.assertEqual(set(got), {"old", "box", "box-2"})
+        self.assertEqual((got["box"]["type"], got["box"]["target"]), ("ssh", "me@box"))
+        self.assertEqual((got["box-2"]["type"], got["box-2"]["api_key"], got["box-2"]["headers"]), ("llm", "k-1", {"X": "y"}))
+        self.assertEqual(settings.server_renames("llm"), {"box": "box-2"})
+        self.assertEqual(settings.server_renames("ssh"), {})
+        console = app.test_client().get("/api/llm/meta").get_json()
+        self.assertEqual(console["renames"], {"box": "box-2"})
+        view = app.test_client().get("/api/llm/servers").get_json()["servers"]
+        self.assertEqual([(s["id"], s["kind"]) for s in view], [("box-2", "ollama")])
+        # The old data is left alone, and nothing moves a second time.
+        with open(self.path, encoding="utf-8") as fh:
+            saved = json.load(fh)
+        self.assertEqual(saved["plugin_data"]["llm"]["servers"], [llm])
+        self.assertEqual(saved["ssh_servers"], [legacy])
+        self.assertTrue(saved["servers_migrated"])
+        settings.save_servers([s for s in settings.servers() if s["id"] != "old"])
+        settings2 = self.build().config["SETTINGS"]
+        self.assertEqual(sorted(s["id"] for s in settings2.servers()), ["box", "box-2"])
+
+    def test_nothing_to_migrate_leaves_settings_alone(self):
+        settings = self.build().config["SETTINGS"]
+        self.assertEqual(settings.servers(), [])
+        self.assertFalse(os.path.exists(self.path) and "servers_migrated" in open(self.path, encoding="utf-8").read())
 
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -4050,17 +4257,20 @@ class LlmConsoleTests(unittest.TestCase):
     def add(self, **extra):
         spec = {"name": "Fake", "kind": "llamacpp", "base_url": self.base + "/v1/", "api_key": fake_llm_server.KEY,
                 "auth": "bearer", **extra}
-        res = self.client.post("/api/llm/servers", headers=H, json={"server": spec})
+        res = self.client.post("/api/servers", headers=H, json={"server": {**spec, "type": "llm"}})
         self.assertEqual(res.status_code, 200, res.get_json())
-        return res.get_json()
+        return {"saved": res.get_json()["saved"], **self.client.get("/api/llm/servers").get_json()}
 
     def events(self, sid, **req):
         res = self.client.post(f"/api/llm/servers/{sid}/send", headers=H, json=req)
         self.assertEqual(res.status_code, 200, res.get_data(as_text=True))
         return [json.loads(line) for line in res.get_data(as_text=True).splitlines() if line.strip()]
 
+    def llm_saved(self):
+        return [x for x in self.app.config["SETTINGS"].servers() if x["type"] == "llm"]
+
     def test_servers_keep_keys_on_the_server(self):
-        self.assertEqual(self.client.post("/api/llm/servers", json={"server": {}}).status_code, 403)
+        self.assertEqual(self.client.post("/api/servers", json={"server": {}}).status_code, 403)
         data = self.add()
         sid = data["saved"]
         server = data["servers"][0]
@@ -4068,35 +4278,37 @@ class LlmConsoleTests(unittest.TestCase):
         self.assertTrue(server["api_key_saved"])
         self.assertNotIn("api_key", server)
         self.assertNotIn(fake_llm_server.KEY, self.client.get("/api/llm/servers").get_data(as_text=True))
-        # Editing with a blank key keeps it; clear_key removes it.
-        self.client.post("/api/llm/servers", headers=H, json={"server": {**server, "name": "Renamed", "api_key": ""}})
-        saved = self.app.config["SETTINGS"].plugin_data("llm")["servers"][0]
+        self.assertNotIn(fake_llm_server.KEY, self.client.get("/api/servers").get_data(as_text=True))
+        # Editing with a blank key keeps it; clear_api_key removes it.
+        self.client.post("/api/servers", headers=H, json={"server": {**server, "name": "Renamed", "api_key": ""}})
+        saved = self.llm_saved()[0]
         self.assertEqual((saved["name"], saved["api_key"]), ("Renamed", fake_llm_server.KEY))
-        self.client.post("/api/llm/servers", headers=H, json={"server": {**server, "clear_key": True}})
-        self.assertEqual(self.app.config["SETTINGS"].plugin_data("llm")["servers"][0]["api_key"], "")
-        bad = self.client.post("/api/llm/servers", headers=H, json={"server": {"base_url": "ftp://x"}})
+        self.client.post("/api/servers", headers=H, json={"server": {**server, "clear_api_key": True}})
+        self.assertEqual(self.llm_saved()[0]["api_key"], "")
+        bad = self.client.post("/api/servers", headers=H, json={"server": {"type": "llm", "base_url": "ftp://x"}})
         self.assertEqual(bad.status_code, 400)
-        self.client.delete(f"/api/llm/servers/{sid}", headers=H)
+        self.client.delete(f"/api/servers/{sid}", headers=H)
         self.assertEqual(self.client.get("/api/llm/servers").get_json()["servers"], [])
 
     def test_server_test_route_checks_without_saving(self):
-        spec = {"name": "Fake", "kind": "auto", "base_url": self.base + "/v1/", "api_key": fake_llm_server.KEY}
-        self.assertEqual(self.client.post("/api/llm/servers/test", json={"server": spec}).status_code, 403)
-        res = self.client.post("/api/llm/servers/test", headers=H, json={"server": spec})
+        spec = {"type": "llm", "name": "Fake", "kind": "auto", "base_url": self.base + "/v1/",
+                "api_key": fake_llm_server.KEY}
+        self.assertEqual(self.client.post("/api/servers/test", json={"server": spec}).status_code, 403)
+        res = self.client.post("/api/servers/test", headers=H, json={"server": spec})
         self.assertEqual(res.status_code, 200, res.get_data(as_text=True))
         data = res.get_json()
-        self.assertEqual([m["id"] for m in data["models"]["models"]], ["qwen3-8b", "tiny"])
+        self.assertIn("2 models", data["message"])
         self.assertIn("detected", data)
         self.assertNotIn(fake_llm_server.KEY, res.get_data(as_text=True))
-        self.assertEqual(self.app.config["SETTINGS"].plugin_data("llm").get("servers") or [], [])
-        bad = self.client.post("/api/llm/servers/test", headers=H, json={"server": {"base_url": "ftp://x"}})
+        self.assertEqual(self.llm_saved(), [])
+        bad = self.client.post("/api/servers/test", headers=H, json={"server": {"type": "llm", "base_url": "ftp://x"}})
         self.assertEqual(bad.status_code, 400)
 
     def test_switching_to_env_key_keeps_the_saved_key(self):
         server = self.add()["servers"][0]
         spec = {**server, "api_key": "", "api_key_env": "SOME_ENV_VAR"}  # what the form sends in env mode
-        self.client.post("/api/llm/servers", headers=H, json={"server": spec})
-        saved = self.app.config["SETTINGS"].plugin_data("llm")["servers"][0]
+        self.client.post("/api/servers", headers=H, json={"server": spec})
+        saved = self.llm_saved()[0]
         self.assertEqual((saved["api_key"], saved["api_key_env"]), (fake_llm_server.KEY, "SOME_ENV_VAR"))
 
     def test_endpoint_suggestions_copy_the_key_server_side(self):
@@ -4105,8 +4317,11 @@ class LlmConsoleTests(unittest.TestCase):
         sugg = self.client.get("/api/llm/servers").get_json()["suggestions"]
         self.assertEqual([(s["base_url"], s["endpoint"]) for s in sugg], [(self.base, "box")])
         self.assertNotIn(fake_llm_server.KEY, json.dumps(sugg))
-        self.client.post("/api/llm/servers", headers=H, json={"server": {"base_url": self.base, "from_endpoint": "box"}})
-        self.assertEqual(self.app.config["SETTINGS"].plugin_data("llm")["servers"][0]["api_key"], fake_llm_server.KEY)
+        res = self.client.post("/api/llm/servers/adopt", headers=H,
+                               json={"server": {"base_url": self.base, "from_endpoint": "box"}})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertNotIn(fake_llm_server.KEY, res.get_data(as_text=True))
+        self.assertEqual(self.llm_saved()[0]["api_key"], fake_llm_server.KEY)
 
     def test_models_context_and_probe(self):
         sid = self.add()["saved"]

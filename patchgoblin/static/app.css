@@ -542,3 +542,19 @@ legend { padding: 0 4px; font-weight: 600; }
 }
 .secrets-warning p { margin: 0 0 6px; }
 
+
+/* Server Manager */
+.servers-list { display: flex; flex-direction: column; gap: 12px; margin: 10px 0; }
+.servers-group-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.servers-group-head h3 { margin: 0; font-size: 13px; }
+.servers-rows { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.servers-rows li { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; }
+.servers-rows li .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.servers-rows li.unavailable { opacity: .65; }
+.servers-form { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 10px 0; display: flex; flex-direction: column; gap: 8px; }
+.servers-form h3 { margin: 0; font-size: 13px; }
+.servers-fields { display: flex; flex-direction: column; gap: 8px; }
+.servers-fields .hint { font-size: 11.5px; color: var(--muted); }
+.servers-fields textarea { font-family: var(--mono, monospace); }
+#servers-test.ok { color: var(--ok, #2e9e5b); }
+#servers-test.bad { color: var(--danger, #d64545); }

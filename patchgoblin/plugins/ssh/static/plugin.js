@@ -8,7 +8,7 @@ const SSH_TOOLS = { servers: "Servers", keys: "Keys", install: "Install keys", n
 const ssh = {
   active: false, // whether the plugin is the one shown
   tool: "keys", // the open tool, a SSH_TOOLS key
-  servers: [], // saved servers [{id, name, target, port, os, mac, wol_address}] from /api/ssh/servers
+  servers: [], // saved servers [{id, name, target, port, os, mac, wol_address}] from the Server Manager
   suggestions: [], // [{target, port, source, ssh_os?}]: project hosts and ssh-config aliases not saved yet
   loaded: false,
   keys: [], // keys listed in the Keys panel
@@ -44,9 +44,9 @@ function resetTunnelTimer() {
 async function loadSshServers(force = false) {
   if (ssh.loaded && !force) return;
   try {
-    const data = await api("GET", "/api/ssh/servers");
-    ssh.servers = data.servers;
-    ssh.suggestions = data.suggestions;
+    const [servers, sug] = await Promise.all([PG.servers.list("ssh"), api("GET", "/api/ssh/suggestions")]);
+    ssh.servers = servers.filter(s => s.usable);
+    ssh.suggestions = sug.suggestions;
     ssh.loaded = true;
   } catch { /* keep what we have; the pickers still work with "This computer" */ }
   fillSshPickers();
@@ -70,7 +70,7 @@ function fillSshPickers() {
     if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
   }
   const all = [...ssh.servers, ...ssh.suggestions];
-  for (const list of $$("#ssh-targets, #pf-ssh-servers")) {
+  for (const list of $$("#ssh-targets")) {
     list.replaceChildren(...all.map(t => el("option", { value: t.target }, t.port ? `port ${t.port}` : "")));
   }
 }
@@ -83,16 +83,13 @@ function renderServerPanel() {
     el("td", {}, el("div", { class: "actions" },
       ...(s.mac ? [el("button", { class: "small ghost", type: "button", title: `Send a wake-on-LAN packet to ${s.mac}`,
         onclick: () => wakeServer(s) }, "Wake")] : []),
-      el("button", { class: "small ghost", type: "button", onclick: () => editServer(s) }, "Edit"),
-      el("button", { class: "small ghost danger", type: "button", onclick: () => deleteServer(s) }, "Delete")))))
-    : [el("tr", {}, el("td", { colspan: 5, class: "muted" }, "No saved servers yet."))]));
+      el("button", { class: "small ghost", type: "button", onclick: () => PG.servers.open("ssh") }, "Edit")))))
+    : [el("tr", {}, el("td", { colspan: 5, class: "muted" }, "No saved servers yet. Use Edit in Server Manager to add one."))]));
   $("#ssh-suggestion-rows").replaceChildren(...(ssh.suggestions.length ? ssh.suggestions.map(s => el("tr", {},
     el("td", { class: "mono", title: s.target }, s.target), el("td", {}, s.port || ""), el("td", { class: "muted" }, s.source),
     el("td", {}, el("button", { class: "small ghost", type: "button", onclick: () => suggestServer(s) }, "Add"))))
     : [el("tr", {}, el("td", { colspan: 4, class: "muted" }, "No suggestions."))]));
 }
-
-const serverSpec = s => ({ id: s.id, name: s.name, target: s.target, port: s.port, os: s.os, mac: s.mac, wol_address: s.wol_address });
 
 async function wakeServer(s) {
   try {
@@ -101,64 +98,9 @@ async function wakeServer(s) {
   } catch (e) { toast(e.message, true); }
 }
 
-async function saveServers(list) {
-  const data = await api("PUT", "/api/ssh/servers", { servers: list });
-  ssh.servers = data.servers;
-  ssh.suggestions = data.suggestions;
-  ssh.loaded = true;
-  fillSshPickers();
-  renderServerPanel();
-}
-
-function resetServerForm() {
-  const f = $("#ssh-server-form");
-  f.reset();
-  f.elements.id.value = "";
-  $("#ssh-server-form-title").textContent = "Add a server";
-  $("#ssh-server-cancel").hidden = true;
-  showError($("#ssh-server-error"), "");
-}
-
-function editServer(s) {
-  const f = $("#ssh-server-form");
-  for (const k of ["id", "name", "target", "port", "os", "mac", "wol_address"]) f.elements[k].value = s[k] ?? "";
-  $("#ssh-server-form-title").textContent = `Edit ${s.name}`;
-  $("#ssh-server-cancel").hidden = false;
-  showError($("#ssh-server-error"), "");
-  f.scrollIntoView({ block: "nearest" });
-}
-
-// Adding a suggestion only fills the form: nothing is saved until the user presses Save.
+// Adding a suggestion opens the Server Manager's form with its address filled in.
 function suggestServer(s) {
-  resetServerForm();
-  const f = $("#ssh-server-form");
-  f.elements.target.value = s.target;
-  f.elements.port.value = s.port || "";
-  f.elements.os.value = s.ssh_os || "auto";
-  f.scrollIntoView({ block: "nearest" });
-  f.elements.name.focus();
-}
-
-async function deleteServer(s) {
-  if (!confirm(`Delete the server "${s.name}"? Projects and tunnels that use it are not changed.`)) return;
-  try { await saveServers(ssh.servers.filter(x => x.id !== s.id).map(serverSpec)); }
-  catch (e) { toast(e.message, true); }
-}
-
-async function submitServer(e) {
-  e.preventDefault();
-  const f = e.target;
-  const spec = { id: f.elements.id.value, name: f.elements.name.value.trim(), target: f.elements.target.value.trim(),
-    port: f.elements.port.value ? Number(f.elements.port.value) : null, os: f.elements.os.value,
-    mac: f.elements.mac.value.trim(), wol_address: f.elements.wol_address.value.trim() };
-  const list = ssh.servers.map(serverSpec);
-  const at = list.findIndex(s => s.id === spec.id);
-  if (at >= 0) list[at] = spec; else list.push(spec);
-  try {
-    await saveServers(list);
-    resetServerForm();
-    toast("Server saved");
-  } catch (err) { showError($("#ssh-server-error"), err.message); }
+  PG.servers.open("ssh", { target: s.target, port: s.port || null, os: s.ssh_os || "auto" });
 }
 
 async function openSshTool(tool) {
@@ -519,17 +461,6 @@ async function submitTunnel(e) {
   } catch (err) { showError($("#ssh-tunnel-error"), err.message); }
 }
 
-// The Add project dialog offers saved servers as SSH targets and fills in their port.
-function hookProjectDialog(form) {
-  loadSshServers(true);
-  if (form.dataset.sshHooked) return;
-  form.dataset.sshHooked = "1";
-  form.ssh_target.addEventListener("change", () => {
-    const server = matchServer(form.ssh_target.value);
-    if (server && server.port && !form.ssh_port.value) form.ssh_port.value = server.port;
-  });
-}
-
 PG.register({
   id: "ssh",
   setup() {
@@ -553,10 +484,13 @@ PG.register({
       const server = matchServer(e.target.value), port = $("#ssh-tunnel-form").elements.port;
       if (server && server.port && !port.value) port.value = server.port;
     });
-    $("#ssh-server-form").onsubmit = submitServer;
-    $("#ssh-server-cancel").onclick = resetServerForm;
+    $("#ssh-server-manage").onclick = () => PG.servers.open("ssh");
+    document.addEventListener("pg:servers-changed", () => {
+      ssh.loaded = false;
+      if (ssh.active) openSshTool(ssh.tool);
+      else loadSshServers(true);
+    });
     addInstallDest();
-    document.addEventListener("pg:project-dialog-open", e => hookProjectDialog(e.detail.form));
     document.addEventListener("pg:project-added", () => { ssh.loaded = false; }); // its host becomes a suggestion
     document.addEventListener("visibilitychange", () => { if (!document.hidden) loadTunnels(); });
     loadTunnels();

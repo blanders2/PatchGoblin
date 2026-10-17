@@ -92,6 +92,7 @@ DEFAULT_SETTINGS = {
     },
     "plugins": {"disabled": []},  # plugin ids switched off in the Plugins dialog
     "plugin_data": {},  # plugin id -> that plugin's saved data (see pluginkit.PluginContext)
+    "servers": [],  # the Server Manager's saved servers (see servers.py)
     "endpoints": [{
         "id": "openai",
         "name": "OpenAI",
@@ -262,6 +263,27 @@ class Registry:
             if projects:
                 self.file.save(data)
 
+    def projects_using(self, sid: str) -> list[dict]:
+        """Projects linked to the saved server ``sid``."""
+        return [p for p in self.list() if p.get("server") == sid]
+
+    def update_server_refs(self, sid: str, target: str, port: int | None, os_name: str | None) -> None:
+        """Copy a saved SSH server's address to the projects linked to it. ``os_name`` is
+        "posix"/"windows", or None for auto-detect (the stored OS is then dropped if the address changed)."""
+        with self.file.lock:
+            data = self.file.load()
+            changed = False
+            for p in data["projects"]:
+                if p.get("server") != sid:
+                    continue
+                moved = p.get("ssh_target") != target or p.get("ssh_port") != port
+                new_os = os_name or (None if moved else p.get("ssh_os"))
+                if moved or p.get("ssh_os") != new_os:
+                    p.update(ssh_target=target, ssh_port=port, ssh_os=new_os)
+                    changed = True
+            if changed:
+                self.file.save(data)
+
     def remove(self, pid: str) -> bool:
         with self.file.lock:
             data = self.file.load()
@@ -337,9 +359,57 @@ class Settings:
                 data["endpoints"] = endpoints
                 data["provider_renames"] = {**(data.get("provider_renames") or {}), **renames}
                 changed = True
+        changed = self._migrate_servers(data) or changed
         if changed:
             self.file.save(data)
         return renames
+
+    def _migrate_servers(self, data: dict) -> bool:
+        """Move the SSH tools' and LLM console's own server lists into the core ``servers`` list
+        (once, marked by ``servers_migrated``). The old lists stay where they are for a downgrade.
+        Types aren't registered yet, so the entries are copied as they are. A server whose id is
+        taken gets a suffix; every such rename is kept in ``server_renames`` ({type: {old: new}})."""
+        if data.get("servers_migrated"):
+            return False
+        plugin_data = data.get("plugin_data") if isinstance(data.get("plugin_data"), dict) else {}
+
+        def entries(value):
+            return [v for v in value if isinstance(v, dict) and isinstance(v.get("id"), str)] \
+                if isinstance(value, list) else []
+
+        def merged(*lists):  # later lists win on a repeated id (plugin data over the pre-plugin key)
+            by_id = {}
+            for lst in lists:
+                for v in entries(lst):
+                    by_id[v["id"]] = v
+            return list(by_id.values())
+
+        ssh_old = merged(data.get("ssh_servers"), (plugin_data.get("ssh") or {}).get("servers"))
+        llm_old = merged((plugin_data.get("llm") or {}).get("servers"))
+        if not ssh_old and not llm_old:
+            return False
+        ssh_keys = ("name", "target", "port", "os", "mac", "wol_address")
+        llm_keys = ("name", "kind", "base_url", "auth", "api_key", "api_key_env", "headers", "verify_tls",
+                    "timeout", "default_model")
+        servers = entries(data.get("servers"))
+        taken = {s["id"] for s in servers}
+        renames: dict = dict(data.get("server_renames") or {})
+        for stype, keys, old in (("ssh", ssh_keys, ssh_old), ("llm", llm_keys, llm_old)):
+            for item in old:
+                sid = item["id"]
+                if sid in taken:
+                    n = 2
+                    while f"{sid}-{n}" in taken:
+                        n += 1
+                    renames.setdefault(stype, {})[sid] = f"{sid}-{n}"
+                    sid = f"{sid}-{n}"
+                taken.add(sid)
+                servers.append({"id": sid, "type": stype, **{k: copy.deepcopy(item[k]) for k in keys if k in item}})
+        data["servers"] = servers
+        data["servers_migrated"] = True
+        if renames:
+            data["server_renames"] = renames
+        return True
 
     def get(self) -> dict:
         saved = self.file.load()
@@ -408,6 +478,24 @@ class Settings:
             current = data["plugin_data"].get(pid)
             data["plugin_data"][pid] = {**legacy, **(current if isinstance(current, dict) else {})}
             self.file.save(data)
+
+    def servers(self) -> list[dict]:
+        """The Server Manager's saved servers, secrets included (server-side use only)."""
+        value = self.file.load().get("servers")
+        return [dict(v) for v in value if isinstance(v, dict)] if isinstance(value, list) else []
+
+    def save_servers(self, servers: list[dict]) -> list[dict]:
+        """Replace the whole server list."""
+        with self.file.lock:
+            data = self.file.load()
+            data["servers"] = servers
+            self.file.save(data)
+        return servers
+
+    def server_renames(self, stype: str) -> dict:
+        """Ids of ``stype`` servers that changed when they were moved into the core list: {old: new}."""
+        value = (self.file.load().get("server_renames") or {}).get(stype)
+        return value if isinstance(value, dict) else {}
 
     def disabled_plugins(self) -> set[str]:
         values = (self.file.load().get("plugins") or {}).get("disabled")

@@ -424,6 +424,31 @@ versions (a single "OpenAI API" block) become an endpoint with id `openai`.
 - Cancelling a remote run closes the SSH session. Most CLIs exit when that happens, but
   check the host if one doesn't.
 
+## Server Manager
+
+The **Servers** button (the stacked-servers icon at the bottom of the activity bar) opens one
+list of saved servers shared by PatchGoblin and its plugins, grouped by type. **SSH host** is
+built in; the LLM API console adds **LLM API**. Each server has a name and the fields of its
+type; some types have a **Test connection** button. Secrets (API keys) are kept in
+`settings.json` under `servers`, like the OpenAI-compatible endpoints' keys, and are never sent
+back to the browser: leave a secret blank when editing to keep the saved one, or tick the
+remove box to clear it. Servers of a plugin that is switched off are kept but shown as
+unavailable (they can be deleted, not edited). The "OpenAI-compatible APIs" endpoints in
+Settings are separate and unchanged.
+
+In the **Add project** dialog an SSH project can pick a **Saved server**; the project then stays
+linked to it, so editing the server's host or port updates the project, and a server that
+projects use can't be deleted. Typing a host by hand still works. Servers that the SSH tools and
+the LLM console used to keep themselves are moved into this list the first time the new version
+starts (an id that clashed gets a `-2` suffix); the old copies are left in `plugin_data`.
+
+A plugin adds a server type by overriding `Plugin.server_types()` to return
+`patchgoblin.servers.ServerType` objects (an id, a label, `Field` specs and optional `clean` and
+`test` hooks); the dialog builds its form from the field specs, so no UI code is needed. A plugin
+reads and writes servers through `self.ctx.servers` (`list(type)`, `get(id)` with secrets,
+`save(spec)`, `delete(id)`), and its script can call `PG.servers.list(type)` and
+`PG.servers.open(type, prefill)` and listen for `pg:servers-changed`.
+
 ## The activity bar and plugins
 
 The narrow icon bar on the far left switches the sidebar and the main area between
@@ -490,7 +515,7 @@ PG.register({
 `PG` also offers the page helpers (`$`, `$$`, `el`, `api`, `toast`, `showError`, `withBusy`,
 `storageGet`/`storageSet`), `PG.setBadge(id, value, title)` and `PG.show(id)`. The core page
 fires `pg:project-dialog-open` and `pg:project-added` events on `document` for plugins that
-want to extend the project screens (SSH tools uses them to suggest saved servers). Keep plugin
+want to extend the project screens (the `server_types()` hook and `pg:servers-changed` event cover servers, see Server Manager). Keep plugin
 element ids prefixed with the plugin id, because every enabled plugin shares the page.
 
 ## LLM API console
@@ -499,12 +524,12 @@ A built-in plugin for testing LLM servers and seeing exactly what goes over the 
 request goes through PatchGoblin, which adds the API key and records the exchange. Keys never
 reach the browser and are masked in everything it shows.
 
-- **Servers** are added with **Add server** (or the sidebar's **+ Add server**): pick a kind
-  first (llama.cpp, llama-swap, vLLM, SGLang, Ollama, LM Studio, TGI, KoboldCpp, TabbyAPI,
-  Hermes/Nous, OpenAI, OpenRouter, Anthropic or generic OpenAI-compatible) and its usual base
-  URL is filled in (a trailing `/v1` is fine). The API key is either typed or read from an
-  environment variable; auth style, timeout, TLS checking, extra headers and the default model
-  sit under **Advanced**. **Test connection** checks the URL and key, lists the models and
+- **Servers** are kept in the Server Manager (**Add server**, the sidebar's **+ Add server** or
+  **Manage servers…** open it): pick a kind (llama.cpp, llama-swap, vLLM, SGLang, Ollama,
+  LM Studio, TGI, KoboldCpp, TabbyAPI, Hermes/Nous, OpenAI, OpenRouter, Anthropic or generic
+  OpenAI-compatible) and enter the base URL (a trailing `/v1` is fine). The API key is either
+  typed or read from an environment variable; auth style, timeout, TLS checking, extra headers
+  and the default model are further fields. **Test connection** checks the URL and key, lists the models and
   guesses the server software without saving anything. **Scan this computer** looks for
   servers on the usual local ports. PatchGoblin's own AI endpoints are offered as suggestions,
   and adding one copies its key on the server side.
@@ -601,11 +626,11 @@ and a browser shell doesn't change that.
 
 A built-in plugin with a set of SSH helpers.
 
-- **Servers** is your own list of SSH hosts (name, host, port, OS), stored in the plugin's
-  saved data. The key, install and tunnel pickers list these first. Hosts your projects use and
-  `~/.ssh/config` aliases appear as **suggestions**: **Add** only fills the form, and nothing
-  is saved until you press **Save server**. Nothing is ever added automatically. In the Add
-  project dialog, the SSH target field suggests saved servers and fills in the port.
+- **Servers** lists your SSH hosts (name, host, port, OS, optional wake-on-LAN details), which
+  are kept in the Server Manager (**Edit in Server Manager**). The key, install and tunnel
+  pickers list these first. Hosts your projects use and `~/.ssh/config` aliases appear as
+  **suggestions**: **Add** only opens the Server Manager's form filled in, and nothing is saved
+  until you press **Save server**. Nothing is ever added automatically.
 - **Keys** lists the public keys in `~/.ssh` on this computer (or on any SSH host), with a
   Copy button, and generates new ed25519, RSA (4096) or ECDSA key pairs with `ssh-keygen`.
 - **Install keys** adds chosen public keys to `authorized_keys` on one or more hosts

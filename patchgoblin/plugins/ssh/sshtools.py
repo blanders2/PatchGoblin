@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import ipaddress
 import os
 import re
 import shlex
@@ -21,6 +20,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 
+from patchgoblin.servers import normalize_mac  # noqa: F401  (kept importable from here)
 from patchgoblin.hosts import (
     _CMD_LIMIT,
     HostError,
@@ -445,53 +445,7 @@ def build_network(local_keys: list, servers: list, scans: dict) -> dict:
 
 # ---- targets -------------------------------------------------------------------------
 
-SERVER_OSES = ("auto", "posix", "windows")
-
-
-def validate_server(spec) -> dict:
-    """The cleaned saved-server spec, or ValueError."""
-    if not isinstance(spec, dict):
-        raise ValueError("A server must be an object.")
-    sid = str(spec.get("id") or "").strip()
-    if not TUNNEL_ID.match(sid):
-        raise ValueError("A server id is 1–32 lowercase letters, digits, - or _.")
-    name = str(spec.get("name") or "").strip()
-    if len(name) > 60 or any(c in name for c in "\r\n"):
-        raise ValueError("The server name must be a single line of up to 60 characters.")
-    target = str(spec.get("target") or "").strip()
-    port = spec.get("port")
-    try:
-        SSHHost(target, port if port not in (None, "") else None)
-    except HostError as exc:
-        raise ValueError(str(exc)) from None
-    except (TypeError, ValueError):
-        raise ValueError("The SSH port must be a whole number.") from None
-    ssh_port = _port(port, "SSH port") if port not in (None, "") else None
-    os_name = spec.get("os") or "auto"
-    if os_name not in SERVER_OSES:
-        raise ValueError("The server OS must be auto, posix or windows.")
-    wol_address = str(spec.get("wol_address") or "").strip()
-    if wol_address:
-        try:
-            ipaddress.IPv4Address(wol_address)
-        except ValueError:
-            raise ValueError("The wake-up address must be an IPv4 address such as 192.168.1.255.") from None
-    return {"id": sid, "name": name or target, "target": target, "port": ssh_port, "os": os_name,
-            "mac": normalize_mac(spec.get("mac")), "wol_address": wol_address}
-
-
 # ---- wake-on-lan ---------------------------------------------------------------------
-
-def normalize_mac(value) -> str:
-    """A MAC address in lowercase colon form, "" when empty, or ValueError."""
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    digits = re.sub(r"[:.\-]", "", text).lower()
-    if not re.fullmatch(r"[0-9a-f]{12}", digits):
-        raise ValueError("A MAC address is 12 hex digits, e.g. aa:bb:cc:dd:ee:ff.")
-    return ":".join(digits[i:i + 2] for i in range(0, 12, 2))
-
 
 def magic_packet(mac: str) -> bytes:
     return b"\xff" * 6 + bytes.fromhex(mac.replace(":", "")) * 16
@@ -509,33 +463,6 @@ def send_wol(mac: str, address: str = "", port: int = 9) -> None:
 
 def _server_key(target, port) -> tuple:
     return (str(target).lower(), port or None)
-
-
-def clean_servers(values, strict: bool = False) -> list[dict]:
-    """Validate saved servers. Invalid entries and repeats are dropped (an error if ``strict``)."""
-    if not isinstance(values, list):
-        if strict:
-            raise ValueError("servers must be a list.")
-        return []
-    out, seen, keys = [], set(), set()
-    for raw in values:
-        try:
-            if isinstance(raw, dict) and not str(raw.get("id") or "").strip():
-                raw = {**raw, "id": _free_id(str(raw.get("name") or raw.get("target") or "server"),
-                                             seen, values, "server")}
-            spec = validate_server(raw)
-            if spec["id"] in seen:
-                raise ValueError(f"Server id {spec['id']!r} is used twice.")
-            if _server_key(spec["target"], spec["port"]) in keys:
-                raise ValueError("That server is already saved.")
-        except ValueError:
-            if strict:
-                raise
-            continue
-        seen.add(spec["id"])
-        keys.add(_server_key(spec["target"], spec["port"]))
-        out.append(spec)
-    return out
 
 
 def server_suggestions(registry, servers) -> list[dict]:

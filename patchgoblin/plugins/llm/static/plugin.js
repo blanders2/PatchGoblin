@@ -246,9 +246,9 @@ function renderServers() {
     el("td", {}, s.api_key_saved ? "saved" : s.api_key_present ? `env ${s.api_key_env}` : s.api_key_env ? `env (unset)` : "none"),
     el("td", {}, el("div", { class: "actions" },
       el("button", { class: "small ghost", type: "button", onclick: () => { selectServer(s.id); openTool("chat"); } }, "Use"),
-      el("button", { class: "small ghost", type: "button", onclick: () => editServer(s) }, "Edit"),
+      el("button", { class: "small ghost", type: "button", onclick: () => manageServers() }, "Edit"),
       el("button", { class: "small ghost danger", type: "button", onclick: () => deleteServer(s) }, "Delete")))))
-    : [el("tr", {}, el("td", { colspan: 5, class: "muted" }, "No saved servers. Add one below, or scan this computer."))]));
+    : [el("tr", {}, el("td", { colspan: 5, class: "muted" }, "No saved servers. Add one, or scan this computer."))]));
   renderSuggestions();
 }
 
@@ -376,157 +376,30 @@ function renderCtx() {
   fill.className = pct > 90 ? "bad" : pct > 70 ? "warn" : "";
 }
 
-function serverSpec(f) {
-  const env = keyMode() === "env";
-  return { id: f.elements.id.value, name: f.elements.name.value.trim(), kind: f.elements.kind.value, base_url: f.elements.base_url.value.trim(),
-    // Only the active key input is sent; a blank key on edit keeps the saved one (the server decides).
-    api_key: env ? "" : f.elements.api_key.value, clear_key: f.elements.clear_key.checked,
-    api_key_env: env ? f.elements.api_key_env.value.trim() : "",
-    auth: f.elements.auth.value, timeout: f.elements.timeout.value ? Number(f.elements.timeout.value) : null,
-    verify_tls: f.elements.verify_tls.checked, headers: f.elements.headers.value, default_model: f.elements.default_model.value.trim(),
-    from_endpoint: f.elements.from_endpoint.value || undefined };
-}
+// Servers live in the core Server Manager; the console only lists and uses them.
+function manageServers(prefill) { PG.servers.open("llm", prefill); }
 
-const keyMode = () => $("#llm-key-mode").value;
-function setKeyMode(mode) {
-  const f = $("#llm-server-form");
-  $("#llm-key-mode").value = mode;
-  f.elements.api_key.hidden = mode === "env";
-  f.elements.api_key_env.hidden = mode !== "env";
-  $("#llm-key-hint").textContent = mode === "env" ? "Name of an environment variable PatchGoblin reads the key from." : "Leave empty for servers without a key.";
-}
-
-function showServerForm(open = true) {
-  $("#llm-server-form").hidden = !open;
-  if (open) $("#llm-server-form").scrollIntoView({ block: "nearest" });
-}
-
-function resetServerForm() {
-  const f = $("#llm-server-form");
-  f.reset();
-  f.elements.id.value = f.elements.from_endpoint.value = "";
-  $("#llm-server-form-title").textContent = "Add a server";
-  $("#llm-clear-key-label").hidden = true;
-  $("#llm-advanced").open = false;
-  f.elements.api_key.placeholder = "(none)";
-  f.elements.base_url.placeholder = (L.kinds[f.elements.kind.value] || {}).url || "";
-  setKeyMode("key");
-  kindHint();
-  showError($("#llm-server-error"), "");
-  showTest(null);
-  showServerForm(false);
-}
-
-function newServer() {
-  resetServerForm();
-  showServerForm();
-  $("#llm-kind").focus();
-}
-
-// Advanced opens when it holds anything but the defaults, so a saved setting is never hidden.
-function advancedUsed(f) {
-  const k = L.kinds[f.elements.kind.value] || {};
-  const keyed = k.auth || /^https:/.test(f.elements.base_url.value) || f.elements.api_key_env.value;
-  return f.elements.auth.value !== (k.auth || (keyed ? "bearer" : "none")) || !!f.elements.timeout.value
-    || !f.elements.verify_tls.checked || !!f.elements.headers.value.trim() || !!f.elements.default_model.value.trim();
-}
-
-function editServer(s) {
-  resetServerForm();
-  const f = $("#llm-server-form");
-  for (const k of ["id", "name", "kind", "base_url", "api_key_env", "auth", "timeout", "default_model"]) f.elements[k].value = s[k] ?? "";
-  f.elements.verify_tls.checked = s.verify_tls !== false;
-  f.elements.headers.value = Object.entries(s.headers || {}).map(([k, v]) => `${k}: ${v}`).join("\n");
-  f.elements.api_key.placeholder = s.api_key_saved ? "(saved — leave blank to keep)" : "(none)";
-  setKeyMode(s.api_key_env && !s.api_key_saved ? "env" : "key");
-  $("#llm-clear-key-label").hidden = !s.api_key_saved;
-  $("#llm-server-form-title").textContent = `Edit ${s.name}`;
-  $("#llm-advanced").open = advancedUsed(f);
-  kindHint();
-  showServerForm();
-}
-
-function kindHint() {
-  const f = $("#llm-server-form"), k = L.kinds[f.elements.kind.value] || {};
-  const port = (k.url || "").match(/:(\d+)/);
-  const needsKey = k.auth || /^https:/.test(k.url || "");
-  $("#llm-kind-hint").textContent = `${port ? `Default port ${port[1]}. ` : ""}${needsKey ? "This kind needs an API key." : "Local servers usually need no key."}`;
-}
-
-function kindChanged() {
-  const f = $("#llm-server-form"), k = L.kinds[f.elements.kind.value] || {};
-  f.elements.base_url.placeholder = k.url || "";
-  const cur = f.elements.base_url.value.trim();
-  if (!cur || Object.values(L.kinds).some(x => x.url === cur)) f.elements.base_url.value = k.url || "";
-  if (!f.elements.id.value) f.elements.auth.value = k.auth || (/^https:/.test(k.url || "") ? "bearer" : "none");
-  kindHint();
-}
-
-function showTest(content, bad = false) {
-  const box = $("#llm-server-test");
-  box.hidden = content === null;
-  box.className = `llm-test ${bad ? "bad" : "ok"}`;
-  box.replaceChildren(...(content === null ? [] : [].concat(content)));
-}
-
-async function testServer() {
-  const f = $("#llm-server-form"), btn = $("#llm-server-test-btn");
-  showError($("#llm-server-error"), "");
-  btn.disabled = true;
-  showTest("Testing…");
+async function suggestServer(r) {
+  if (!r.endpoint) { manageServers({ name: r.name || "", base_url: r.base_url, kind: L.kinds[r.kind] ? r.kind : "auto" }); return; }
+  // A PatchGoblin endpoint: its key is copied on the server, never through the browser.
   try {
-    const data = await api("POST", "/api/llm/servers/test", { server: serverSpec(f) });
-    const n = data.models.models.length, label = (L.kinds[data.detected] || {}).label || data.detected;
-    if (!n && data.models.errors.length) {
-      showTest(`✗ ${data.models.errors.join("; ")}${data.reachable.length ? "" : " — nothing answered"}`, true);
-      return;
-    }
-    const out = [`✓ ${plural(n, "model")}${data.models.sources.length ? ` (from ${data.models.sources.join(", ")})` : ""}${data.detected !== "auto" ? ` · looks like ${label}` : ""}`];
-    if (data.detected !== "auto" && f.elements.kind.value === "auto") {
-      out.push(" ", el("button", { type: "button", class: "ghost small", onclick: () => { f.elements.kind.value = data.detected; kindChanged(); } }, `Use kind ${label}`));
-    }
-    showTest(out);
-  } catch (e) { showTest(`✗ ${e.message}`, true); }
-  finally { btn.disabled = false; }
-}
-
-function suggestServer(r) {
-  resetServerForm();
-  const f = $("#llm-server-form");
-  f.elements.name.value = r.name || "";
-  f.elements.base_url.value = r.base_url;
-  f.elements.kind.value = L.kinds[r.kind] ? r.kind : "auto";
-  f.elements.auth.value = (L.kinds[f.elements.kind.value] || {}).auth || (r.endpoint ? "bearer" : "none");
-  f.elements.from_endpoint.value = r.endpoint || "";
-  if (r.endpoint) f.elements.api_key.placeholder = "(copied from the PatchGoblin endpoint)";
-  $("#llm-advanced").open = advancedUsed(f);
-  kindHint();
-  showServerForm();
-  f.elements.name.focus();
-}
-
-async function submitServer(e) {
-  e.preventDefault();
-  try {
-    const data = await api("POST", "/api/llm/servers", { server: serverSpec(e.target) });
+    const data = await api("POST", "/api/llm/servers/adopt", { server: { name: r.name, base_url: r.base_url, kind: "auto",
+      auth: "bearer", from_endpoint: r.endpoint } });
     L.servers = data.servers;
     L.suggestions = data.suggestions;
-    delete L.models[data.saved];
-    for (const k of Object.keys(L.info)) if (k.startsWith(`${data.saved}\t`)) delete L.info[k];
-    resetServerForm();
     toast("Server saved");
     L.sid = "";
     await selectServer(data.saved);
-  } catch (err) { showError($("#llm-server-error"), err.message); }
+  } catch (err) { toast(err.message, true); }
 }
 
 async function deleteServer(s) {
   if (!confirm(`Delete the server "${s.name}" (and its saved key)?`)) return;
   try {
-    const data = await api("DELETE", `/api/llm/servers/${s.id}`);
-    L.servers = data.servers;
-    L.suggestions = data.suggestions;
-    if (L.sid === s.id) { L.sid = ""; if (L.servers[0]) await selectServer(L.servers[0].id); }
+    await api("DELETE", `/api/servers/${encodeURIComponent(s.id)}`);
+    await loadServers();
+    if (L.sid && !L.servers.some(x => x.id === L.sid)) L.sid = "";
+    if (!L.sid && L.servers[0]) await selectServer(L.servers[0].id);
     renderServers();
   } catch (err) { toast(err.message, true); }
 }
@@ -1102,8 +975,8 @@ async function runProbe() {
 async function setKind(kind) {
   const s = server();
   try {
-    const data = await api("POST", "/api/llm/servers", { server: { ...s, kind, headers: s.headers } });
-    L.servers = data.servers;
+    await api("POST", "/api/servers", { server: { ...s, kind } });
+    await loadServers();
     delete L.models[s.id];
     renderServers();
     $("#llm-flavor").value = (L.kinds[kind] || {}).flavor || "chat";
@@ -1249,26 +1122,30 @@ PG.register({
       $("#llm-http-body").value = r.request_body ? pretty(r.request_body) : "";
       openTool("http");
     };
-    $("#llm-server-form").onsubmit = submitServer;
-    $("#llm-server-cancel").onclick = resetServerForm;
-    $("#llm-server-new").onclick = newServer;
-    $("#llm-server-test-btn").onclick = testServer;
-    $("#llm-key-mode").onchange = e => setKeyMode(e.target.value);
-    const addServer = () => { openTool("servers"); newServer(); };
+    $("#llm-server-new").onclick = () => manageServers({});
+    $("#llm-server-manage").onclick = () => manageServers();
+    document.addEventListener("pg:servers-changed", async e => {
+      const id = e.detail && e.detail.id;
+      if (id) {
+        delete L.models[id];
+        for (const k of Object.keys(L.info)) if (k.startsWith(`${id}\t`)) delete L.info[k];
+      }
+      await loadServers();
+      if (L.sid && !L.models[L.sid]) selectServer(L.sid);
+    });
+    const addServer = () => { openTool("servers"); manageServers({}); };
     $("#llm-server-add").onclick = addServer;
     $("#llm-server-add").onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); addServer(); } };
     $("#llm-scan").onclick = scanLocal;
-    $("#llm-kind").onchange = kindChanged;
     selectTab(load("tab", "request"));
     try {
       const meta = await api("GET", "/api/llm/meta");
       L.kinds = meta.kinds;
       L.probes = meta.probes;
+      // Servers moved into the Server Manager may have a new id (a clash with an SSH server's).
+      const moved = meta.renames && meta.renames[load("sid", "")];
+      if (moved) store("sid", moved);
     } catch (e) { toast(e.message, true); }
-    $("#llm-kind").replaceChildren(...Object.entries(L.kinds).map(([id, k]) => el("option", { value: id }, k.label)));
-    $("#llm-url-presets").replaceChildren(...[...new Set(Object.values(L.kinds).map(k => k.url))].map(u => el("option", { value: u })));
-    $("#llm-server-form").elements.auth.value = "none";
-    kindHint();
     updatePaths();
     renderMessages();
     await loadServers();

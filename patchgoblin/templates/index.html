@@ -68,6 +68,9 @@
       {% endfor %}
     </div>
     <div class="activity-foot">
+      <button type="button" class="activity-btn" id="servers-btn" title="Servers" aria-label="Servers">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="7" rx="1.5"/><rect x="3" y="14" width="18" height="7" rx="1.5"/><line x1="7" y1="6.5" x2="7.01" y2="6.5"/><line x1="7" y1="17.5" x2="7.01" y2="17.5"/></svg>
+      </button>
       <button type="button" class="activity-btn" id="plugins-btn" title="Plugins" aria-label="Plugins">
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6v3a2 2 0 1 0 4 0V3h0a2 2 0 0 1 2 2v4h-3a2 2 0 1 0 0 4h3v6a2 2 0 0 1-2 2h-4v-3a2 2 0 1 0-4 0v3H5a2 2 0 0 1-2-2v-4h3a2 2 0 1 0 0-4H3V5a2 2 0 0 1 2-2z"/></svg>
       </button>
@@ -421,6 +424,7 @@
       <label><input type="radio" name="location" value="ssh"> SSH host</label>
     </div>
     <div class="ssh-only row" hidden>
+      <label>Saved server <select name="server" id="pf-server"><option value="">Type a host →</option></select></label>
       <label class="grow">SSH target <input name="ssh_target" list="pf-ssh-servers" autocomplete="off" placeholder="user@host or ssh-config alias"></label>
       <datalist id="pf-ssh-servers"></datalist>
       <label>Port <input name="ssh_port" type="number" min="1" max="65535" placeholder="22" size="5"></label>
@@ -521,6 +525,29 @@
   <div id="plugins-error" class="error" hidden></div>
   <div class="actions right">
     <button type="button" class="ghost" data-close="plugins-dialog">Close</button>
+  </div>
+</dialog>
+
+<!-- Server Manager dialog: the form is built from the server type's field specs -->
+<dialog id="servers-dialog" class="wide">
+  <h2>Servers</h2>
+  <p class="muted small">Saved servers shared by PatchGoblin and its plugins. Secrets such as API keys are kept in
+    PatchGoblin's settings file and never sent back to the browser.</p>
+  <div id="servers-list" class="servers-list"></div>
+  <form id="servers-form" class="servers-form" autocomplete="off" hidden>
+    <h3 id="servers-form-title"></h3>
+    <div id="servers-fields" class="servers-fields"></div>
+    <div id="servers-test" class="small" hidden></div>
+    <div id="servers-error" class="error" hidden></div>
+    <div class="actions right">
+      <button type="button" class="ghost" id="servers-cancel">Cancel</button>
+      <button type="button" class="ghost" id="servers-test-btn" hidden>Test connection</button>
+      <button type="submit">Save server</button>
+    </div>
+  </form>
+  <div id="servers-list-error" class="error" hidden></div>
+  <div class="actions right">
+    <button type="button" class="ghost" data-close="servers-dialog">Close</button>
   </div>
 </dialog>
 

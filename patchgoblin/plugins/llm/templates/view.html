@@ -178,44 +178,7 @@
       <thead><tr><th>Suggested</th><th>From</th><th style="width:5em"></th></tr></thead>
       <tbody id="llm-suggest-rows"></tbody>
     </table>
-    <form id="llm-server-form" class="llm-card" autocomplete="off" hidden>
-      <fieldset>
-        <legend id="llm-server-form-title">Add a server</legend>
-        <input type="hidden" name="id"><input type="hidden" name="from_endpoint">
-        <label>Kind <select name="kind" id="llm-kind"></select>
-          <span class="llm-hint" id="llm-kind-hint">Picking a kind fills in its usual address.</span></label>
-        <label class="llm-grow">Base URL <input name="base_url" required list="llm-url-presets" placeholder="http://127.0.0.1:8080">
-          <span class="llm-hint">Server root, e.g. http://127.0.0.1:8080; a trailing /v1 or pasted endpoint path is removed.</span></label>
-        <datalist id="llm-url-presets"></datalist>
-        <label>Name <input name="name" placeholder="defaults to host:port">
-          <span class="llm-hint">Shown in the server list.</span></label>
-        <div class="llm-key">
-          <label>API key
-            <span class="llm-inline"><select id="llm-key-mode" aria-label="Where the key comes from">
-              <option value="key">Key</option><option value="env">Environment variable</option></select>
-              <input name="api_key" type="password" placeholder="(none)" autocomplete="new-password">
-              <input name="api_key_env" placeholder="OPENROUTER_API_KEY" hidden></span>
-            <span class="llm-hint" id="llm-key-hint">Leave empty for servers without a key.</span></label>
-          <label class="check small" id="llm-clear-key-label" hidden><input type="checkbox" name="clear_key"> Remove saved key</label>
-        </div>
-        <details class="llm-advanced" id="llm-advanced"><summary>Advanced</summary>
-          <div class="llm-row">
-            <label>Auth header <select name="auth"><option value="bearer">Authorization: Bearer</option><option value="x-api-key">x-api-key</option><option value="none">none</option></select></label>
-            <label>Timeout (s) <input name="timeout" type="number" min="5" max="3600" placeholder="600" class="llm-num"></label>
-            <label class="check"><input type="checkbox" name="verify_tls" checked> Verify TLS</label>
-            <label>Default model <input name="default_model" placeholder="(first listed)"></label>
-          </div>
-          <label>Extra headers <textarea name="headers" rows="2" class="mono" placeholder="HTTP-Referer: https://example.com"></textarea></label>
-        </details>
-        <div class="llm-row">
-          <span class="muted small">Keys are kept in PatchGoblin's settings file and never sent to the browser.</span>
-          <span class="actions"><button type="button" class="ghost" id="llm-server-cancel">Cancel</button>
-            <button type="button" class="ghost" id="llm-server-test-btn">Test connection</button>
-            <button type="submit">Save server</button></span>
-        </div>
-        <div id="llm-server-test" class="llm-test" hidden></div>
-        <div id="llm-server-error" class="error" hidden></div>
-      </fieldset>
-    </form>
+    <p class="muted small">Servers are saved in the Server Manager and shared with the rest of PatchGoblin. Keys are kept in PatchGoblin's settings file and never sent to the browser.
+      <button type="button" class="ghost small" id="llm-server-manage">Manage servers…</button></p>
   </div>
 </div>

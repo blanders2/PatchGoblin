@@ -18,7 +18,8 @@ from . import cline, gitops, opencode, svnops
 from .engine import Engine
 from .hosts import HostError, host_for, open_terminal, open_vscode, probe, terminal_color
 from .openai_agent import endpoint_key, list_models, valid_base_url, valid_header
-from .pluginkit import PluginManager
+from . import servers as servermod
+from .pluginkit import PluginManager, ServerHandle
 from .prompts import IMAGE_MIME, plan_questions
 from .store import (
     ATTACHMENT_NAME,
@@ -240,6 +241,7 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     store = TaskStore(settings.get()["provider_renames"])
     engine = Engine(registry, store, settings)
     plugins = PluginManager(app, registry, settings, data_dir)
+    server_store = ServerHandle(settings, plugins.types)
     atexit.register(plugins.stop_all)
     app.config.update(REGISTRY=registry, SETTINGS=settings, STORE=store, ENGINE=engine, PLUGINS=plugins)
 
@@ -317,7 +319,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             endpoints.append({**ep, "api_key": "", "api_key_saved": bool(ep["api_key"].strip()),
                               "api_key_env_present": bool(env and os.environ.get(env))})
         automation = {k: v for k, v in (values.get("automation") or {}).items() if k in AUTO_MODES}
-        values = {k: v for k, v in values.items() if k not in ("plugins", "plugin_data")}  # plugins serve their own
+        values = {k: v for k, v in values.items()
+                  if k not in ("plugins", "plugin_data", "servers", "servers_migrated", "server_renames")}  # served separately
         return {**values, "automation": automation, "endpoints": endpoints, "providers": provider_choices(values),
                 "models": model_suggestions(values)}
 
@@ -477,6 +480,12 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
         provider = data.get("provider") or "claude"
         require_provider(provider, f" {provider}")
         location = data.get("location") or "local"
+        saved = None
+        if location == "ssh" and data.get("server"):
+            saved = server_store.get(str(data["server"]))
+            if saved is None or saved.get("type") != "ssh":
+                raise ValueError("Unknown SSH server.")
+            data = {**data, "ssh_target": saved["target"], "ssh_port": saved.get("port")}
         fields = {
             "name": (data.get("name") or "").strip(),
             "location": location,
@@ -485,6 +494,10 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             "provider": provider,
             **{k: model_name(data.get(k)) for k in PROJECT_MODEL_KEYS},
         }
+        if saved is not None:
+            fields["server"] = saved["id"]
+            if saved.get("os") in ("posix", "windows"):
+                fields["ssh_os"] = saved["os"]
         return fields
 
     @app.post("/api/browse")
@@ -986,6 +999,68 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
             abort(404)
         return Response(data, mimetype=IMAGE_MIME[name.rsplit(".", 1)[1]],
                         headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=3600"})
+
+    # ---- servers (the Server Manager; types come from the core and from plugins) --------------
+    def server_view(server: dict) -> dict:
+        stype = plugins.types.get(server.get("type"))
+        usable = stype is not None and (not stype.owner or plugins.enabled(stype.owner))
+        return {**servermod.public_server(server, stype), "usable": usable}
+
+    def usable_type(type_id) -> servermod.ServerType:
+        stype = plugins.types.get(str(type_id or ""))
+        if stype is None or (stype.owner and not plugins.enabled(stype.owner)):
+            raise ValueError(f"The server type {type_id!r} is not available.")
+        return stype
+
+    @app.get("/api/server-types")
+    def get_server_types():
+        return jsonify(types=plugins.type_view())
+
+    @app.get("/api/servers")
+    def get_servers():
+        kind = request.args.get("type")
+        return jsonify(servers=[server_view(s) for s in server_store.list(kind or None)])
+
+    @app.post("/api/servers")
+    def save_server():
+        spec = body().get("server")
+        if not isinstance(spec, dict):
+            raise ValueError("server must be an object.")
+        usable_type(spec.get("type"))
+        server = server_store.save(spec)
+        if server["type"] == "ssh":
+            registry.update_server_refs(server["id"], server["target"], server.get("port"),
+                                        server["os"] if server.get("os") in ("posix", "windows") else None)
+        return jsonify(saved=server["id"], server=server_view(server))
+
+    @app.delete("/api/servers/<sid>")
+    def delete_server(sid):
+        if server_store.get(sid) is None:
+            abort(404)
+        using = registry.projects_using(sid)
+        if using:
+            raise ValueError("Projects use this server: " + ", ".join(p["name"] for p in using)
+                             + ". Remove them first.")
+        server_store.delete(sid)
+        return jsonify(deleted=sid)
+
+    @app.post("/api/servers/test")
+    def test_server():
+        """Check a server as typed in the form. Nothing is saved and no secret comes back."""
+        spec = body().get("server")
+        if not isinstance(spec, dict):
+            raise ValueError("server must be an object.")
+        stype = usable_type(spec.get("type"))
+        if stype.test is None:
+            raise ValueError(f"{stype.label} servers have no connection test.")
+        server = servermod.clean_server(spec, server_store.list(), plugins.types)
+        result = stype.test(server) or {}
+        text = json.dumps(result)
+        for f in stype.fields:
+            secret = str(server.get(f.key) or "") if f.secret else ""
+            if secret and secret in text:
+                text = text.replace(secret, "…")
+        return jsonify(ok=True, **json.loads(text))
 
     # ---- plugins (their own routes live under /api/<plugin id>/, see pluginkit) ------------
     @app.get("/api/plugins")

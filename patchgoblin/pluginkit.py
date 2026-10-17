@@ -14,6 +14,13 @@ Built-in plugins live in ``patchgoblin/plugins/``; drop extra ones into ``<data 
 routes under ``/api/<id>/``, its files under ``/plugins/<id>/`` and its own saved data. Plugins
 are switched on and off in the Plugins dialog; a disabled plugin is stopped, its routes answer
 404 and the page leaves it out.
+
+Servers: the Server Manager (see servers.py) keeps one saved list of servers. A plugin adds a
+server type by overriding ``Plugin.server_types()`` to return ``servers.ServerType`` objects (an
+id, a label, ``Field`` specs and optional ``clean`` / ``test`` hooks); the Server Manager builds
+its form from the field specs. Plugins read and write servers through ``ctx.servers``:
+``list(type)``, ``get(id)`` (secrets included, for server-side use only), ``save(spec)`` and
+``delete(id)``. Servers of a disabled plugin's type are kept and shown as unavailable.
 """
 from __future__ import annotations
 
@@ -29,12 +36,49 @@ from dataclasses import dataclass, field
 from flask import Blueprint, Flask, abort, request, send_from_directory
 from jinja2 import ChoiceLoader, FileSystemLoader, PrefixLoader
 
+from . import servers as servermod
+
 log = logging.getLogger(__name__)
 
 PLUGIN_ID = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 # /api/<id> must not shadow the core API.
-RESERVED_IDS = {"projects", "settings", "endpoints", "browse", "plugins", "static", "api"}
+RESERVED_IDS = {"projects", "settings", "endpoints", "browse", "plugins", "static", "api", "servers", "server-types"}
 BUILTIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
+
+
+class ServerHandle:
+    """A plugin's view of the saved servers (``ctx.servers``). Writes are validated by the server
+    type; reads include secrets, so never pass them to the browser (use ``servers.public_server``)."""
+
+    def __init__(self, settings, types: dict):
+        self.settings, self.types = settings, types
+
+    def list(self, type: str | None = None) -> list[dict]:
+        return [s for s in servermod.clean_servers(self.settings.servers()) if type is None or s.get("type") == type]
+
+    def get(self, sid: str) -> dict | None:
+        return next((s for s in self.list() if s["id"] == sid), None)
+
+    def save(self, spec: dict) -> dict:
+        """Create or update (by ``spec["id"]``) a server; returns the cleaned server. Raises ValueError."""
+        with self.settings.file.lock:
+            saved = self.settings.servers()
+            server = servermod.clean_server(spec, saved, self.types)
+            at = next((i for i, s in enumerate(saved) if s.get("id") == server["id"]), None)
+            if at is None:
+                saved.append(server)
+            else:
+                saved[at] = server
+            self.settings.save_servers(saved)
+        return server
+
+    def delete(self, sid: str) -> bool:
+        with self.settings.file.lock:
+            saved = self.settings.servers()
+            kept = [s for s in saved if s.get("id") != sid]
+            if len(kept) != len(saved):
+                self.settings.save_servers(kept)
+            return len(kept) != len(saved)
 
 
 @dataclass
@@ -45,6 +89,7 @@ class PluginContext:
     registry: object  # store.Registry: the projects
     settings: object  # store.Settings
     data_dir: str
+    servers: ServerHandle | None = None  # the saved servers (see servers.py)
 
     def load(self) -> dict:
         """This plugin's saved data (a dict, empty at first)."""
@@ -68,6 +113,10 @@ class Plugin:
 
     def __init__(self, ctx: PluginContext):
         self.ctx = ctx
+
+    def server_types(self) -> list:
+        """Server types this plugin adds to the Server Manager (``servers.ServerType`` objects)."""
+        return []
 
     def routes(self, bp: Blueprint) -> None:
         """Add API routes to ``bp`` (mounted at /api/<id>). Called once, enabled or not."""
@@ -126,6 +175,7 @@ class PluginManager:
         self.dirs = plugin_dirs(data_dir) if dirs is None else dirs
         self.user_dir = os.path.join(data_dir, "plugins")
         self.items: list[Loaded] = []
+        self.types: dict = servermod.core_types()  # server type id -> ServerType, plugins' included
         self._discover()
         self._wire()
 
@@ -154,7 +204,17 @@ class PluginManager:
                     if pid in seen:
                         raise ValueError(f"Another plugin already uses the id {pid!r}.")
                     seen.add(pid)
-                    item.plugin = cls(PluginContext(pid, self.app, self.registry, self.settings, self.data_dir))
+                    item.plugin = cls(PluginContext(pid, self.app, self.registry, self.settings, self.data_dir,
+                                                    ServerHandle(self.settings, self.types)))
+                    added: list[str] = []
+                    try:
+                        for stype in item.plugin.server_types():
+                            servermod.register_type(self.types, stype, pid)
+                            added.append(stype.id)
+                    except Exception:
+                        for type_id in added:
+                            servermod.unregister_type(self.types, type_id)
+                        raise
                 except Exception as exc:
                     item.error = f"{type(exc).__name__}: {exc}"
                     log.warning("Plugin %s failed to load:\n%s", folder, traceback.format_exc())
@@ -274,6 +334,10 @@ class PluginManager:
                           "sidebar": i.templates.get("sidebar"), "view": i.templates.get("view"),
                           "scripts": urls(i.plugin.scripts, "js"), "styles": urls(i.plugin.styles, "css")})
         return views
+
+    def type_view(self) -> list[dict]:
+        """Every server type for the Server Manager; ``available`` once its plugin is enabled."""
+        return [t.view(not t.owner or self.enabled(t.owner)) for t in self.types.values()]
 
     def list_view(self) -> dict:
         """Every discovered plugin for the Plugins dialog, including broken ones."""

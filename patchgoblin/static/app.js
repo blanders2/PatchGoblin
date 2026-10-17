@@ -1721,6 +1721,20 @@ function setupFolderBrowser(form) {
   };
 }
 
+// The saved SSH servers the Add project dialog offers (a "Saved server" picker and the target suggestions).
+let savedSsh = [];
+
+async function loadSavedSshServers() {
+  try { savedSsh = (await PG.servers.list("ssh")).filter(s => s.usable); }
+  catch { savedSsh = []; }
+  const form = $("#project-form");
+  const keep = form.server.value;
+  form.server.replaceChildren(el("option", { value: "" }, "Type a host →"),
+    ...savedSsh.map(s => el("option", { value: s.id }, s.name === s.target ? s.target : `${s.name} (${s.target})`)));
+  if (savedSsh.some(s => s.id === keep)) form.server.value = keep;
+  $("#pf-ssh-servers").replaceChildren(...savedSsh.map(s => el("option", { value: s.target }, s.port ? `port ${s.port}` : "")));
+}
+
 function setupProjectDialog() {
   const dialog = $("#project-dialog");
   const form = $("#project-form");
@@ -1731,6 +1745,7 @@ function setupProjectDialog() {
   };
   const open = () => {
     form.reset();
+    loadSavedSshServers();
     syncGitWarning();
     for (const select of [form.plan_model, form.code_model]) {
       fillModelSelectLive(select, form.provider.value, "", () => dialog.open, "Global default");
@@ -1762,6 +1777,21 @@ function setupProjectDialog() {
   for (const select of [form.plan_model, form.code_model]) {
     select.onchange = () => pickModel(select, form.provider.value);
   }
+  form.server.onchange = () => {
+    const saved = savedSsh.find(s => s.id === form.server.value);
+    if (saved) {
+      form.ssh_target.value = saved.target;
+      form.ssh_port.value = saved.port || "";
+      resetBrowser();
+    }
+  };
+  // Typing a different host unlinks the project from the saved server.
+  const unlink = () => {
+    const saved = savedSsh.find(s => s.id === form.server.value);
+    if (saved && (saved.target !== form.ssh_target.value.trim() || String(saved.port || "") !== form.ssh_port.value)) form.server.value = "";
+  };
+  form.ssh_target.addEventListener("input", unlink);
+  form.ssh_port.addEventListener("input", unlink);
   form.ssh_target.addEventListener("change", resetBrowser);
   form.ssh_port.addEventListener("change", resetBrowser);
   form.onsubmit = async ev => {
@@ -2123,6 +2153,174 @@ function setupGlobalKeys() {
   window.addEventListener("beforeunload", e => { if (state.dirty || state.settingsDirty) e.preventDefault(); });
 }
 
+/* ---------------- Server Manager ---------------- */
+// Saved servers (see servers.py). The form is built from each server type's field specs, so a plugin's
+// type needs no UI code. Plugins use PG.servers: list(type), open(type, prefill) and the
+// "pg:servers-changed" event.
+
+const serverMgr = { types: [], servers: [], form: null };
+
+const serverApi = {
+  async list(type) { return (await api("GET", "/api/servers" + (type ? `?type=${encodeURIComponent(type)}` : ""))).servers; },
+};
+
+const headerLines = v => (v && typeof v === "object")
+  ? Object.entries(v).map(([k, x]) => `${k}: ${x}`).join("\n") : (v ?? "");
+
+function serverSummary(server, stype) {
+  const f = stype && stype.fields.find(x => !x.secret && x.kind === "text" && server[x.key]);
+  return f ? String(server[f.key]) : "";
+}
+
+async function loadServerManager() {
+  try {
+    [serverMgr.types, serverMgr.servers] = await Promise.all([
+      api("GET", "/api/server-types").then(d => d.types), serverApi.list()]);
+  } catch (e) { showError($("#servers-list-error"), e.message); }
+  renderServerList();
+}
+
+function renderServerList() {
+  const known = new Set(serverMgr.types.map(t => t.id));
+  const groups = serverMgr.types.filter(t => t.available || serverMgr.servers.some(s => s.type === t.id)).map(t => ({
+    id: t.id, label: t.label, type: t, servers: serverMgr.servers.filter(s => s.type === t.id) }));
+  const orphans = serverMgr.servers.filter(s => !known.has(s.type));
+  if (orphans.length) groups.push({ id: "?", label: "Other", type: null, servers: orphans });
+  if (serverMgr.first) groups.sort((a, b) => (b.id === serverMgr.first) - (a.id === serverMgr.first));
+  $("#servers-list").replaceChildren(...groups.map(g => el("div", {},
+    el("div", { class: "servers-group-head" }, el("h3", {}, g.label),
+      g.type && g.type.available ? el("button", { type: "button", class: "small ghost", onclick: () => editServer(g.type, null) }, "+ Add") : null),
+    el("ul", { class: "servers-rows" }, ...(g.servers.length ? g.servers.map(s => {
+      const ok = s.usable;
+      return el("li", { class: ok ? "" : "unavailable" },
+        el("strong", {}, s.name), el("span", { class: "grow muted small mono" }, serverSummary(s, g.type)),
+        ok ? null : el("span", { class: "muted small" }, "unavailable"),
+        ok ? el("button", { type: "button", class: "small ghost", onclick: () => editServer(g.type, s) }, "Edit") : null,
+        el("button", { type: "button", class: "small ghost danger", onclick: () => removeServer(s) }, "Delete"));
+    }) : [el("li", { class: "muted" }, "No servers yet.")])))));
+}
+
+function serverInput(f, value, saved) {
+  const name = `f_${f.key}`;
+  if (f.kind === "checkbox") {
+    const box = el("input", { type: "checkbox", name });
+    box.checked = value ?? !!f.default;
+    return [el("label", { class: "check" }, box, f.label)];
+  }
+  let input;
+  if (f.kind === "select") {
+    input = el("select", { name }, ...f.options.map(o => el("option", { value: o.value }, o.label)));
+    input.value = value ?? f.default ?? "";
+  } else if (f.kind === "textarea") {
+    input = el("textarea", { name, rows: 3, placeholder: f.placeholder });
+    input.value = headerLines(value);
+  } else {
+    input = el("input", { name, type: f.kind === "password" || f.secret ? "password" : f.kind === "number" ? "number" : "text",
+      placeholder: f.secret && saved ? "(saved — leave blank to keep)" : f.placeholder, autocomplete: f.secret ? "new-password" : "off" });
+    if (!f.secret) input.value = value ?? f.default ?? "";
+    if (f.required) input.required = true;
+  }
+  const out = [el("label", {}, f.label, input)];
+  if (f.secret && saved) out.push(el("label", { class: "check small" }, el("input", { type: "checkbox", name: `clear_${f.key}` }), "Remove the saved value"));
+  if (f.help) out.push(el("div", { class: "hint" }, f.help));
+  return out;
+}
+
+// Builds the add/edit form for a server type. `server` is the saved (public) server being edited,
+// null for a new one; `prefill` supplies starting values for a new one.
+function renderServerForm(stype, server, prefill = {}) {
+  serverMgr.form = { type: stype, id: server ? server.id : "" };
+  const src = server || prefill;
+  const nameInput = el("input", { name: "name", placeholder: "defaults to the host or address" });
+  nameInput.value = src.name || "";
+  const nodes = [el("label", {}, "Name", nameInput)];
+  for (const f of stype.fields) nodes.push(...serverInput(f, src[f.key], !!(server && server[`${f.key}_saved`])));
+  $("#servers-fields").replaceChildren(...nodes);
+  $("#servers-form-title").textContent = server ? `Edit ${server.name}` : `Add ${stype.label}`;
+  $("#servers-test-btn").hidden = !stype.testable;
+  showServerTest(null);
+  showError($("#servers-error"), "");
+  $("#servers-form").hidden = false;
+  $("#servers-form").scrollIntoView({ block: "nearest" });
+}
+
+function readServerForm() {
+  const form = $("#servers-form"), { type, id } = serverMgr.form;
+  const spec = { id, type: type.id, name: form.elements.name.value.trim() };
+  for (const f of type.fields) {
+    const input = form.elements[`f_${f.key}`];
+    if (f.kind === "checkbox") spec[f.key] = input.checked;
+    else if (f.kind === "number") spec[f.key] = input.value === "" ? null : Number(input.value);
+    else spec[f.key] = input.value;
+    if (f.secret) spec[`clear_${f.key}`] = !!(form.elements[`clear_${f.key}`] || {}).checked;
+  }
+  return spec;
+}
+
+function editServer(stype, server, prefill) {
+  if (stype) renderServerForm(stype, server, prefill || {});
+}
+
+function showServerTest(text, bad = false) {
+  const box = $("#servers-test");
+  box.hidden = text === null;
+  box.className = `small ${bad ? "bad" : "ok"}`;
+  box.textContent = text || "";
+}
+
+async function testServerForm() {
+  const btn = $("#servers-test-btn");
+  btn.disabled = true;
+  showServerTest("Testing…");
+  try {
+    const res = await api("POST", "/api/servers/test", { server: readServerForm() });
+    showServerTest(res.message || "✓ OK");
+  } catch (e) { showServerTest(`✗ ${e.message}`, true); }
+  finally { btn.disabled = false; }
+}
+
+async function submitServerForm(ev) {
+  ev.preventDefault();
+  try {
+    const res = await api("POST", "/api/servers", { server: readServerForm() });
+    $("#servers-form").hidden = true;
+    serverMgr.form = null;
+    await loadServerManager();
+    document.dispatchEvent(new CustomEvent("pg:servers-changed", { detail: { id: res.saved, type: res.server.type } }));
+    toast("Server saved");
+  } catch (e) { showError($("#servers-error"), e.message); }
+}
+
+async function removeServer(server) {
+  if (!confirm(`Delete the server "${server.name}" (and its saved secrets)?`)) return;
+  try {
+    await api("DELETE", `/api/servers/${encodeURIComponent(server.id)}`);
+    showError($("#servers-list-error"), "");
+    await loadServerManager();
+    document.dispatchEvent(new CustomEvent("pg:servers-changed", { detail: { id: server.id, type: server.type, deleted: true } }));
+  } catch (e) { showError($("#servers-list-error"), e.message); }
+}
+
+// Opens the manager. With `type` that type's servers are listed first; with `type` and `prefill`
+// (an object of field values) the Add form for it opens as well.
+async function openServerManager(type, prefill) {
+  serverMgr.first = type || "";
+  $("#servers-form").hidden = true;
+  serverMgr.form = null;
+  showError($("#servers-list-error"), "");
+  $("#servers-dialog").showModal();
+  await loadServerManager();
+  const stype = serverMgr.types.find(t => t.id === type && t.available);
+  if (stype && prefill) editServer(stype, null, prefill);
+}
+
+function setupServersDialog() {
+  $("#servers-btn").onclick = () => openServerManager();
+  $("#servers-form").onsubmit = submitServerForm;
+  $("#servers-cancel").onclick = () => { $("#servers-form").hidden = true; serverMgr.form = null; };
+  $("#servers-test-btn").onclick = testServerForm;
+}
+
 // ---- activity bar and plugins ----------------------------------------------------------
 // The activity bar switches the sidebar pane and the main area between Projects and each enabled
 // plugin (see pluginkit.py). Switching only hides the project UI (body.plugin-mode, see app.css):
@@ -2163,6 +2361,9 @@ window.PG = {
   },
   show: id => setMode(id),
   current: () => state.mode,
+  // Saved servers: list(type?) → public servers (secrets are never sent); open(type?, prefill?) opens the
+  // Server Manager. Changes fire "pg:servers-changed" on document ({ id, type, deleted? }).
+  servers: { list: serverApi.list, open: openServerManager },
 };
 
 function setMode(mode, save = true) {
@@ -2298,6 +2499,7 @@ function init() {
   setupGlobalKeys();
   setupActivityBar();
   setupPluginsDialog();
+  setupServersDialog();
   loadAutomation();
   $("#new-task").onsubmit = createTask;
   $("#commits-btn").onclick = showCommits;

@@ -11,6 +11,7 @@ from collections import deque
 from flask import Response, abort, jsonify, request, stream_with_context
 
 from patchgoblin.pluginkit import Plugin
+from patchgoblin.servers import Field, ServerType
 
 from . import llmapi
 
@@ -47,18 +48,57 @@ class LlmPlugin(Plugin):
             for event in self.cancels.values():
                 event.set()
 
-    # ---- saved servers -----------------------------------------------------------
+    # ---- saved servers (kept by the core Server Manager as type "llm") -----------------------
+    def server_types(self) -> list:
+        return [ServerType(
+            id="llm", label="LLM API",
+            fields=[
+                Field("kind", "Kind", kind="select", default="auto",
+                      options=[(k, v["label"]) for k, v in llmapi.KINDS.items()],
+                      help="Picking a kind does not change the address: use the kind's usual one, e.g. http://127.0.0.1:8080."),
+                Field("base_url", "Base URL", required=True, placeholder="http://127.0.0.1:8080",
+                      help="Server root; a trailing /v1 or pasted endpoint path is removed."),
+                Field("api_key", "API key", kind="password", secret=True, help="Leave empty for servers without a key."),
+                Field("api_key_env", "…or environment variable holding the key", placeholder="OPENROUTER_API_KEY"),
+                Field("auth", "Auth header", kind="select", default="",
+                      options=[("", "By kind"), ("bearer", "Authorization: Bearer"), ("x-api-key", "x-api-key"),
+                               ("none", "none")]),
+                Field("timeout", "Timeout (s)", kind="number", placeholder="600"),
+                Field("verify_tls", "Verify TLS", kind="checkbox", default=True),
+                Field("headers", "Extra headers", kind="textarea", placeholder="HTTP-Referer: https://example.com",
+                      help="One Name: value per line."),
+                Field("default_model", "Default model", placeholder="(first listed)"),
+            ],
+            clean=self.clean_llm, test=self.test_llm)]
+
+    @staticmethod
+    def clean_llm(values: dict, old: dict | None) -> dict:
+        server = llmapi.clean_server(values, [])
+        server.pop("id")  # the Server Manager assigns it
+        return server
+
+    @staticmethod
+    def test_llm(server: dict) -> dict:
+        """Check a server as typed in the form (nothing is saved, and the key never comes back)."""
+        found = llmapi.probe(server)
+        models = llmapi.list_models(server)
+        reachable = [r["path"] for r in found["results"] if 200 <= (r["status"] or 0) < 300]
+        n = len(models["models"])
+        if not n and models["errors"]:
+            raise ValueError("; ".join(models["errors"]) + ("" if reachable else " — nothing answered"))
+        sources = f" (from {', '.join(models['sources'])})" if models["sources"] else ""
+        label = llmapi.KINDS.get(found["detected"], {}).get("label", found["detected"])
+        looks = f" · looks like {label}" if found["detected"] != "auto" else ""
+        return {"message": f"✓ {n} model{'' if n == 1 else 's'}{sources}{looks}", "detected": found["detected"]}
+
     def servers(self) -> list[dict]:
-        return llmapi.clean_servers(self.ctx.load().get("servers"))
+        return self.ctx.servers.list("llm")
 
     def server(self, sid: str) -> dict:
         found = next((s for s in self.servers() if s["id"] == sid), None)
         if found is None:
             abort(404)
         return found
-
-    def save_servers(self, servers: list[dict]) -> None:
-        self.ctx.save({**self.ctx.load(), "servers": servers})
 
     def suggestions(self, servers: list[dict]) -> list[dict]:
         """PatchGoblin's own OpenAI-compatible endpoints that aren't saved here yet."""
@@ -160,39 +200,21 @@ class LlmPlugin(Plugin):
     def routes(self, bp) -> None:
         @bp.get("/meta")
         def meta():
-            return jsonify(kinds=llmapi.KINDS, probes=llmapi.PROBES)
+            return jsonify(kinds=llmapi.KINDS, probes=llmapi.PROBES,
+                           renames=self.ctx.settings.server_renames("llm"))
 
         @bp.get("/servers")
         def get_servers():
             return jsonify(self.servers_view())
 
-        @bp.post("/servers")
-        def save_server():
-            data = body()
-            servers = self.servers()
-            spec = self.resolve_endpoint_key(dict(data.get("server") or {}))
-            server = llmapi.clean_server(spec, servers)
-            at = next((i for i, s in enumerate(servers) if s["id"] == server["id"]), None)
-            if at is None:
-                servers.append(server)
-            else:
-                servers[at] = server
-            self.save_servers(servers)
-            return jsonify(saved=server["id"], **self.servers_view())
-
-        @bp.post("/servers/test")
-        def test_server():
-            # Checks a server as typed in the form (nothing is saved, and the key never comes back).
+        @bp.post("/servers/adopt")
+        def adopt_server():
+            """Save a suggested server (a found one, or a PatchGoblin endpoint, whose key is copied here
+            and never goes through the browser)."""
             spec = self.resolve_endpoint_key(dict(body().get("server") or {}))
-            server = llmapi.clean_server(spec, self.servers())
-            found = llmapi.probe(server)
-            return jsonify(models=llmapi.list_models(server), detected=found["detected"],
-                           reachable=[r["path"] for r in found["results"] if 200 <= (r["status"] or 0) < 300])
-
-        @bp.delete("/servers/<sid>")
-        def delete_server(sid):
-            self.save_servers([s for s in self.servers() if s["id"] != sid])
-            return jsonify(self.servers_view())
+            spec.pop("id", None)
+            server = self.ctx.servers.save({**spec, "type": "llm"})
+            return jsonify(saved=server["id"], **self.servers_view())
 
         @bp.post("/scan")
         def scan():
