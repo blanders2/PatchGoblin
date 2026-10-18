@@ -22,7 +22,7 @@ from . import hosts
 from .hosts import HostError, communicate
 
 TAG_ENV = "PATCHGOBLIN_TAB"
-BACKENDS = ("auto", "kitty", "tmux", "wezterm", "window")
+BACKENDS = ("auto", "terminalgoblin", "kitty", "tmux", "wezterm", "window")
 _COLOR_OK = re.compile(r"^#[0-9a-fA-F]{6}$")
 Which = Callable[[str], str | None]
 
@@ -417,12 +417,86 @@ class WeztermBackend:
         hosts._spawn(["wezterm", "start", "--cwd", cwd, "--", *run], None, "CREATE_NEW_CONSOLE")
 
 
+def parse_terminalgoblin_ls(text: str) -> list[str]:
+    """The tags of the panes in ``terminalgoblin @ ls`` JSON (a list of running instances)."""
+    try:
+        data = json.loads(text or "[]")
+    except ValueError:
+        return []
+    out = []
+    for inst in data if isinstance(data, list) else []:
+        for tab in (inst.get("tabs") or []) if isinstance(inst, dict) else []:
+            for pane in tab.get("panes") or []:
+                tag = (pane.get("env") or {}).get(TAG_ENV)
+                if tag and tag not in out:
+                    out.append(tag)
+    return out
+
+
+class TerminalGoblinBackend:
+    """TerminalGoblin: named, coloured tabs through its remote control (``terminalgoblin @ ...``).
+    Panes are tagged with PATCHGOBLIN_TAB in their launch environment, so a project's terminal is
+    found even after it has been moved into another tab as a split. ``@ launch`` starts
+    TerminalGoblin when it isn't running, and the title it's given can't be changed by the shell."""
+
+    name = "terminalgoblin"
+    NOT_FOUND = "TerminalGoblin was not found on PATH (install it with its install.sh)."
+
+    def __init__(self, which: Which = shutil.which):
+        self.which = which
+
+    def exe(self) -> str | None:
+        # The systemd service's PATH may predate ~/.local/bin, where install.sh puts it.
+        return self.which("terminalgoblin") or self.which(os.path.expanduser("~/.local/bin/terminalgoblin"))
+
+    def _rc(self, *args: str, timeout: float = 15):
+        exe = self.exe()
+        if not exe:
+            raise HostError(self.NOT_FOUND)
+        return communicate([exe, "@", *args], timeout=timeout)
+
+    def probe(self) -> tuple[bool, str]:
+        if not self.exe():
+            return False, self.NOT_FOUND
+        return True, "TerminalGoblin (named, coloured tabs; starts it if it isn't running)."
+
+    def list_tags(self) -> list[str]:
+        res = self._rc("ls")
+        return parse_terminalgoblin_ls(res.stdout) if res.ok else []
+
+    def focus(self, tag: str) -> None:
+        res = self._rc("focus", "--match", f"env:{TAG_ENV}={tag}")
+        if not res.ok:
+            raise HostError(f"TerminalGoblin could not focus the tab: {res.stderr.strip() or res.returncode}")
+
+    def open(self, argv: list[str] | None, cwd: str, title: str, color: str, tag: str) -> None:
+        tag = _check_tag(tag)
+        # An SSH project's path is on the remote host (argv cds there), so it's only a local cwd
+        # for local projects.
+        cmd = ["launch"] + ([] if argv else ["--cwd", cwd])
+        if title:
+            cmd += ["--title", title]
+        if _COLOR_OK.match(color or ""):
+            cmd += ["--color", color]
+        if tag:
+            cmd += ["--env", f"{TAG_ENV}={tag}"]
+        if argv:
+            cmd += ["--", *argv]
+        res = self._rc(*cmd, timeout=20)
+        if not res.ok:
+            raise HostError(f"TerminalGoblin could not open a tab: {res.stderr.strip() or res.returncode}")
+
+
 def resolve_backend(terminal: dict | None, which: Which = shutil.which):
     """The backend for the ``terminal`` settings, or None for a plain new window each time.
-    ``auto``: a reachable kitty, else tmux, else a kitty PatchGoblin starts, else a plain window."""
+    ``auto``: TerminalGoblin if installed, else a reachable kitty, else tmux, else a kitty
+    PatchGoblin starts, else a plain window."""
     terminal = terminal or {}
     choice = terminal.get("linux_backend") or "auto"
     kitty = KittyBackend(terminal.get("kitty_socket") or "", which)
+    goblin = TerminalGoblinBackend(which)
+    if choice == "terminalgoblin":
+        return goblin
     if choice == "kitty":
         return kitty
     if choice == "tmux":
@@ -431,6 +505,8 @@ def resolve_backend(terminal: dict | None, which: Which = shutil.which):
         return WeztermBackend(which)
     if choice != "auto":
         return None
+    if goblin.exe():
+        return goblin
     if which("kitty"):
         addr, error = kitty.find()
         if addr or error:

@@ -4872,6 +4872,66 @@ class LinuxTerminalTests(unittest.TestCase):
         self.assertIn(["select-window", "-t", "@3"], calls)
         self.assertEqual(spawned, [["xterm", "-e", "tmux", "attach", "-t", "PatchGoblin"]])
 
+    def goblin(self, ls_out="[]", ok=True):
+        calls = []
+
+        def comm(argv, **kw):
+            calls.append(argv)
+            if argv[2] == "ls":
+                return _R(0, ls_out, "")
+            return _R(0 if ok else 1, "{}", "" if ok else "no tab or pane matches")
+        g = lt.TerminalGoblinBackend(lambda n: "/usr/bin/terminalgoblin" if n == "terminalgoblin" else None)
+        return g, calls, mock.patch.object(lt, "communicate", comm)
+
+    def test_parse_terminalgoblin_ls(self):
+        ls = json.dumps([{"tabs": [{"panes": [{"env": {"PATCHGOBLIN_TAB": "p1"}}, {"env": {}}]}]},
+                         {"tabs": [{"panes": [{"env": {"PATCHGOBLIN_TAB": "p2"}}, {"env": {"PATCHGOBLIN_TAB": "p1"}}]}]}])
+        self.assertEqual(lt.parse_terminalgoblin_ls(ls), ["p1", "p2"])
+        self.assertEqual(lt.parse_terminalgoblin_ls("nope"), [])
+        self.assertEqual(lt.parse_terminalgoblin_ls('{"tabs": 1}'), [])
+
+    def test_terminalgoblin_open_focus_and_list(self):
+        ls = json.dumps([{"tabs": [{"panes": [{"env": {"PATCHGOBLIN_TAB": "p1"}}]}]}])
+        g, calls, patch = self.goblin(ls)
+        with patch:
+            self.assertEqual(g.list_tags(), ["p1"])
+            g.open(None, "/a b", "App", "#12ab9f", "p1")
+            g.open(["ssh", "-t", "h", "sh -c 'cd /r'"], "/r", "App (h)", "red;x", "bad tag")
+            g.focus("p1")
+        exe = "/usr/bin/terminalgoblin"
+        self.assertIn([exe, "@", "launch", "--cwd", "/a b", "--title", "App", "--color", "#12ab9f",
+                       "--env", "PATCHGOBLIN_TAB=p1"], calls)
+        # SSH: the path is remote, so no local --cwd; a bad colour and tag are left out.
+        self.assertIn([exe, "@", "launch", "--title", "App (h)", "--", "ssh", "-t", "h", "sh -c 'cd /r'"], calls)
+        self.assertIn([exe, "@", "focus", "--match", "env:PATCHGOBLIN_TAB=p1"], calls)
+
+    def test_terminalgoblin_errors(self):
+        g, _, patch = self.goblin(ok=False)
+        with patch, self.assertRaises(HostError) as cm:
+            g.focus("gone")
+        self.assertIn("no tab or pane matches", str(cm.exception))
+        missing = lt.TerminalGoblinBackend(lambda n: None)
+        self.assertEqual(missing.probe(), (False, lt.TerminalGoblinBackend.NOT_FOUND))
+        with self.assertRaises(HostError):
+            missing.list_tags()
+        local_bin = os.path.expanduser("~/.local/bin/terminalgoblin")
+        self.assertEqual(lt.TerminalGoblinBackend(lambda n: n if n == local_bin else None).exe(), local_bin)
+
+    def test_resolve_backend_prefers_terminalgoblin(self):
+        def have(*names):
+            return lambda n: f"/usr/bin/{n}" if n in names else None
+        with mock.patch.object(lt.KittyBackend, "find", return_value=("unix:/k", "")):
+            self.assertEqual(lt.resolve_backend({}, have("terminalgoblin", "kitty", "tmux")).name, "terminalgoblin")
+            self.assertEqual(lt.resolve_backend({"linux_backend": "kitty"}, have("terminalgoblin", "kitty")).name, "kitty")
+        self.assertEqual(lt.resolve_backend({"linux_backend": "terminalgoblin"}, have()).name, "terminalgoblin")
+
+    def test_generic_terminal_prefers_terminalgoblin(self):
+        argv, _ = hosts_mod._wrap_terminal(["ssh", "h"], None, "linux",
+                                           lambda n: n if n in ("terminalgoblin", "xterm") else None)
+        self.assertEqual(argv, ["terminalgoblin", "-e", "ssh", "h"])
+        argv, cwd = hosts_mod._wrap_terminal(None, "/p", "linux", lambda n: n, "App", "#123456")
+        self.assertEqual((argv, cwd), (["terminalgoblin", "--title", "App", "--color", "#123456", "--cwd", "/p"], None))
+
     def test_resolve_backend(self):
         def have(*names):
             return lambda n: f"/usr/bin/{n}" if n in names else None

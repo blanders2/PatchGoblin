@@ -731,6 +731,7 @@ def detect_windows_shell(target: str, port: int | None = None) -> str:
 
 _LINUX_TERMINALS = (
     # (binary, flags before the command to run inside it)
+    ("terminalgoblin", ["-e"]),  # with a command, opens a tab in the running TerminalGoblin
     ("x-terminal-emulator", ["-e"]),
     ("gnome-terminal", ["--"]),
     ("konsole", ["-e"]),
@@ -800,8 +801,15 @@ def _wrap_terminal(inner: list[str] | None, cwd_path: str | None, platform: str,
         return ["osascript", "-e", f'tell application "Terminal" to do script "{script}"',
                 "-e", 'tell application "Terminal" to activate'], None
     for name, flags in _LINUX_TERMINALS:
-        if which(name):
-            return [name, *(flags + inner if inner else [])], cwd
+        if not which(name):
+            continue
+        if name == "terminalgoblin":
+            # This opens a tab in the running TerminalGoblin, which doesn't inherit our cwd: pass it.
+            argv = [name] + (["--title", title] if title else [])
+            if re.fullmatch(r"#[0-9a-fA-F]{6}", color or ""):
+                argv += ["--color", color]
+            return (argv + [*flags, *inner], None) if inner else (argv + ["--cwd", cwd_path], None)
+        return [name, *(flags + inner if inner else [])], cwd
     raise HostError("No terminal emulator found (tried " + ", ".join(n for n, _ in _LINUX_TERMINALS) + ").")
 
 

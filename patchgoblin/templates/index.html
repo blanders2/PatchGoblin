@@ -660,7 +660,8 @@
       {% if platform.startswith("linux") %}
       <label>Terminal tabs on Linux
         <select name="terminal.linux_backend">
-          <option value="auto">Automatic (kitty, else tmux, else a new window)</option>
+          <option value="auto">Automatic (TerminalGoblin, else kitty, else tmux, else a new window)</option>
+          <option value="terminalgoblin">TerminalGoblin (named, coloured tabs)</option>
           <option value="kitty">kitty (named, coloured tabs)</option>
           <option value="tmux">tmux (works in any terminal, and over SSH)</option>
           <option value="wezterm">WezTerm (named tabs)</option>
@@ -669,7 +670,9 @@
       <label>kitty socket (optional)
         <input name="terminal.kitty_socket" placeholder="unix:/tmp/kitty" spellcheck="false"></label>
       <p class="muted small" id="terminal-status"></p>
-      <p class="muted small">kitty needs remote control: add <code>allow_remote_control socket-only</code> and
+      <p class="muted small">TerminalGoblin needs no setup: it's started if it isn't running, and a project's
+        tab is found even after you've dragged it into another tab as a split.
+        kitty needs remote control: add <code>allow_remote_control socket-only</code> and
         <code>listen_on unix:/tmp/kitty</code> to <code>~/.config/kitty/kitty.conf</code> and restart it. Without it,
         PatchGoblin starts its own kitty. tmux keeps one session named <b>PatchGoblin</b>, with a window per project.
         On Wayland the window may only flash for attention instead of coming to the front; on X11 install

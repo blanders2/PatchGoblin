@@ -89,7 +89,14 @@ system terminal opens a new window.
 On Linux, **Settings → Terminal → Terminal tabs on Linux** picks a backend. Tabs are matched on an
 exact `PATCHGOBLIN_TAB=<project id>` value in the shell's environment, so dragging tabs around
 can't focus the wrong one.
-- **kitty** (the main option): each project is a tab named after it and coloured like on Windows
+- **TerminalGoblin** (preferred when installed): each project is a tab named after it and coloured
+  like on Windows, through TerminalGoblin's remote control (`terminalgoblin @ launch`, `@ focus
+  --match env:…`, `@ ls`). Nothing to configure: if TerminalGoblin isn't running it's started with
+  the project as its first tab, the title can't be changed by the shell or a remote session, and a
+  project's terminal is still found after you drag it into another tab as a split. Splitting or
+  duplicating an SSH project's tab opens another `ssh` session to the same directory. It's looked
+  up on `PATH` and in `~/.local/bin` (where its `install.sh` puts it).
+- **kitty**: each project is a tab named after it and coloured like on Windows
   (`kitty @ launch`, `set-tab-color`, `focus-tab --match env:…`). This needs kitty's remote
   control: add `allow_remote_control socket-only` and `listen_on unix:/tmp/kitty` to
   `~/.config/kitty/kitty.conf` and restart kitty (or enter the socket under *kitty socket*).
@@ -101,7 +108,10 @@ can't focus the wrong one.
 - **WezTerm**: named tabs (no colour), found through `wezterm cli`.
 - **A new terminal window each time**: the old behaviour.
 
-*Automatic* uses a reachable kitty, else tmux, else a kitty PatchGoblin starts, else a plain window.
+*Automatic* uses TerminalGoblin if it's installed, else a reachable kitty, else tmux, else a kitty
+PatchGoblin starts, else a plain window. Terminals PatchGoblin opens for other things (such as the
+SSH key installer's password prompt) also use TerminalGoblin when it's installed, as a tab in its
+running window.
 Commands are passed to the terminal as argument lists, so fish needs no special handling; kitty
 keeps the tab's title and tmux has window renaming turned off, so `fish_title` can't overwrite
 it. SSH projects work with a fish login shell on the remote side too: every remote script runs

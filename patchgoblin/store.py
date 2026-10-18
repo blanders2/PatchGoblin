@@ -108,7 +108,7 @@ DEFAULT_SETTINGS = {
     "terminal": {"open_in": "wt", "linux_backend": "auto", "kitty_socket": ""},
 }
 TERMINAL_PLACES = ("wt", "browser")
-LINUX_TERMINAL_BACKENDS = ("auto", "kitty", "tmux", "wezterm", "window")
+LINUX_TERMINAL_BACKENDS = ("auto", "terminalgoblin", "kitty", "tmux", "wezterm", "window")
 
 # Automation modes: a global default in Settings, overridden per project by True/False
 # (None or missing inherits). Each maps to the status of the tasks it acts on when turned on.
