@@ -465,6 +465,26 @@ versions (a single "OpenAI API" block) become an endpoint with id `openai`.
 - Cancelling a remote run closes the SSH session. Most CLIs exit when that happens, but
   check the host if one doesn't.
 
+## Project folders and order
+
+The Projects sidebar lists ungrouped projects first, then one collapsible folder per
+group (one level deep). A folder header shows how many projects it holds and one status
+dot for all of them.
+
+- **Reorder by dragging.** With a mouse, drag a project or a folder header. On a phone or
+  tablet, drag by the `⋮⋮` grip, or long-press anywhere on a row and then drag; a normal
+  swipe still scrolls. Drop a project between rows, into the ungrouped section, or onto a
+  collapsed folder's header (hovering there opens it). Folders move only between folders.
+  Esc cancels a drag, and the list scrolls when you drag near its edge.
+- **Without dragging.** Each row's `⋯` menu has Move up/down and Move to folder (an
+  existing folder, a new one, or No folder). Each folder's `⋯` menu renames, ungroups or
+  moves it. The **Folder** field in Project settings sets the folder too.
+- Order, folders and which folders are collapsed are saved on the server in
+  `projects.json`, so every browser sees the same layout after a reload. **Collapse all /
+  Expand all** sits next to **+ Add**.
+- A folder exists only while a project is in it: moving its last project out removes it.
+  New projects start ungrouped.
+
 ## Server Manager
 
 The **Servers** button (the stacked-servers icon at the bottom of the activity bar) opens one

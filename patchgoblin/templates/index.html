@@ -87,7 +87,10 @@
     <div class="sidebar-pane" id="pane-projects" data-view="projects" role="tabpanel">
       <div class="sidebar-head">
         <h2>Projects</h2>
-        <button class="small" id="add-project-btn">+ Add</button>
+        <div class="sidebar-actions">
+          <button type="button" class="small ghost" id="collapse-folders-btn" hidden>Collapse all</button>
+          <button class="small" id="add-project-btn">+ Add</button>
+        </div>
       </div>
       <ul id="project-list" class="project-list"></ul>
     </div>
@@ -184,6 +187,9 @@
         <fieldset>
           <legend>General</legend>
           <label>Name <input name="name" required autocomplete="off"></label>
+          <label title="Groups the project in the sidebar; leave blank for no folder">Folder
+            <input name="folder" list="folder-options" autocomplete="off" maxlength="60" placeholder="No folder"></label>
+          <datalist id="folder-options"></datalist>
           <div class="muted mono small" id="ps-where"></div>
         </fieldset>
         <fieldset>

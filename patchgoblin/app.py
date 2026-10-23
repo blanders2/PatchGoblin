@@ -51,6 +51,7 @@ from .store import (
 from .validators import (
     MAX_BATCH,
     TRANSITIONS,
+    folder_name,
     plan_answers,
     plan_limit,
     plan_trust,
@@ -467,7 +468,37 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
     # ---- projects -----------------------------------------------------------
     @app.get("/api/projects")
     def list_projects():
-        return jsonify(projects=registry.list())
+        return jsonify(**registry.layout())
+
+    @app.post("/api/project-folders/rename")
+    def rename_project_folder():
+        data = body()
+        old, new = folder_name(data.get("from")), folder_name(data.get("to"))
+        if not old or not registry.rename_folder(old, new):
+            abort(404)
+        return jsonify(**registry.layout())
+
+    @app.post("/api/project-folders/collapse")
+    def collapse_project_folders():
+        data = body()
+        names = data.get("names")
+        if not isinstance(names, list) or not isinstance(data.get("collapsed"), bool):
+            raise ValueError("Send names (a list) and collapsed (true or false).")
+        return jsonify(**registry.set_collapsed([folder_name(n) for n in names], data["collapsed"]))
+
+    @app.put("/api/projects/order")
+    def reorder_projects():
+        data = body()
+        folders, items = data.get("folders"), data.get("projects")
+        if not isinstance(folders, list) or not isinstance(items, list):
+            raise ValueError("Send folders and projects as lists.")
+        if not all(isinstance(i, dict) and isinstance(i.get("id"), str) for i in items):
+            raise ValueError("Each project must be an object with an id.")
+        folders = [folder_name(n) for n in folders]
+        if "" in folders:
+            raise ValueError("Folder names can't be blank.")
+        items = [{"id": i["id"], "folder": folder_name(i.get("folder", ""))} for i in items]
+        return jsonify(**registry.reorder(folders, items))
 
     @app.get("/api/projects/status")
     def projects_status():
@@ -626,6 +657,8 @@ def create_app(data_dir: str | None = None, start_engine: bool = True) -> Flask:
                 fields[key] = data[key]
         if "sync_mode" in data:
             fields["sync_mode"] = sync_mode(data["sync_mode"])
+        if "folder" in data:
+            fields["folder"] = folder_name(data["folder"])
         if "plan_trust" in data:
             fields["plan_trust"] = plan_trust(data["plan_trust"])
         for key in AUTO_MODES:

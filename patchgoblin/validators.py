@@ -40,6 +40,23 @@ def plan_limit(value) -> int:
         raise ValueError("Plan limit must be a whole number ≥ 0.")
     return limit
 
+MAX_FOLDER_NAME = 60
+
+
+def folder_name(value) -> str:
+    """A sidebar folder name, trimmed with inner whitespace collapsed; "" means no folder."""
+    if not isinstance(value, str):
+        raise ValueError("Folder must be a string.")
+    if any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError("Folder names can't contain control characters.")
+    name = " ".join(value.split())
+    if "/" in name:
+        raise ValueError("Folder names can't contain '/'.")
+    if len(name) > MAX_FOLDER_NAME:
+        raise ValueError(f"Folder names can be at most {MAX_FOLDER_NAME} characters.")
+    return name
+
+
 def sync_mode(value) -> str:
     if value not in gitops.SYNC_MODES:
         raise ValueError("Sync mode must be one of: " + ", ".join(gitops.SYNC_MODES) + ".")

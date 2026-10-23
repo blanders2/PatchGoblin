@@ -214,6 +214,60 @@ button.icon-btn { padding: 6px; line-height: 0; display: inline-flex; align-item
 .p-vcs.unpushed { color: var(--warn); }
 .p-vcs .count { font-size: 10px; font-weight: 600; line-height: 1; }
 .p-sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- project sidebar: folders and drag reordering (scoped to #project-list; plugins reuse .project-list) ---- */
+.sidebar-actions { display: flex; gap: 6px; flex-shrink: 0; }
+#project-list > li { padding: 0; border-radius: 0; cursor: default; }
+#project-list > li:hover { background: none; }
+#project-list .p-group { list-style: none; margin: 0; padding: 0; }
+#project-list .p-row { display: flex; align-items: center; gap: 4px;
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+#project-list .p-row-main { flex: 1; min-width: 0; }
+#project-list .p-grip { display: none; color: var(--muted); letter-spacing: -3px; flex-shrink: 0; cursor: grab; }
+#project-list .p-menu-btn { flex-shrink: 0; background: transparent; border: 0; color: var(--muted); padding: 0 6px;
+  line-height: 22px; font-size: 16px; opacity: 0; }
+#project-list .p-menu-btn:hover { background: var(--panel); color: var(--text); filter: none; }
+#project-list li:hover > .p-menu-btn, #project-list .p-folder-head:hover > .p-menu-btn,
+#project-list .p-menu-btn:focus-visible, #project-list .p-menu-btn[aria-expanded="true"] { opacity: 1; }
+#project-list .p-folder { margin-top: 6px; }
+#project-list .p-folder-head { display: flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 6px;
+  font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+  cursor: pointer; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+#project-list .p-folder-head:hover { background: var(--panel-2); color: var(--text); }
+#project-list .p-folder-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#project-list .p-caret { display: inline-block; transition: transform .15s ease; }
+#project-list .p-folder-head[aria-expanded="true"] .p-caret { transform: rotate(90deg); }
+#project-list .p-folder-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#project-list .p-folder-count { font-weight: 400; margin-left: auto; }
+#project-list .p-folder-head.active-inside { color: var(--text); box-shadow: inset 3px 0 0 var(--accent); }
+#project-list .p-folder-items { margin-left: 10px; }
+#project-list.is-dragging { touch-action: none; }
+#project-list.is-dragging .p-group[data-folder=""] { min-height: 18px; }
+#project-list .dragging { opacity: .4; }
+#project-list .drag-ghost { position: fixed; left: 0; top: 0; z-index: 60; pointer-events: none; list-style: none;
+  background: var(--panel); border-radius: 8px; box-shadow: var(--shadow); opacity: .95; transition: none; }
+#project-list .drag-ghost > * { background: var(--panel); }
+#project-list .drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+#project-list .drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+#project-list .drop-into { outline: 2px solid var(--accent); outline-offset: -2px; }
+.p-menu { position: fixed; z-index: 70; min-width: 180px; max-height: 70vh; overflow-y: auto; padding: 4px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow);
+  display: flex; flex-direction: column; }
+.p-menu button { background: transparent; border: 0; color: var(--text); text-align: left; padding: 8px 12px; border-radius: 6px; }
+.p-menu button:hover:not(:disabled), .p-menu button:focus-visible { background: var(--panel-2); filter: none; }
+.p-menu button:disabled { color: var(--muted); }
+.p-menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; width: 100%; }
+.p-menu-heading { font-size: 11.5px; color: var(--muted); padding: 4px 12px 2px; }
+@media (pointer: coarse) {
+  #project-list .p-grip { display: inline-flex; align-items: center; justify-content: center;
+    min-width: 32px; min-height: 32px; margin-left: -6px; touch-action: none; }
+  #project-list .p-menu-btn { opacity: 1; min-width: 36px; min-height: 36px; }
+  #project-list .p-row { min-height: 40px; }
+  .p-menu button { padding: 12px 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #project-list .p-caret, #project-list .drag-ghost { transition: none; }
+}
 main { flex: 1; min-width: 0; overflow: auto; padding: 18px 22px; }
 
 .empty { max-width: 520px; margin: 12vh auto; text-align: center; }

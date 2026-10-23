@@ -18,7 +18,10 @@ const NOT_BUSY = Object.keys(STATUS_LABEL).filter(s => !BUSY.has(s));
 const AUTO_MODES = ["auto_plan", "auto_queue", "auto_promote"];
 
 const state = {
-  projects: [],
+  projects: [], // in sidebar order
+  folders: [], // [{name, collapsed}] in sidebar order; only folders some project is in
+  drag: null, // the sidebar drag in progress: {kind: "project"|"folder", key, pointerId, drop}
+  renderPending: false, // renderProjects() was called during a drag; it runs when the drag ends
   pid: localStorageGet("pg.pid"),
   tab: validTab(localStorageGet("pg.tab")),
   tasks: [],
@@ -284,6 +287,7 @@ const modelFor = (provider, model, pid = state.pid) => (modelList(provider, pid)
 async function loadProjects() {
   const data = await api("GET", "/api/projects");
   state.projects = data.projects;
+  state.folders = data.folders || [];
   if (!currentProject()) state.pid = state.projects[0] ? state.projects[0].id : null;
   renderProjects();
   loadReachability();
@@ -352,18 +356,458 @@ function vcsIcons(p) {
   return icons;
 }
 
-function renderProjects() {
-  const list = $("#project-list");
-  list.replaceChildren(...state.projects.map(p => el("li", {
-    class: p.id === state.pid ? "active" : "",
+/* ---- sidebar folders and ordering ---- */
+
+const isCollapsed = name => state.folders.some(f => f.name === name && f.collapsed);
+
+// The folders shown: the stored order, plus any a project uses that the list lacks; empty ones are skipped.
+function shownFolders() {
+  const used = new Set(state.projects.map(p => p.folder || "").filter(Boolean));
+  const names = state.folders.map(f => f.name).filter(n => used.has(n));
+  return [...new Set([...names, ...used])];
+}
+
+// Map of folder name ("" = ungrouped) to its projects, in sidebar order.
+function layoutGroups() {
+  const groups = new Map([["", []], ...shownFolders().map(n => [n, []])]);
+  for (const p of state.projects) groups.get(p.folder || "").push(p);
+  return groups;
+}
+
+// Takes a server layout ({projects, folders}); known project objects are updated in place so references stay valid.
+function applyLayout(data) {
+  const known = new Map(state.projects.map(p => [p.id, p]));
+  state.projects = data.projects.map(p => {
+    const mine = known.get(p.id);
+    if (!mine) return p;
+    delete mine.folder;
+    return Object.assign(mine, p);
+  });
+  state.folders = data.folders || [];
+  renderProjects();
+}
+
+async function loadLayout() {
+  try { applyLayout(await api("GET", "/api/projects")); } catch (e) { toast(e.message, true); }
+}
+
+async function layoutRequest(method, url, body) {
+  try { applyLayout(await api(method, url, body)); } catch (e) { toast(e.message, true); await loadLayout(); }
+}
+
+// Saves `folders` (names in order) and `groups` (folder name -> projects in order), showing it at once.
+function saveLayout(folders, groups) {
+  const order = ["", ...folders].flatMap(name => (groups.get(name) || []).map(p => [p, name]));
+  for (const [p, name] of order) p.folder = name;
+  state.projects = [...order.map(([p]) => p), ...state.projects.filter(p => !order.some(([q]) => q === p))];
+  state.folders = folders.map(n => state.folders.find(f => f.name === n) || { name: n, collapsed: false });
+  renderProjects();
+  return layoutRequest("PUT", "/api/projects/order",
+    { folders, projects: order.map(([p, name]) => ({ id: p.id, folder: name })) });
+}
+
+function setCollapsed(names, collapsed) {
+  for (const f of state.folders) if (names.includes(f.name)) f.collapsed = collapsed;
+  renderProjects();
+  return layoutRequest("POST", "/api/project-folders/collapse", { names, collapsed });
+}
+
+const toggleFolder = name => setCollapsed([name], !isCollapsed(name));
+
+function moveProject(p, folder, index = Infinity) {
+  const groups = layoutGroups();
+  const from = groups.get(p.folder || "");
+  from.splice(from.indexOf(p), 1);
+  if (!groups.has(folder)) groups.set(folder, []);
+  const to = groups.get(folder);
+  to.splice(Math.min(index, to.length), 0, p);
+  const folders = [...groups.keys()].filter(n => n && groups.get(n).length);
+  return saveLayout(folders, groups);
+}
+
+function stepProject(p, delta) {
+  const group = layoutGroups().get(p.folder || "");
+  const i = group.indexOf(p) + delta;
+  if (i >= 0 && i < group.length) moveProject(p, p.folder || "", i);
+}
+
+function stepFolder(name, delta) {
+  const folders = shownFolders();
+  const i = folders.indexOf(name);
+  if (i + delta < 0 || i + delta >= folders.length) return;
+  folders.splice(i, 1);
+  folders.splice(i + delta, 0, name);
+  saveLayout(folders, layoutGroups());
+}
+
+function renameFolder(name) {
+  const to = prompt(`Rename folder "${name}" to:`, name);
+  if (to === null || to.trim() === name) return;
+  if (!to.trim()) { toast("Use Ungroup to remove a folder.", true); return; }
+  layoutRequest("POST", "/api/project-folders/rename", { from: name, to });
+}
+
+// A small popover of large buttons (works with touch and the keyboard). items: [{label, run}] or "-" or {heading}.
+function openRowMenu(anchor, items) {
+  closeRowMenu();
+  const menu = el("div", { class: "p-menu", id: "p-menu", role: "menu" }, ...items.map(item => {
+    if (item === "-") return el("hr");
+    if (item.heading) return el("div", { class: "p-menu-heading" }, item.heading);
+    return el("button", {
+      type: "button", role: "menuitem", disabled: item.disabled,
+      onclick: e => { e.stopPropagation(); closeRowMenu(); item.run(); },
+    }, item.label);
+  }));
+  menu.addEventListener("keydown", e => {
+    const buttons = $$("button:not(:disabled)", menu);
+    const i = buttons.indexOf(document.activeElement);
+    if (e.key === "Escape") { e.stopPropagation(); closeRowMenu(); anchor.focus(); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); buttons[(i + 1) % buttons.length]?.focus(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); buttons[(i - 1 + buttons.length) % buttons.length]?.focus(); }
+    else if (e.key === "Tab") closeRowMenu();
+  });
+  menu.addEventListener("pointerdown", e => e.stopPropagation());
+  menu.addEventListener("click", e => e.stopPropagation());
+  document.body.append(menu);
+  const r = anchor.getBoundingClientRect(), m = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(4, Math.min(r.right - m.width, innerWidth - m.width - 4))}px`;
+  menu.style.top = `${r.bottom + m.height + 4 > innerHeight ? Math.max(4, r.top - m.height - 2) : r.bottom + 2}px`;
+  anchor.setAttribute("aria-expanded", "true");
+  state.menuAnchor = anchor;
+  $("button:not(:disabled)", menu)?.focus();
+}
+
+function closeRowMenu() {
+  $("#p-menu")?.remove();
+  state.menuAnchor?.setAttribute("aria-expanded", "false");
+  state.menuAnchor = null;
+}
+
+function projectMenu(anchor, p) {
+  const folder = p.folder || "";
+  const group = layoutGroups().get(folder);
+  const others = shownFolders().filter(n => n !== folder);
+  openRowMenu(anchor, [
+    { label: "Move up", disabled: group[0] === p, run: () => stepProject(p, -1) },
+    { label: "Move down", disabled: group.at(-1) === p, run: () => stepProject(p, 1) },
+    "-",
+    { heading: "Move to folder…" },
+    ...others.map(n => ({ label: n, run: () => moveProject(p, n) })),
+    { label: "New folder…", run: () => {
+      const name = prompt(`New folder for "${p.name}":`);
+      if (name && name.trim()) moveProject(p, name.trim().replace(/\s+/g, " "));
+    } },
+    ...(folder ? [{ label: "No folder", run: () => moveProject(p, "") }] : []),
+  ]);
+}
+
+function folderMenu(anchor, name) {
+  const folders = shownFolders();
+  openRowMenu(anchor, [
+    { label: "Rename folder…", run: () => renameFolder(name) },
+    { label: "Ungroup", run: () => layoutRequest("POST", "/api/project-folders/rename", { from: name, to: "" }) },
+    "-",
+    { label: "Move up", disabled: folders[0] === name, run: () => stepFolder(name, -1) },
+    { label: "Move down", disabled: folders.at(-1) === name, run: () => stepFolder(name, 1) },
+  ]);
+}
+
+const menuButton = (label, open) => el("button", {
+  type: "button", class: "p-menu-btn", title: label, "aria-label": label, "aria-haspopup": "menu", "aria-expanded": "false",
+  onclick: e => { e.stopPropagation(); if (state.menuAnchor === e.currentTarget) closeRowMenu(); else open(e.currentTarget); },
+}, "⋯");
+
+const grip = () => el("span", { class: "p-grip", "aria-hidden": "true", onclick: e => e.stopPropagation() }, "⋮⋮");
+
+function projectRow(p) {
+  return el("li", {
+    class: "p-row" + (p.id === state.pid ? " active" : ""),
+    "data-pid": p.id,
     onclick: () => selectProject(p.id),
-  }, el("div", { class: "p-title" }, reachDot(p), el("span", { class: "p-name" }, p.name), ...vcsIcons(p)),
-     el("div", { class: "p-sub" }, p.location === "ssh" ? `ssh · ${p.ssh_target}` : "local"))));
+  }, grip(),
+     el("div", { class: "p-row-main" },
+       el("div", { class: "p-title" }, reachDot(p), el("span", { class: "p-name" }, p.name), ...vcsIcons(p)),
+       el("div", { class: "p-sub" }, p.location === "ssh" ? `ssh · ${p.ssh_target}` : "local")),
+     menuButton(`Actions for ${p.name}`, a => projectMenu(a, p)));
+}
+
+// One dot for a folder: bad if any project is unreachable, else checking if any is unknown, else ok.
+function folderDot(projects) {
+  const rs = projects.map(p => state.reach[p.id]);
+  const [cls, label] = rs.some(r => r && !r.ok) ? ["bad", "A project is not reachable"]
+    : rs.some(r => !r) ? ["checking", "Checking…"] : ["ok", "All reachable"];
+  return el("span", { class: `p-dot ${cls}`, title: label, "aria-label": label, role: "img" });
+}
+
+function folderItem(name, projects) {
+  const collapsed = isCollapsed(name);
+  const toggle = () => toggleFolder(name);
+  const activeInside = collapsed && projects.some(p => p.id === state.pid);
+  return el("li", { class: "p-folder", "data-folder": name },
+    el("div", {
+      class: "p-folder-head" + (activeInside ? " active-inside" : ""), role: "button", tabindex: "0",
+      "aria-expanded": String(!collapsed), title: activeInside ? "The selected project is in this folder" : null,
+      onclick: toggle,
+      onkeydown: e => {
+        if (e.target !== e.currentTarget || (e.key !== "Enter" && e.key !== " ")) return;
+        e.preventDefault();
+        toggle();
+      },
+    }, grip(), el("span", { class: "p-caret", "aria-hidden": "true" }, "▸"),
+       el("span", { class: "p-folder-name" }, name),
+       el("span", { class: "p-folder-count" }, String(projects.length)),
+       folderDot(projects),
+       menuButton(`Actions for folder ${name}`, a => folderMenu(a, name))),
+    el("ul", { class: "p-group p-folder-items", "data-folder": name, hidden: collapsed }, ...projects.map(projectRow)));
+}
+
+function renderProjects() {
+  // Rebuilding the list mid-drag would drop the dragged element (status polls re-render every few seconds).
+  if (state.drag) { state.renderPending = true; return; }
+  state.renderPending = false;
+  const list = $("#project-list");
+  const groups = layoutGroups();
+  list.replaceChildren(
+    el("li", { class: "p-ungrouped" }, el("ul", { class: "p-group", "data-folder": "" }, ...groups.get("").map(projectRow))),
+    ...[...groups].filter(([name]) => name).map(([name, projects]) => folderItem(name, projects)));
+  const folders = shownFolders();
+  const allCollapsed = folders.length > 0 && folders.every(isCollapsed);
+  const collapseBtn = $("#collapse-folders-btn");
+  collapseBtn.hidden = !folders.length;
+  collapseBtn.textContent = allCollapsed ? "Expand all" : "Collapse all";
+  collapseBtn.setAttribute("aria-label", allCollapsed ? "Expand all folders" : "Collapse all folders");
   const has = state.projects.length > 0;
   if (!has) state.view = "board";
   $("#empty-state").hidden = has;
   $("#project-view").hidden = !has || state.view !== "board";
   $("#project-settings-view").hidden = !has || state.view !== "settings";
+}
+
+/* ---- dragging projects and folders: one Pointer Events path for mouse, pen and touch ---- */
+
+const DRAG_SLOP = 5; // px a mouse/pen moves before a press becomes a drag
+const SCROLL_SLOP = 8; // px a touch moves before the long-press is given up (the user is scrolling)
+const LONG_PRESS_MS = 400;
+const PEEK_MS = 600; // hovering a collapsed folder this long opens it (locally) during a drag
+const EDGE = 32; // px from the list's top/bottom edge where a drag auto-scrolls
+
+function setupProjectSidebar() {
+  const list = $("#project-list");
+  let press = null; // the press that may become (or is) a drag
+  let ghost = null, offset = null, pointer = null, frame = 0, peek = null;
+  let swallowClick = false;
+
+  const clearMarks = () => $$(".drop-before, .drop-after, .drop-into", list)
+    .forEach(n => n.classList.remove("drop-before", "drop-after", "drop-into"));
+
+  function endPress() {
+    if (press) clearTimeout(press.timer);
+    press = null;
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onCancel);
+  }
+
+  function place() {
+    const w = ghost.offsetWidth, h = ghost.offsetHeight;
+    const x = Math.max(0, Math.min(pointer.x - offset.x, innerWidth - w));
+    const y = Math.max(0, Math.min(pointer.y - offset.y, innerHeight - h));
+    ghost.style.transform = `translate(${x}px, ${y}px)`;
+  }
+
+  function start() {
+    if (!press) return;
+    clearTimeout(press.timer);
+    // The global outside-press handler cancelled this press (a discard prompt was declined).
+    if (press.down.defaultPrevented || !press.src.isConnected) { endPress(); return; }
+    closeRowMenu();
+    const { kind, key, src, pointerId } = press;
+    state.drag = { kind, key, pointerId, drop: null };
+    const rect = src.getBoundingClientRect();
+    offset = { x: press.x - rect.left, y: press.y - rect.top };
+    pointer = { x: press.lastX, y: press.lastY };
+    ghost = el("li", { class: "drag-ghost", "aria-hidden": "true" }, src.cloneNode(true));
+    ghost.style.width = `${rect.width}px`;
+    list.append(ghost);
+    place();
+    (kind === "folder" ? src.closest(".p-folder") : src).classList.add("dragging");
+    list.classList.add("is-dragging");
+    try { list.setPointerCapture(pointerId); } catch { /* the pointer is already gone */ }
+    if (press.type === "touch") navigator.vibrate?.(10);
+    frame = requestAnimationFrame(tick);
+  }
+
+  // Each frame: scroll near the list's edges, then work out where a drop would land.
+  function tick() {
+    if (!state.drag) return;
+    const r = list.getBoundingClientRect();
+    const speed = pointer.y < r.top + EDGE ? -Math.min(1, (r.top + EDGE - pointer.y) / EDGE)
+      : pointer.y > r.bottom - EDGE ? Math.min(1, (pointer.y - r.bottom + EDGE) / EDGE) : 0;
+    if (speed) list.scrollTop += speed * 14;
+    hitTest();
+    frame = requestAnimationFrame(tick);
+  }
+
+  function hitTest() {
+    const d = state.drag;
+    const under = document.elementFromPoint(pointer.x, pointer.y); // the ghost has pointer-events: none
+    clearMarks();
+    d.drop = null;
+    const inList = under && list.contains(under);
+    const head = inList ? under.closest(".p-folder-head") : null;
+    const headName = head && head.closest(".p-folder").dataset.folder;
+    if (peek && peek.name !== headName) { clearTimeout(peek.timer); peek = null; }
+    if (!inList) return;
+    const below = n => { const r = n.getBoundingClientRect(); return pointer.y >= r.top + r.height / 2; };
+    if (d.kind === "folder") { // folders only go between folders; ungrouped projects stay on top
+      const f = under.closest(".p-folder") || $(".p-folder", list);
+      if (!f || f.dataset.folder === d.key) return;
+      const after = under.closest(".p-folder") ? below(f) : false;
+      f.classList.add(after ? "drop-after" : "drop-before");
+      d.drop = { folder: f.dataset.folder, after };
+      return;
+    }
+    const row = under.closest(".p-row");
+    if (row) {
+      if (row.dataset.pid === d.key) return;
+      const after = below(row);
+      row.classList.add(after ? "drop-after" : "drop-before");
+      d.drop = { folder: row.parentElement.dataset.folder, pid: row.dataset.pid, after };
+    } else if (head) {
+      const items = head.nextElementSibling;
+      if (items.hidden) { // into a collapsed folder, at its end
+        head.classList.add("drop-into");
+        d.drop = { folder: headName, end: true };
+        peek ||= { name: headName, timer: setTimeout(() => {
+          items.hidden = false;
+          head.setAttribute("aria-expanded", "true");
+        }, PEEK_MS) };
+      } else {
+        head.classList.add("drop-after");
+        d.drop = { folder: headName, start: true };
+      }
+    } else {
+      const group = under.closest(".p-group");
+      if (group) {
+        group.classList.add("drop-into");
+        d.drop = { folder: group.dataset.folder, end: true };
+      }
+    }
+  }
+
+  function drop(d) {
+    if (d.kind === "folder") {
+      const names = shownFolders().filter(n => n !== d.key);
+      const i = names.indexOf(d.drop.folder);
+      if (i < 0) { renderProjects(); return; }
+      names.splice(i + (d.drop.after ? 1 : 0), 0, d.key);
+      saveLayout(names, layoutGroups());
+      return;
+    }
+    const p = state.projects.find(x => x.id === d.key);
+    if (!p) { renderProjects(); return; }
+    const target = (layoutGroups().get(d.drop.folder) || []).filter(x => x !== p);
+    let index = d.drop.start ? 0 : target.length;
+    if (d.drop.pid) {
+      const i = target.findIndex(x => x.id === d.drop.pid);
+      if (i >= 0) index = i + (d.drop.after ? 1 : 0);
+    }
+    moveProject(p, d.drop.folder, index);
+  }
+
+  function finish(commit) {
+    const d = state.drag;
+    if (!d) return;
+    state.drag = null; // first, so releasing capture below isn't taken as a cancel
+    cancelAnimationFrame(frame);
+    if (peek) clearTimeout(peek.timer);
+    peek = null;
+    try { list.releasePointerCapture(d.pointerId); } catch { /* already released */ }
+    ghost?.remove();
+    ghost = null;
+    clearMarks();
+    $$(".dragging", list).forEach(n => n.classList.remove("dragging"));
+    list.classList.remove("is-dragging");
+    endPress();
+    // The click that follows the release must not select the project (reset by the next press).
+    swallowClick = true;
+    setTimeout(() => { swallowClick = false; }, 400);
+    if (commit && d.drop) drop(d);
+    else renderProjects();
+  }
+
+  function onMove(e) {
+    if (!press || e.pointerId !== press.pointerId) return;
+    press.lastX = e.clientX;
+    press.lastY = e.clientY;
+    if (!state.drag) {
+      const dist = Math.hypot(e.clientX - press.x, e.clientY - press.y);
+      if (press.type === "touch") { if (dist > SCROLL_SLOP) endPress(); return; }
+      if (dist < DRAG_SLOP) return;
+      start();
+      if (!state.drag) return;
+    }
+    e.preventDefault();
+    pointer = { x: e.clientX, y: e.clientY };
+    place();
+  }
+
+  function onUp(e) {
+    if (!press || e.pointerId !== press.pointerId) return;
+    if (state.drag) finish(true); // a long-press released without moving has no drop and does nothing
+    else endPress();
+  }
+
+  function onCancel(e) {
+    if (!press || e.pointerId !== press.pointerId) return;
+    if (state.drag) finish(false);
+    else endPress();
+  }
+
+  list.addEventListener("pointerdown", e => {
+    swallowClick = false;
+    if (state.drag || press || !e.isPrimary || (e.pointerType !== "touch" && e.button !== 0)) return;
+    const src = e.target.closest(".p-row, .p-folder-head");
+    if (!src || e.target.closest(".p-menu-btn")) return;
+    const isFolder = src.classList.contains("p-folder-head");
+    press = {
+      kind: isFolder ? "folder" : "project", key: isFolder ? src.closest(".p-folder").dataset.folder : src.dataset.pid,
+      src, pointerId: e.pointerId, type: e.pointerType, down: e, timer: 0,
+      x: e.clientX, y: e.clientY, lastX: e.clientX, lastY: e.clientY,
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    // Touch: the grip (touch-action: none) drags at once; elsewhere a long-press, so swipes still scroll.
+    // Started from a timer either way, so the global pointerdown handler has had its say first.
+    if (e.pointerType === "touch") press.timer = setTimeout(start, e.target.closest(".p-grip") ? 0 : LONG_PRESS_MS);
+  });
+  list.addEventListener("lostpointercapture", () => finish(false));
+  list.addEventListener("click", e => {
+    if (!swallowClick) return;
+    swallowClick = false;
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);
+  // Browsers that decided on scrolling when the touch began still need the moves cancelled mid-drag.
+  list.addEventListener("touchmove", e => { if (state.drag) e.preventDefault(); }, { passive: false });
+  list.addEventListener("contextmenu", e => { if (press || state.drag) e.preventDefault(); });
+  document.addEventListener("keydown", e => {
+    if (e.key !== "Escape" || !state.drag) return;
+    e.preventDefault();
+    e.stopPropagation();
+    finish(false);
+  }, true);
+
+  document.addEventListener("pointerdown", e => {
+    if (state.menuAnchor && !(e.target instanceof Element && e.target.closest(".p-menu, .p-menu-btn"))) closeRowMenu();
+  }, true);
+  window.addEventListener("resize", closeRowMenu);
+  list.addEventListener("scroll", closeRowMenu);
+  $("#collapse-folders-btn").onclick = () => {
+    const names = shownFolders();
+    setCollapsed(names, !names.every(isCollapsed));
+  };
 }
 
 async function selectProject(pid) {
@@ -445,6 +889,8 @@ function openProjectSettings() {
   delete form.dataset.remoteUrl;
   $("#ps-name").textContent = p.name;
   form.elements.name.value = p.name;
+  form.folder.value = p.folder || "";
+  $("#folder-options").replaceChildren(...shownFolders().map(name => el("option", { value: name })));
   $("#ps-where").textContent = p.location === "ssh"
     ? `SSH · ${sshHost(p)} · ${p.path}` : `Local · ${p.path}`;
   setProviderValue(form.provider, provider);
@@ -551,6 +997,7 @@ async function saveProjectSettings(ev) {
   if (!p) return;
   const fields = {
     name: form.elements.name.value,
+    folder: form.folder.value,
     provider: form.provider.value,
     plan_model: form.plan_model.dataset.value || "",
     code_model: form.code_model.dataset.value || "",
@@ -576,7 +1023,7 @@ async function saveProjectSettings(ev) {
     Object.assign(p, await api("PATCH", `/api/projects/${p.id}`, fields));
   });
   if (!saved) return;
-  renderProjects();
+  await loadLayout(); // the folder may have changed, which changes the folder list and order
   renderAutoFlow();
   if (currentProject() === p) {
     $("#p-name").textContent = p.name;
@@ -2555,6 +3002,7 @@ function init() {
   setupBatchBar();
   setupRemoteDialog();
   setupProjectSettings();
+  setupProjectSidebar();
   setupDrawer();
   setupGlobalKeys();
   setupActivityBar();

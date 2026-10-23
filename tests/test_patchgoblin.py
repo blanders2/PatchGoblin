@@ -1888,6 +1888,128 @@ class RemoteTests(AppTestCase):
         self.assertEqual(remote_script(comm.call_args.args[0][-1]), "cd /srv/p && env GIT_TERMINAL_PROMPT=0 git fetch")
 
 
+class ProjectFolderTests(AppTestCase):
+    def add(self, name):
+        res = self.client.post("/api/projects", headers=H, json={
+            "path": os.path.join(self.tmp.name, name), "provider": "claude", "git_tracking": False})
+        self.assertEqual(res.status_code, 201, res.get_json())
+        return res.get_json()["id"]
+
+    def layout(self):
+        return self.client.get("/api/projects").get_json()
+
+    def patch_folder(self, pid, folder):
+        return self.client.patch(f"/api/projects/{pid}", headers=H, json={"folder": folder})
+
+    def order(self, folders, projects):
+        return self.client.put("/api/projects/order", headers=H, json={"folders": folders, "projects": projects})
+
+    def test_folder_field_trims_and_clears(self):
+        a, b = self.add("a"), self.add("b")
+        self.assertEqual(self.layout()["folders"], [])
+        res = self.patch_folder(a, "  Work  Stuff ")
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertEqual(res.get_json()["folder"], "Work Stuff")
+        self.assertEqual(self.layout()["folders"], [{"name": "Work Stuff", "collapsed": False}])
+        self.patch_folder(b, "Work Stuff")
+        self.patch_folder(a, "")
+        self.assertEqual([f["name"] for f in self.layout()["folders"]], ["Work Stuff"])
+        self.patch_folder(b, "")
+        self.assertEqual(self.layout()["folders"], [])
+
+    def test_folder_field_is_validated(self):
+        a = self.add("a")
+        self.patch_folder(a, "Keep")
+        for bad in (5, None, "x" * 61, "a/b", "a\nb"):
+            res = self.client.patch(f"/api/projects/{a}", headers=H, json={"name": "Changed", "folder": bad})
+            self.assertEqual(res.status_code, 400, bad)
+        project = self.layout()["projects"][0]
+        self.assertEqual((project["folder"], project["name"]), ("Keep", "a"))
+        self.assertEqual(self.patch_folder(a, "x" * 60).status_code, 200)
+
+    def test_rename_keeps_position_and_collapsed_and_merges(self):
+        a, b, c = self.add("a"), self.add("b"), self.add("c")
+        self.patch_folder(a, "One")
+        self.patch_folder(b, "Two")
+        self.patch_folder(c, "Three")
+        self.client.post("/api/project-folders/collapse", headers=H, json={"names": ["Two"], "collapsed": True})
+        res = self.client.post("/api/project-folders/rename", headers=H, json={"from": "Two", "to": "Deux"})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.get_json()["folders"], [
+            {"name": "One", "collapsed": False}, {"name": "Deux", "collapsed": True},
+            {"name": "Three", "collapsed": False}])
+        # Onto an existing folder: the target keeps its place and flag; moved projects follow its own.
+        res = self.client.post("/api/project-folders/rename", headers=H, json={"from": "One", "to": "Three"})
+        data = res.get_json()
+        self.assertEqual(data["folders"], [{"name": "Deux", "collapsed": True}, {"name": "Three", "collapsed": False}])
+        self.assertEqual([p["id"] for p in data["projects"] if p.get("folder") == "Three"], [c, a])
+        res = self.client.post("/api/project-folders/rename", headers=H, json={"from": "Deux", "to": ""})
+        self.assertEqual([f["name"] for f in res.get_json()["folders"]], ["Three"])
+        self.assertEqual(next(p for p in res.get_json()["projects"] if p["id"] == b)["folder"], "")
+        res = self.client.post("/api/project-folders/rename", headers=H, json={"from": "Nope", "to": "X"})
+        self.assertEqual(res.status_code, 404)
+        res = self.client.post("/api/project-folders/rename", headers=H, json={"from": "Three", "to": "a/b"})
+        self.assertEqual(res.status_code, 400)
+
+    def test_collapse_persists_and_ignores_unknown(self):
+        a = self.add("a")
+        self.patch_folder(a, "Work")
+        res = self.client.post("/api/project-folders/collapse", headers=H,
+                               json={"names": ["Work", "Unknown"], "collapsed": True})
+        self.assertEqual(res.get_json()["folders"], [{"name": "Work", "collapsed": True}])
+        fresh = create_app(os.path.join(self.tmp.name, "data"), start_engine=False).test_client()
+        self.assertEqual(fresh.get("/api/projects").get_json()["folders"], [{"name": "Work", "collapsed": True}])
+        res = self.client.post("/api/project-folders/collapse", headers=H, json={"names": "Work", "collapsed": True})
+        self.assertEqual(res.status_code, 400)
+
+    def test_reorder_moves_projects_and_folders(self):
+        a, b, c, d = self.add("a"), self.add("b"), self.add("c"), self.add("d")
+        self.patch_folder(a, "Work")
+        self.patch_folder(b, "Work")
+        self.patch_folder(c, "Home")
+        res = self.order(["Home", "Work"], [
+            {"id": d, "folder": ""}, {"id": c, "folder": "Home"}, {"id": a, "folder": "Home"},
+            {"id": b, "folder": "Work"}])
+        self.assertEqual(res.status_code, 200, res.get_json())
+        data = self.layout()
+        self.assertEqual([p["id"] for p in data["projects"]], [d, c, a, b])
+        self.assertEqual([p["folder"] for p in data["projects"]], ["", "Home", "Home", "Work"])
+        self.assertEqual([f["name"] for f in data["folders"]], ["Home", "Work"])
+
+    def test_reorder_keeps_missing_and_ignores_unknown(self):
+        a, b, c = self.add("a"), self.add("b"), self.add("c")
+        res = self.order(["New"], [{"id": c, "folder": "New"}, {"id": "nope", "folder": "Ghost"}])
+        data = res.get_json()
+        self.assertEqual([p["id"] for p in data["projects"]], [c, a, b])
+        self.assertEqual(data["folders"], [{"name": "New", "collapsed": False}])
+
+    def test_reorder_validates(self):
+        a = self.add("a")
+        for payload in ({"folders": "x", "projects": []}, {"folders": [], "projects": {}},
+                        {"folders": [], "projects": [{"id": 5}]}, {"folders": ["a/b"], "projects": []},
+                        {"folders": [""], "projects": []},
+                        {"folders": [], "projects": [{"id": a, "folder": "x\ny"}]}):
+            res = self.client.put("/api/projects/order", headers=H, json=payload)
+            self.assertEqual(res.status_code, 400, payload)
+        self.assertNotIn("folder", self.layout()["projects"][0])
+
+    def test_deleting_last_project_removes_folder(self):
+        a, b = self.add("a"), self.add("b")
+        self.patch_folder(a, "Work")
+        self.assertEqual(self.client.delete(f"/api/projects/{a}", headers=H).status_code, 200)
+        data = self.layout()
+        self.assertEqual(data["folders"], [])
+        self.assertEqual([p["id"] for p in data["projects"]], [b])
+
+    def test_old_registry_without_folders_key(self):
+        path = os.path.join(self.tmp.name, "data", "projects.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"projects": [{"id": "p1", "name": "x", "location": "local", "path": self.tmp.name,
+                                     "folder": "Old"}]}, fh)
+        self.assertEqual(self.layout()["folders"], [{"name": "Old", "collapsed": False}])
+
+
 class ChatTests(AppTestCase):
     def wait_chat(self, pid, timeout=30):
         deadline = time.time() + timeout

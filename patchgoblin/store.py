@@ -251,9 +251,79 @@ class Registry:
             for p in data["projects"]:
                 if p["id"] == pid:
                     p.update(fields)
+                    _normalize_folders(data)
                     self.file.save(data)
                     return p
             return None
+
+    def layout(self) -> dict:
+        """The projects in sidebar order and the folders they're grouped into (in order)."""
+        data = self.file.load()
+        _normalize_folders(data)
+        return {"projects": data["projects"], "folders": data["folders"]}
+
+    def rename_folder(self, old: str, new: str) -> bool:
+        """Move folder ``old``'s projects into ``new`` ("" ungroups them). Renaming onto an existing
+        folder merges into it: the target keeps its place and collapsed flag, and ``old``'s projects
+        follow the target's own. False if no project is in ``old``."""
+        with self.file.lock:
+            data = self.file.load()
+            _normalize_folders(data)
+            moved = [p for p in data["projects"] if p.get("folder") == old]
+            if not moved:
+                return False
+            if old == new:
+                return True
+            if new and any(f["name"] == new for f in data["folders"]):
+                rest = [p for p in data["projects"] if p.get("folder") != old]
+                last = max((i for i, p in enumerate(rest) if p.get("folder") == new), default=len(rest) - 1)
+                data["projects"] = [*rest[:last + 1], *moved, *rest[last + 1:]]
+                data["folders"] = [f for f in data["folders"] if f["name"] != old]
+            else:
+                for f in data["folders"]:
+                    if f["name"] == old:
+                        f["name"] = new
+            for p in moved:
+                p["folder"] = new
+            _normalize_folders(data)
+            self.file.save(data)
+            return True
+
+    def set_collapsed(self, names, collapsed: bool) -> dict:
+        """Collapse or expand the named folders (unknown names are ignored)."""
+        with self.file.lock:
+            data = self.file.load()
+            _normalize_folders(data)
+            names = set(names)
+            for f in data["folders"]:
+                if f["name"] in names:
+                    f["collapsed"] = bool(collapsed)
+            self.file.save(data)
+            return {"projects": data["projects"], "folders": data["folders"]}
+
+    def reorder(self, folders: list[str], projects: list[dict]) -> dict:
+        """Set the folder order and each listed project's place and folder (``[{id, folder}]``).
+        Unknown ids are ignored; projects missing from ``projects`` keep their order at the end."""
+        with self.file.lock:
+            data = self.file.load()
+            _normalize_folders(data)
+            by_id = {p["id"]: p for p in data["projects"]}
+            ordered, seen = [], set()
+            for item in projects:
+                p = by_id.get(item["id"])
+                if p is None or p["id"] in seen:
+                    continue
+                p["folder"] = item["folder"]
+                ordered.append(p)
+                seen.add(p["id"])
+            data["projects"] = ordered + [p for p in data["projects"] if p["id"] not in seen]
+            known = {f["name"]: f for f in data["folders"]}
+            listed = list(dict.fromkeys(folders))
+            data["folders"] = ([known.get(n, {"name": n, "collapsed": False}) for n in listed]
+                               + [f for f in data["folders"] if f["name"] not in listed])
+            _normalize_folders(data)
+            self.file.save(data)
+            return {"projects": data["projects"], "folders": data["folders"]}
 
     def rename_provider(self, old: str, new: str) -> None:
         """Point projects using provider ``old`` at ``new`` (after an endpoint id rename)."""
@@ -290,8 +360,25 @@ class Registry:
         with self.file.lock:
             data = self.file.load()
             kept = [p for p in data["projects"] if p["id"] != pid]
-            self.file.save({**data, "projects": kept})
+            out = {**data, "projects": kept}
+            _normalize_folders(out)
+            self.file.save(out)
             return len(kept) != len(data["projects"])
+
+
+def _normalize_folders(data: dict) -> None:
+    """Make ``data["folders"]`` list exactly the folders projects use: drop unused ones and append
+    missing ones (expanded). Older files have no ``folders`` key; it's derived from the projects."""
+    used = list(dict.fromkeys(p.get("folder") for p in data.get("projects", [])
+                              if isinstance(p.get("folder"), str) and p.get("folder")))
+    folders, seen = [], set()
+    for f in data.get("folders") if isinstance(data.get("folders"), list) else []:
+        name = f.get("name") if isinstance(f, dict) else None
+        if name in used and name not in seen:
+            folders.append({"name": name, "collapsed": f.get("collapsed") is True})
+            seen.add(name)
+    folders += [{"name": n, "collapsed": False} for n in used if n not in seen]
+    data["folders"] = folders
 
 
 def rename_reserved_endpoints(endpoints: list) -> tuple[list, dict]:
